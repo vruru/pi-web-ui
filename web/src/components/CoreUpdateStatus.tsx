@@ -98,19 +98,9 @@ export function CoreUpdateStatus({
 			? t("coreUpdateInstalling")
 			: phase === "restarting"
 				? t("coreUpdateRestarting")
-				: phase === "succeeded" && !state?.updateAvailable
-					? connected
-						? t("coreUpdateSucceeded")
-						: t("coreUpdateReconnecting")
-					: phase === "failed"
-						? t("coreUpdateFailed")
-						: state?.checking
-							? t("coreUpdateChecking")
-							: state?.updateAvailable
-								? t("coreUpdateAvailable")
-								: state?.latestVersion
-									? t("coreUpdateCurrent")
-									: t("coreUpdateNotChecked");
+				: !connected
+					? t("coreUpdateReconnecting")
+					: null;
 	const check = () => appSend({ type: "check_core_update", force: true });
 	return (
 		<>
@@ -156,32 +146,38 @@ export function CoreUpdateStatus({
 						</header>
 						<dl>
 							<div>
-								<dt>{t("coreUpdateRunningVersion")}</dt>
+								<dt>{t("coreUpdateRunningVersion")}:</dt>
 								<dd>{state?.currentVersion ?? "—"}</dd>
 							</div>
 							<div>
-								<dt>{t("coreUpdateLatestVersion")}</dt>
+								<dt>{t("coreUpdateLatestVersion")}:</dt>
 								<dd>{state?.latestVersion ?? "—"}</dd>
 							</div>
 						</dl>
-						<p className={`core-update-progress ${phase === "failed" ? "error" : ""}`} role="status">
-							{progress}
-						</p>
+						{progress && (
+							<p className="core-update-progress" role="status">
+								{progress}
+							</p>
+						)}
 						{state?.job?.error && <p className="core-update-error">{state.job.error}</p>}
 						{state?.checkError && (
 							<p className="core-update-error">
 								{t("coreUpdateCheckFailed")}: {state.checkError}
 							</p>
 						)}
-						{!connected && <p className="core-update-help">{t("coreUpdateReconnecting")}</p>}
-						{state?.busyReason && <p className="core-update-help">{state.busyReason}</p>}
-						{state?.unsupportedReason && <p className="core-update-help">{state.unsupportedReason}</p>}
-						<p className="core-update-help">{t("coreUpdateHint")}</p>
-						{state?.checkedAt && (
-							<p className="core-update-checked">
-								{t("coreUpdateCheckedAt")}: {new Date(state.checkedAt).toLocaleString()}
-							</p>
-						)}
+						<p className="core-update-checked">
+							{t("coreUpdateCheckedAt")}:{" "}
+							{state?.checkedAt
+								? new Date(state.checkedAt).toLocaleString(undefined, {
+										year: "numeric",
+										month: "numeric",
+										day: "numeric",
+										hour: "2-digit",
+										minute: "2-digit",
+										hour12: false,
+									})
+								: "—"}
+						</p>
 						<div className="core-update-actions">
 							<button type="button" disabled={!connected || state?.checking || running || requested} onClick={check}>
 								<FiRefreshCw />
@@ -190,6 +186,7 @@ export function CoreUpdateStatus({
 							<button
 								type="button"
 								className="primary"
+								title={state?.busyReason ?? state?.unsupportedReason}
 								disabled={
 									!connected ||
 									!state?.canUpdate ||

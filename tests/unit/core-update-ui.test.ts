@@ -107,7 +107,7 @@ describe("core updater footer", () => {
 		});
 		expect(document.querySelector(".core-update-progress")?.textContent).toBe("coreUpdateReconnecting");
 		render(true);
-		expect(document.querySelector(".core-update-progress")?.textContent).toBe("coreUpdateSucceeded");
+		expect(document.querySelector(".core-update-progress")).toBeNull();
 		expect(document.querySelector(".status-conn-label")?.textContent).toBe("connected");
 	});
 	it("keeps failures actionable and blocks unsupported, busy and disconnected installs", () => {
