@@ -18,6 +18,8 @@
 
 ### Fixed
 
+- 已完成子代理保留结果但自动释放并发名额；初始化也预占名额，失败归还。子代理默认跟随派发者模型，忽略模板和旧的子代理默认模型，只有用户明确要求时才允许工具指定其他模型；模型不可用时不再静默换模型。
+
 - 插件更新按钮现在会先解除 Pi 配置中旧版本的固定，再安装最新版；重新打开更新面板时强制刷新版本，修复终端显示“Updated”但实际仍停留在旧版本的问题。
 
 - **工具看门狗强制重置不再留下悬空 toolCall（#280）** — 流式卡死 → 看门狗 abort 无效 → `forceResetConversation` 从磁盘重建时，内存里未落盘的工具结果蒸发，文件尾留下「有调用、无结果」的悬空 toolCall；重建后继续 prompt 会把非法转录链喂给 provider（请求有发起迹象但零落盘、零报错）。现三处修复：① 重建前向**本次对话自己的会话文件**补一条合成 toolResult（append-only，历史字节不动），重建后弹提示建议重执行工具；② 重建改回**同文件**（`SessionManager.open(ownFile)`），不再按 cwd 取最近（多会话会接错文件）；③ 发送前/打开历史会话时复查转录尾，残留悬空即自动补合成结果，补不上则响亮拒绝发送（不再静默黑洞）。
@@ -46,9 +48,9 @@
 <!-- auto-i18n:start -->
 ### i18n
 
-- 前端新增 key（25）：`coreUpdateTitle`、`coreUpdateRunningVersion`、`coreUpdateLatestVersion`、`coreUpdateUpdating`、`coreUpdateStarting`、`coreUpdateInstalling`、`coreUpdateRestarting`、`coreUpdateSucceeded`、`coreUpdateReconnecting`、`coreUpdateFailed`、`coreUpdateChecking`、`coreUpdateAvailable`、`coreUpdateCurrent`、`coreUpdateNotChecked`、`coreUpdateCheckFailed`、`coreUpdateHint`、`coreUpdateCheckedAt`、`coreUpdateCheck`、`coreUpdateInstall`、`generationRate`、`generationRateTip`、`uiZoomTitle`、`uiZoomHint`、`uiZoomCurrent`、`elsewhereActions`
-- 前端中文变更（1）：`tps`
-- 前端英文变更（1）：`tps`
+- 前端新增 key（25）：`coreUpdateTitle`、`coreUpdateRunningVersion`、`coreUpdateLatestVersion`、`coreUpdateUpdating`、`coreUpdateStarting`、`coreUpdateInstalling`、`coreUpdateRestarting`、`coreUpdateSucceeded`、`coreUpdateReconnecting`、`coreUpdateFailed`、`coreUpdateChecking`、`coreUpdateAvailable`、`coreUpdateCurrent`、`coreUpdateNotChecked`、`coreUpdateCheckFailed`、`coreUpdateHint`、`coreUpdateCheckedAt`、`coreUpdateCheck`、`coreUpdateInstall`、`generationRate`、`generationRateTip`、`elsewhereActions`、`uiZoomTitle`、`uiZoomHint`、`uiZoomCurrent`
+- 前端中文变更（2）：`tps`、`subagentDefaultModelHint`
+- 前端英文变更（2）：`tps`、`subagentDefaultModelHint`
 <!-- auto-i18n:end -->
 
 ## [0.94.1] — 2026-09-22

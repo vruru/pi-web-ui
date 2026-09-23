@@ -211,7 +211,7 @@ describe("subagents tools", () => {
 		expect(text.text).toContain("subagent_spawn");
 	});
 
-	it("subagent_templates 报出模型与思考强度（空值说「跟随主对话」）", async () => {
+	it("subagent_templates 忽略旧模板模型，保留思考强度说明", async () => {
 		const host = makeHostSpies();
 		(host.listTemplates as ReturnType<typeof vi.fn>).mockReturnValue([
 			{ name: "thinker", description: "审查", model: "anthropic/claude-opus-4-5", thinkingLevel: "high" },
@@ -228,9 +228,9 @@ describe("subagents tools", () => {
 			)) as { content: { text: string }[] }
 		).content[0].text;
 		expect(zhText).toContain("思考强度：high");
-		expect(zhText).toContain("模型：anthropic/claude-opus-4-5");
+		expect(zhText).not.toContain("anthropic/claude-opus-4-5");
 		// 未配置的两个维度都要说清是「跟随主对话」，否则 AI 会以为子代理没有模型/强度
-		expect(zhText).toContain("跟随主对话模型，跟随主对话思考强度");
+		expect(zhText).toContain("跟随派发者当前模型，跟随主对话思考强度");
 
 		const en = makeSubagentTools(host, () => "en");
 		const enText = (

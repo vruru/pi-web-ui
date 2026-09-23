@@ -3515,20 +3515,9 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 									</button>
 								</div>
 
-								{/* ---- 默认模型：全部子代理的兜底（模板/显式 model 参数优先） ---------- */}
+								{/* ---- 子代理默认继承当前主会话模型 ---------- */}
 								<FieldRow label={t("subagentDefaultModelLabel")} tip={t("subagentDefaultModelHint")}>
-									<select
-										className="set-select"
-										value={settings.subagentDefaultModel ?? ""}
-										onChange={(e) => setPartial({ subagentDefaultModel: e.target.value || null })}
-									>
-										<option value="">{t("subagentFollowMain")}</option>
-										{settings.subagentModels.map((m) => (
-											<option key={`${m.provider}/${m.id}`} value={`${m.provider}/${m.id}`}>
-												{m.label}
-											</option>
-										))}
-									</select>
+									<span className="set-hint">{t("subagentFollowMain")}</span>
 								</FieldRow>
 								{settings.subagentModels.length === 0 && <p className="set-hint">{t("subagentNoModels")}</p>}
 
@@ -3586,18 +3575,7 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 												</div>
 												<div className="set-mode-row">
 													<label className="set-field-label">{t("tplModelLabel")}</label>
-													<select
-														className="set-select"
-														value={tplDraft.model ?? ""}
-														onChange={(e) => setTplDraft({ ...tplDraft, model: e.target.value })}
-													>
-														<option value="">{t("subagentFollowMain")}</option>
-														{settings.subagentModels.map((m) => (
-															<option key={`${m.provider}/${m.id}`} value={`${m.provider}/${m.id}`}>
-																{m.label}
-															</option>
-														))}
-													</select>
+													<span className="set-hint">{t("subagentFollowMain")}</span>
 												</div>
 												<div className="set-mode-row">
 													<label className="set-field-label">

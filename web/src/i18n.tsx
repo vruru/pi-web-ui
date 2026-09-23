@@ -1421,8 +1421,7 @@ export const zh = {
 	subagentTemplateDisable: "停用",
 	subagentDefaultModelLabel: "子代理默认模型",
 	subagentFollowMain: "跟随主对话当前模型",
-	subagentDefaultModelHint:
-		"所有子代理的兜底模型（模板里指定的模型和 subagent_spawn 的 model 参数优先级更高）；不改主对话模型。",
+	subagentDefaultModelHint: "默认继承派发者当前模型，未设置时使用全局默认；只有用户明确指定时才使用其他模型。",
 	subagentNoModels: "暂无可用的模型（需要先配置服务商 API Key）——子代理将跟随主对话模型。",
 	tplNamePlaceholder: "模板名（AI 用 subagent_spawn 的 template 参数引用）…",
 	tplDescriptionPlaceholder: "简介（AI 据此判断适用场景）…",
@@ -3038,7 +3037,7 @@ const en: Record<keyof typeof zh, string> = {
 	subagentDefaultModelLabel: "Default subagent model",
 	subagentFollowMain: "Follow the main conversation's current model",
 	subagentDefaultModelHint:
-		"Fallback model for all subagents (a template's own model and the subagent_spawn model param take priority); does not change the main conversation's model.",
+		"Inherit the spawning session model, or the global default if unset. Other models require an explicit user request.",
 	subagentNoModels:
 		"No usable models yet (configure a provider API key first) — subagents will follow the main conversation's model.",
 	subagentTemplateOffHint:
