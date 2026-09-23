@@ -15,6 +15,9 @@ import {
 	pruneBackups,
 	resolveRemoteSha,
 	checkPluginUpdates,
+	createPluginUpdateChecker,
+	createTreeResolver,
+	parseUpdateSource,
 	execGit,
 	BACKUP_KEEP,
 	type Exec,
@@ -81,9 +84,9 @@ describe("备份 / 回滚", () => {
 /** fake exec：像 git ls-remote 一样按 remote 返回 sha。 */
 function fakeExec(shaByRemote: Record<string, string>): Exec {
 	return async (_cmd, args) => {
-		const remote = args.find((a) => a && a !== "ls-remote" && a !== "HEAD" && !a.startsWith("-"));
+		const remote = args[1];
 		if (remote && shaByRemote[remote]) {
-			return { ok: true, stdout: `${shaByRemote[remote]}\tHEAD\n`, stderr: "" };
+			return { ok: true, stdout: `${shaByRemote[remote]}\t${args[2]}\n`, stderr: "" };
 		}
 		return { ok: false, stdout: "", stderr: `fatal: not a git repository '${remote}'` };
 	};
@@ -122,7 +125,7 @@ describe("resolveRemoteSha", () => {
 });
 
 describe("checkPluginUpdates", () => {
-	it("sha 不同 → updatable；相同 → 最新；无 sha → 保守 updatable+error", async () => {
+	it("sha 不同 → updatable；相同 → 最新；无 sha → 无法确定更新", async () => {
 		installPlugin("a", "1", "x/a");
 		writeFileSync(join(dataDir, "plugins", "a", ".pi-git-sha"), "111111111111");
 		installPlugin("b", "1", "x/b");
@@ -139,7 +142,7 @@ describe("checkPluginUpdates", () => {
 			.filter((r) => r.updatable)
 			.map((r) => r.id)
 			.sort();
-		expect(upd).toEqual(["a", "c"]);
+		expect(upd).toEqual(["a"]);
 		expect(res.find((r) => r.id === "c")?.localSha).toBeNull();
 		expect(res.find((r) => r.id === "a")?.version).toBe("1");
 	});
@@ -155,5 +158,97 @@ describe("checkPluginUpdates", () => {
 
 	it("真实 git 命令可用性（execGit 是函数）", () => {
 		expect(typeof execGit).toBe("function");
+	});
+});
+
+describe("verified marketplace updates", () => {
+	it("resolves only the requested branch or peeled tag", async () => {
+		const sha = "a".repeat(40);
+		const calls: string[][] = [];
+		const exec: Exec = async (_, args) => {
+			calls.push(args);
+			return { ok: true, stdout: `${"b".repeat(40)}\tHEAD\n${sha}\trefs/tags/v1^{}\n`, stderr: "" };
+		};
+		expect(await resolveRemoteSha("o/r#v1", exec)).toBe(sha.slice(0, 12));
+		expect(calls[0].slice(2)).toEqual(["refs/heads/v1", "refs/tags/v1", "refs/tags/v1^{}"]);
+		expect(await resolveRemoteSha("o/r#missing", exec)).toBeNull();
+		expect(parseUpdateSource("https://github.com/o/r/tree/main/plugins/a#release/test")).toEqual({
+			repo: "o/r",
+			ref: "release/test",
+			subpath: "plugins/a",
+		});
+	});
+	it("ignores unrelated monorepo commits and shows changes only in the installed directory", async () => {
+		const d = installPlugin("p", "1", "o/r/plugins/p#dev");
+		writeFileSync(join(d, ".pi-git-sha"), "1".repeat(12));
+		const exec = fakeExec({ "https://github.com/o/r.git": "2".repeat(40) });
+		expect((await checkPluginUpdates(dataDir, exec, undefined, async () => "same"))[0].updatable).toBe(false);
+		expect((await checkPluginUpdates(dataDir, exec, undefined, async (_, rev) => rev))[0].updatable).toBe(true);
+		expect((await checkPluginUpdates(dataDir, exec, undefined, async () => null))[0].updatable).toBe(false);
+		expect(
+			(
+				await checkPluginUpdates(dataDir, exec, undefined, async () => {
+					throw Error("offline");
+				})
+			)[0].updatable,
+		).toBe(false);
+	});
+	it("full and abbreviated equal commit ids do not indicate an update", async () => {
+		const d = installPlugin("p", "1", "o/r");
+		writeFileSync(join(d, ".pi-git-sha"), "a".repeat(40));
+		expect(
+			(await checkPluginUpdates(dataDir, fakeExec({ "https://github.com/o/r.git": "a".repeat(40) })))[0].updatable,
+		).toBe(false);
+	});
+	it("shares tree requests and fails closed on truncated or unavailable trees", async () => {
+		let requests = 0;
+		const fetcher = (async () => {
+			requests++;
+			return new Response(
+				JSON.stringify({
+					tree: [
+						{ path: "plugins/a", type: "tree", sha: "a".repeat(40) },
+						{ path: "plugins/b", type: "tree", sha: "b".repeat(40) },
+					],
+				}),
+			);
+		}) as typeof fetch;
+		const resolve = createTreeResolver(fetcher);
+		expect(await Promise.all([resolve("o/r", "sha", "plugins/a"), resolve("o/r", "sha", "plugins/b")])).toEqual([
+			"a".repeat(40),
+			"b".repeat(40),
+		]);
+		expect(requests).toBe(1);
+		const truncated = createTreeResolver(
+			(async () => new Response(JSON.stringify({ truncated: true, tree: [] }))) as typeof fetch,
+		);
+		expect(await truncated("o/r", "sha", "plugins/a")).toBeNull();
+	});
+	it("coalesces concurrent checks, expires and invalidates on install/uninstall", async () => {
+		const d = installPlugin("p", "1", "o/r");
+		let calls = 0,
+			now = 0;
+		const check = createPluginUpdateChecker(
+			dataDir,
+			async () => {
+				calls++;
+				return [];
+			},
+			100,
+			() => now,
+		);
+		await Promise.all([check(), check()]);
+		expect(calls).toBe(1);
+		await check();
+		expect(calls).toBe(1);
+		now = 101;
+		await check();
+		expect(calls).toBe(2);
+		writeFileSync(join(d, ".pi-git-sha"), "a".repeat(12));
+		await check();
+		expect(calls).toBe(3);
+		rmSync(d, { recursive: true });
+		await check();
+		expect(calls).toBe(4);
 	});
 });

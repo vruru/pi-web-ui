@@ -1883,7 +1883,7 @@ async function installOnePlugin({ rawSpec, name, force, build, noBuild, dataDir 
 			/* 尽力而为：没有来源信息只是不显示更新按钮 */
 		}
 		// 记录本次安装的远端 sha（git ls-remote HEAD，离线也支持本地 git 源）：
-		// 供 `pi-web-ui plugins --check-updates` 对比更新。失败静默（无 sha = 保守可更新）。
+		// 供 `pi-web-ui plugins --check-updates` 对比更新。失败静默（无 sha = 无法确认更新）。
 		try {
 			const sha = await resolveRemoteSha(rawSpec);
 			if (sha) writeFileSync(join(target, ".pi-git-sha"), sha + "\n");

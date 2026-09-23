@@ -246,6 +246,8 @@ npm run desktop:dist # 本地打桌面安装包 → release/（gitignore；CI �
 
 桌面聊天左右面板使用 `web/src/panel-widths.ts` 的百分比宽度（默认各 20%，拖拽与双击复位仍可用），不随全局缩放额外挤占中间区域；输入区高度按视口限制。空白模板区不参与消息贴底，首条消息出现后恢复跟随。
 
+界面插件更新提示由 `/api/plugin-updates` 只读检查提供，前端仅在 `updatable === true` 时显示更新按钮；检查缓存按安装来源/SHA/manifest 指纹失效，子目录插件比较目录 tree SHA，禁止用同仓无关提交误报。
+
 ## 6. 发布流程
 
 > 详细文档见 `docs/release.md`

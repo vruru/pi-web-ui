@@ -1,7 +1,7 @@
 /**
  * 插件更新辅助（备份/回滚 + 远端 sha 对比）——纯逻辑，供 CLI（bin/pi-web-ui.mjs）
- * 与单测共用。零网络依赖：远端 sha 经注入的 exec 获取（生产 = git ls-remote；
- * 测试 = fake exec 或本地 git 仓库路径，git ls-remote 支持本地仓库，完全离线）。
+ * 与单测共用。远端提交通过 git ls-remote 获取；GitHub 子目录通过 tree SHA
+ * 排除同仓无关改动。exec / tree resolver 可注入，单测完全离线。
  *
  * 布局：
  *   <dataDir>/plugins/<id>/           安装本体（含 .pi-source.json + .pi-git-sha）
@@ -109,38 +109,78 @@ export function pruneBackups(dataDir: string, id: string, keep = BACKUP_KEEP): v
 	}
 }
 
-/**
- * 解析一个安装源并取远端 HEAD sha（前 12 位）。
- *  - 本地 git 仓库路径 / file:// → git ls-remote <path> HEAD（离线）
- *  - GitHub owner/repo、URL → git ls-remote https://github.com/o/r.git HEAD
- *  - 无法识别 / git 不在 / 网络失败 → null（调用方标记「无法检查」）
- */
+/** Match the installer's GitHub source syntax, including pinned refs and subdirectories. */
+export function parseUpdateSource(spec: string): { repo: string; ref: string; subpath: string } | null {
+	let clean = spec.trim();
+	const hash = clean.indexOf("#");
+	let ref = hash >= 0 ? clean.slice(hash + 1).trim() : "";
+	if (hash >= 0) clean = clean.slice(0, hash);
+	clean = clean.replace(/^git@github\.com:/i, "").replace(/^https?:\/\/(?:www\.)?github\.com\//i, "");
+	const parts = clean.split("/").filter(Boolean);
+	if (parts.length < 2 || !parts.every((p) => /^[\w.~-]+$/.test(p) && p !== "." && p !== "..")) return null;
+	const repo = `${parts[0]}/${parts[1].replace(/\.git$/, "")}`;
+	let subpath: string;
+	if (parts[2] === "tree" || parts[2] === "blob") {
+		ref ||= parts[3] ?? "";
+		subpath = parts.slice(4).join("/");
+	} else subpath = parts.slice(2).join("/");
+	return { repo, ref: ref || "HEAD", subpath };
+}
+
+/** Resolve the installed source's branch/tag, never silently substitute default HEAD. */
 export async function resolveRemoteSha(spec: string, exec: Exec = execGit): Promise<string | null> {
-	const clean = String(spec ?? "").trim();
-	if (!clean) return null;
-	let remote: string | null = null;
-	if (existsSync(clean)) {
-		remote = clean; // 本地 git 仓库路径
-	} else if (/^file:\/\//i.test(clean)) {
-		remote = clean.slice("file://".length);
-	} else {
-		// GitHub 形态（owner/repo、URL、git@）
-		let s = clean.replace(/^git@([^:]+):/, "");
-		const m = s.match(/^https?:\/\/(?:www\.)?github\.com\/(.+?)(?:\.git)?\/?$/i);
-		if (m) [, s] = m;
-		s = s.split("#")[0]; // 去掉 #分支
-		const segs = s.split("/").filter(Boolean);
-		if (segs.length < 2) return null;
-		// 只取 owner/repo（/tree/<ref>/<subpath> 等后缀不影响远端 sha）
-		const repo = segs[0] + "/" + segs[1].replace(/\.git$/, "");
-		remote = `https://github.com/${repo}.git`;
-	}
-	if (!remote) return null;
-	const res = await exec("git", ["ls-remote", remote, "HEAD"]);
+	const clean = spec.trim();
+	const source = parseUpdateSource(clean);
+	const local = existsSync(clean) ? clean : clean.startsWith("file://") ? clean.slice(7) : null;
+	if (!local && !source) return null;
+	const ref = local ? "HEAD" : source!.ref;
+	if (/^[0-9a-f]{40,64}$/i.test(ref)) return ref.toLowerCase().slice(0, 12);
+	const targets = ref === "HEAD" ? ["HEAD"] : [`refs/heads/${ref}`, `refs/tags/${ref}`, `refs/tags/${ref}^{}`];
+	const res = await exec("git", ["ls-remote", local ?? `https://github.com/${source!.repo}.git`, ...targets]);
 	if (!res.ok) return null;
-	// 行格式: <sha>\tHEAD（可能多行——取第一行）
-	const sha = res.stdout.match(/^([0-9a-f]{40,64})\s+HEAD/m)?.[1] ?? null;
-	return sha ? sha.slice(0, 12) : null;
+	const rows = res.stdout
+		.trim()
+		.split("\n")
+		.map((line) => line.split(/\s+/));
+	const row = rows.find((r) => r[1] === `refs/tags/${ref}^{}`) ?? rows.find((r) => targets.includes(r[1]));
+	const sha = row?.[0];
+	return sha && /^[0-9a-f]{40,64}$/i.test(sha) ? sha.toLowerCase().slice(0, 12) : null;
+}
+
+export type ResolvePluginTree = (repo: string, revision: string, subpath: string) => Promise<string | null>;
+
+/** The directory tree excludes unrelated commits elsewhere in a monorepo. */
+export function createTreeResolver(fetcher: typeof fetch = fetch): ResolvePluginTree {
+	const requests = new Map<string, Promise<{ path: string; type: string; sha: string }[] | null>>();
+	return async (repo, revision, subpath) => {
+		const key = `${repo}@${revision}`;
+		let request = requests.get(key);
+		if (!request) {
+			request = (async () => {
+				try {
+					const response = await fetcher(
+						`https://api.github.com/repos/${repo}/git/trees/${encodeURIComponent(revision)}?recursive=1`,
+						{
+							headers: { Accept: "application/vnd.github+json", "User-Agent": "pi-web-ui-plugin-update" },
+							signal: AbortSignal.timeout(10_000),
+						},
+					);
+					if (!response.ok) return null;
+					const body = (await response.json()) as {
+						truncated?: boolean;
+						tree?: { path: string; type: string; sha: string }[];
+					};
+					return body.truncated || !Array.isArray(body.tree) ? null : body.tree;
+				} catch {
+					return null;
+				}
+			})();
+			requests.set(key, request);
+		}
+		const tree = await request;
+		const entry = tree?.find((item) => item.path === subpath && item.type === "tree");
+		return entry && /^[0-9a-f]{40,64}$/i.test(entry.sha) ? entry.sha : null;
+	};
 }
 
 export interface PluginUpdateInfo {
@@ -150,9 +190,9 @@ export interface PluginUpdateInfo {
 	source: string;
 	/** 本地安装时记录的 sha（.pi-git-sha）。 */
 	localSha: string | null;
-	/** 远端 HEAD sha（null = 无法检查：非 git 源 / git 不可用 / 网络失败）。 */
+	/** 安装源指定分支/tag 的远端 sha（null = 无法检查）。 */
 	remoteSha: string | null;
-	/** localSha 与 remoteSha 都存在且不同。 */
+	/** 已确认安装源有改动；子目录插件须同时确认目录 tree 不同。 */
 	updatable: boolean;
 	error?: string;
 }
@@ -163,6 +203,7 @@ export async function checkPluginUpdates(
 	exec: Exec = execGit,
 	/** error 字段文案语言（默认英文）；调用方可传 () => getLang() 实现跟随。 */
 	lang?: () => ServerLang,
+	resolveTree: ResolvePluginTree = createTreeResolver(),
 ): Promise<PluginUpdateInfo[]> {
 	const l = lang?.() ?? "en";
 	const pluginsDir = join(dataDir, "plugins");
@@ -173,6 +214,16 @@ export async function checkPluginUpdates(
 		return [];
 	}
 	const out: PluginUpdateInfo[] = [];
+	const remoteChecks = new Map<string, ReturnType<Exec>>();
+	const sharedExec: Exec = (cmd, args) => {
+		const key = JSON.stringify([cmd, args]);
+		let pending = remoteChecks.get(key);
+		if (!pending) {
+			pending = exec(cmd, args);
+			remoteChecks.set(key, pending);
+		}
+		return pending;
+	};
 	for (const n of names) {
 		if (!PLUGIN_ID_RE.test(n)) continue;
 		const dir = join(pluginsDir, n);
@@ -184,12 +235,12 @@ export async function checkPluginUpdates(
 			try {
 				localSha = readFileSync(join(dir, ".pi-git-sha"), "utf8").trim() || null;
 			} catch {
-				localSha = null; // 无 sha 记录 → 保守认为可更新（不知道装了哪个版本）
+				localSha = null; // Unknown installation revision cannot establish an update.
 			}
 			let remoteSha: string | null = null;
 			let error: string | undefined;
 			try {
-				remoteSha = await resolveRemoteSha(source, exec);
+				if (localSha && /^[0-9a-f]{12,64}$/i.test(localSha)) remoteSha = await resolveRemoteSha(source, sharedExec);
 			} catch (err) {
 				error = err instanceof Error ? err.message : String(err);
 				remoteSha = null;
@@ -213,7 +264,21 @@ export async function checkPluginUpdates(
 			} catch {
 				/* 坏 manifest：仍报告 */
 			}
-			const updatable = !!remoteSha && (!localSha || localSha !== remoteSha);
+			let updatable = !!localSha && !!remoteSha && !localSha.startsWith(remoteSha) && !remoteSha.startsWith(localSha);
+			const parsed = parseUpdateSource(source);
+			if (updatable && parsed?.subpath) {
+				try {
+					const [localTree, remoteTree] = await Promise.all([
+						resolveTree(parsed.repo, localSha!, parsed.subpath),
+						resolveTree(parsed.repo, remoteSha!, parsed.subpath),
+					]);
+					updatable = !!localTree && !!remoteTree && localTree !== remoteTree;
+					if (!localTree || !remoteTree) error = "Cannot verify plugin directory revision";
+				} catch {
+					updatable = false;
+					error = "Cannot verify plugin directory revision";
+				}
+			}
 			out.push({
 				id: n,
 				name,
@@ -229,6 +294,51 @@ export async function checkPluginUpdates(
 		}
 	}
 	return out;
+}
+
+/** Share concurrent checks and expire after five minutes. Installation/rollback changes
+ * the fingerprint immediately, so an old result cannot survive a plugin update. */
+export function createPluginUpdateChecker(
+	dataDir: string,
+	check: () => Promise<PluginUpdateInfo[]> = () => checkPluginUpdates(dataDir),
+	ttlMs = 5 * 60_000,
+	now: () => number = Date.now,
+): () => Promise<PluginUpdateInfo[]> {
+	let cached: { key: string; expires: number; result: Promise<PluginUpdateInfo[]> } | undefined;
+	return () => {
+		let key = "";
+		try {
+			key = readdirSync(join(dataDir, "plugins"))
+				.sort()
+				.filter((id) => PLUGIN_ID_RE.test(id))
+				.map((id) => [
+					id,
+					...[".pi-source.json", ".pi-git-sha", "manifest.json"].map((file) => {
+						try {
+							return readFileSync(join(dataDir, "plugins", id, file), "utf8");
+						} catch {
+							return "";
+						}
+					}),
+				])
+				.map((entry) => JSON.stringify(entry))
+				.join("\n");
+		} catch {
+			/* no plugins */
+		}
+		if (cached?.key === key && cached.expires > now()) return cached.result;
+		const entry = { key, expires: Infinity, result: Promise.resolve().then(check) };
+		cached = entry;
+		entry.result.then(
+			() => {
+				entry.expires = now() + ttlMs;
+			},
+			() => {
+				if (cached === entry) cached = undefined;
+			},
+		);
+		return entry.result;
+	};
 }
 
 function stamp(): string {

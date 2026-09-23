@@ -1,3 +1,4 @@
+import { usePluginUpdates } from "../use-plugin-updates";
 import { Fragment, useEffect, useRef, useState } from "react";
 import {
 	FiAlertTriangle,
@@ -808,6 +809,11 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 
 	const disabledPlugins = new Set(settings.disabledPlugins ?? []);
 	const installedPluginIds = new Set(chat.plugins.map((p) => p.id));
+	const updateRevision = JSON.stringify([
+		chat.plugins.map((p) => [p.id, p.source]),
+		Object.values(chat.pluginJobs ?? {}).map((j) => [j.jobId, j.phase === "done", j.ok]),
+	]);
+	const pluginUpdates = usePluginUpdates(tab === "plugins" && !managed, updateRevision);
 	const togglePlugin = (p: UiPluginInfo) => {
 		const next = new Set(disabledPlugins);
 		if (next.has(p.id)) next.delete(p.id);
@@ -2895,15 +2901,17 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 													<div className="set-row-actions">
 														{installed ? (
 															<>
-																<button
-																	type="button"
-																	className="set-uninstall"
-																	title={t("pluginUpdateHint")}
-																	onClick={() => runUiPluginUpdate(e.id, e.source)}
-																>
-																	<FiRefreshCw />
-																	{t("pluginUpdate")}
-																</button>
+																{pluginUpdates.has(e.id) && (
+																	<button
+																		type="button"
+																		className="set-uninstall"
+																		title={t("pluginUpdateHint")}
+																		onClick={() => runUiPluginUpdate(e.id, e.source)}
+																	>
+																		<FiRefreshCw />
+																		{t("pluginUpdate")}
+																	</button>
+																)}
 																{confirmUiUninstall === e.id ? (
 																	<button
 																		type="button"
@@ -3004,7 +3012,7 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 													onToggle={() => !p.error && togglePlugin(p)}
 													action={
 														<div className="set-row-actions">
-															{p.source && (
+															{p.source && pluginUpdates.has(p.id) && (
 																<button
 																	type="button"
 																	className="set-uninstall"

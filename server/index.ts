@@ -59,6 +59,7 @@ import {
 	type PluginRunEvent,
 } from "./plugins.js";
 import { PluginInstaller } from "./plugin-installer.js";
+import { createPluginUpdateChecker } from "./plugin-updater.js";
 import { syncPluginCatalog } from "./plugin-catalog-sync.js";
 import type { ServerLang } from "./i18n.js";
 import { McpBridge } from "./mcp-bridge.js";
@@ -357,6 +358,16 @@ app.get("/api/health", (_req, res) => {
 app.get("/api/core-update", (_req, res) => {
 	res.setHeader("Cache-Control", "no-store");
 	res.json(coreUpdateState());
+});
+
+const getPluginUpdates = createPluginUpdateChecker(DATA_DIR);
+app.get("/api/plugin-updates", async (_req, res) => {
+	res.setHeader("Cache-Control", "no-store");
+	try {
+		res.json({ updates: await getPluginUpdates() });
+	} catch {
+		res.status(503).json({ updates: [], error: "Plugin update check unavailable" });
+	}
 });
 
 /**
