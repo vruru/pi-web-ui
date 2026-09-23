@@ -57,6 +57,12 @@ import {
 	repairSessionFile,
 	type SessionFileRepair,
 } from "./compaction-markers.js";
+import {
+	DANGLING_TOOL_RESULT_TEXT,
+	DANGLING_TOOL_RESULT_TEXT_EN,
+	findDanglingToolCalls,
+	healDanglingToolCallFile,
+} from "./dangling-tools.js";
 import { removeQueuedByIndexOrText } from "./queue-utils.js";
 import type {
 	PluginAgentTool,
@@ -1009,6 +1015,9 @@ export interface Conversation {
 	 *  TOOL_WATCHDOG_TIMEOUT_MS gets the session aborted instead of hanging
 	 *  the conversation forever (the SDK bash tool has no default timeout). */
 	toolWatchdogs: Map<string, ReturnType<typeof setTimeout>>;
+	/** #280：转录链悬空标记——forceReset 后修复没落盘（文件被删/只读）时置位，
+	 *  后续 prompt 响亮拒绝而不是静默黑洞；修复成功即清除。 */
+	transcriptBlocked?: boolean;
 }
 
 /** 轨迹事件 payload 封顶（可直接广播/持久化，不撑爆 storage.json）。 */
@@ -5688,6 +5697,77 @@ export class ClientSession {
 			// even while quiesced. Everything that reaches the SDK is NEW work and
 			// is refused until admission reopens.
 			if (this.quiesceBlocked()) return;
+			// #280：悬空 toolCall 守卫——转录尾是「有调用、无结果」时直接 prompt
+			// 会把非法链喂给 provider（有发起迹象但零落盘、零报错的黑洞）。
+			// 非流式时先补合成结果再继续；补不上则响亮拒绝。
+			if (conv.transcriptBlocked && !s.isStreaming) {
+				this.emit({
+					type: "notice",
+					level: "error",
+					text: `发送已拒绝：该对话的记录尾是一个没有结果的工具调用（上次运行被强制终止），且自动修复失败。请从历史记录重新打开该对话，或新建对话后重试。`,
+					textEn: `Prompt refused: this transcript ends with a tool call that never got a result (last run was force-terminated) and auto-repair failed. Reopen it from history or start a new conversation.`,
+				});
+				this.flushSnapshot();
+				return;
+			}
+			if (!s.isStreaming) {
+				try {
+					const live = s.agent.state.messages as unknown[];
+					const dangling = Array.isArray(live) ? findDanglingToolCalls(live) : [];
+					if (dangling.length > 0) {
+						let healed = 0;
+						try {
+							const sm = s.sessionManager as unknown as {
+								appendMessage?: (m: unknown) => void;
+							};
+							if (typeof sm?.appendMessage === "function") {
+								for (const d of dangling) {
+									sm.appendMessage({
+										role: "toolResult",
+										toolCallId: d.toolCallId,
+										toolName: d.toolName,
+										content: [
+											{
+												type: "text",
+												text: `${DANGLING_TOOL_RESULT_TEXT}
+${DANGLING_TOOL_RESULT_TEXT_EN}`,
+											},
+										],
+										isError: true,
+										timestamp: Date.now(),
+									});
+									healed += 1;
+								}
+							}
+						} catch {
+							// 落盘失败走下面的拒绝分支。
+						}
+						if (healed === dangling.length && healed > 0) {
+							conv.transcriptBlocked = false;
+							this.emit({
+								type: "notice",
+								level: "warning",
+								text: `检测到上次运行残留的 ${dangling.length} 个无结果工具调用，已自动填入合成结果后继续。如任务未完成请重新执行该工具。`,
+								textEn: `Found ${dangling.length} tool call(s) without results from the last run; synthetic results were inserted automatically before continuing. Re-run the tool if the task is incomplete.`,
+							});
+						} else {
+							conv.transcriptBlocked = true;
+							this.emit({
+								type: "notice",
+								level: "error",
+								text: `发送已拒绝：该对话的记录尾是一个没有结果的工具调用（上次运行被强制终止），且自动修复失败。请从历史记录重新打开该对话，或新建对话后重试。`,
+								textEn: `Prompt refused: this transcript ends with a tool call that never got a result (last run was force-terminated) and auto-repair failed. Reopen it from history or start a new conversation.`,
+							});
+							this.flushSnapshot();
+							return;
+						}
+					} else {
+						conv.transcriptBlocked = false;
+					}
+				} catch {
+					// 守卫本身绝不挡发送：查不到就按原路径走。
+				}
+			}
 			// issue #145：发之前再查一次同文件持有者 —— 拦住「打开时空闲、发送时在跑」的竞态。
 			// 没有第二个 writer，就不可能有看不见的第二个 agent。
 			const activeFile = this.activeSessionFileResolved();
@@ -6273,6 +6353,16 @@ export class ClientSession {
 	 *  persisted session. The conversation record itself is kept (same id,
 	 *  same cwd, same serialization caches), so the UI stays attached. */
 	private async forceResetConversation(conv: Conversation, reason: string): Promise<void> {
+		// #280：先记下本次对话自己的会话文件——重建必须回到同一个文件，
+		// 不能用 continueRecent(cwd) 按 mtime 取「最近」（同 cwd 多会话时会接错文件）。
+		const ownFile = (() => {
+			try {
+				const f = conv.session.sessionFile;
+				return typeof f === "string" && f ? f : undefined;
+			} catch {
+				return undefined;
+			}
+		})();
 		try {
 			conv.unsubscribe?.();
 			conv.unsubscribe = undefined;
@@ -6281,16 +6371,28 @@ export class ClientSession {
 			conv.toolStartTimes.clear();
 			conv.extensionUi?.dispose();
 			await conv.runtime.dispose();
+			// #280：dispose 丢弃了内存里的在飞状态（未落盘的工具结果蒸发），
+			// 文件尾可能留下一个悬空 toolCall——先补合成 toolResult 再重建，
+			// 否则重建后的 prompt 会把非法转录链喂给 provider（零落盘黑洞）。
+			let healedCount = 0;
+			if (ownFile && existsSync(ownFile)) {
+				try {
+					const n = healDanglingToolCallFile(ownFile);
+					if (n > 0) healedCount = n;
+				} catch {
+					// best-effort：修不好就按原路径重建，下面的守卫会在 prompt 前再拦。
+				}
+			}
 			// #235：转录链损坏时修一次再试（见 openManagerAndRuntime）。
 			const opened = await this.openManagerAndRuntime(
-				() => SessionManager.continueRecent(conv.cwd),
+				() => (ownFile && existsSync(ownFile) ? SessionManager.open(ownFile) : SessionManager.continueRecent(conv.cwd)),
 				(m) =>
 					createAgentSessionRuntime(this.makeRuntimeFactory(conv.terminals, undefined, conv.id), {
 						cwd: conv.cwd,
 						agentDir: this.agentDir,
 						sessionManager: m,
 					}),
-				async () => (await SessionManager.list(conv.cwd))[0]?.path,
+				async () => (ownFile && existsSync(ownFile) ? ownFile : (await SessionManager.list(conv.cwd))[0]?.path),
 			);
 			const runtime = opened.runtime;
 			if (opened.repair) {
@@ -6298,6 +6400,24 @@ export class ClientSession {
 			}
 			conv.runtime = runtime;
 			conv.session = runtime.session;
+			if (healedCount > 0) {
+				this.emit({
+					type: "notice",
+					level: "warning",
+					text: `上次运行被强制终止，${healedCount} 个无结果的工具调用已自动填入合成结果（转录链已修复）。建议检查任务状态，必要时重新执行该工具。`,
+					textEn: `The last run was force-terminated; ${healedCount} tool call(s) without results were filled with synthetic results (transcript healed). Verify task state and re-run the tool if needed.`,
+				});
+			}
+			// #280：重建后复查——新 runtime 仍以悬空 toolCall 开头说明修复没落盘
+			// （文件被删/只读等），此时响亮拒绝后续 prompt 而不是静默黑洞。
+			try {
+				const msgs = conv.session.agent.state.messages as unknown[];
+				const still = Array.isArray(msgs) ? findDanglingToolCalls(msgs) : [];
+				if (still.length > 0) conv.transcriptBlocked = true;
+				else conv.transcriptBlocked = false;
+			} catch {
+				// ignore：守卫是兜底，查不到就让 prompt 路径再查。
+			}
 			this.emit({
 				type: "notice",
 				level: "warning",
@@ -6606,6 +6726,7 @@ export class ClientSession {
 	/**
 	 * #235：已知路径先修后开（openConversation 走这条——单文件预扫描零负担）。
 	 * 返回 null = 文件健康或无需处理；返回 repair = 修过，调用方弹提示。
+	 * #280：顺带修悬空 toolCall（强制重置/崩溃残留的有调用无结果），修过同样弹提示。
 	 */
 	private repairTranscriptFileBeforeOpen(filePath: string): SessionFileRepair | null {
 		let repair: SessionFileRepair | null = null;
@@ -6614,7 +6735,24 @@ export class ClientSession {
 		} catch {
 			return null;
 		}
-		if (!repair?.changed) return null;
+		if (!repair?.changed) {
+			// #280：压缩链健康时仍要查悬空 toolCall（崩溃/强制重置残留）。
+			let healed = 0;
+			try {
+				const n = healDanglingToolCallFile(filePath);
+				if (n > 0) healed = n;
+			} catch {
+				// best-effort
+			}
+			if (healed <= 0) return null;
+			this.emit({
+				type: "notice",
+				level: "warning",
+				text: `该对话上次运行残留 ${healed} 个无结果的工具调用，已自动填入合成结果。如任务未完成请重新执行该工具。`,
+				textEn: `${healed} tool call(s) without results from the last run were filled with synthetic results. Re-run the tool if the task is incomplete.`,
+			});
+			return null;
+		}
 		for (const n of this.transcriptRepairNotices(repair)) this.emit(n);
 		return repair;
 	}

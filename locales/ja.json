@@ -202,6 +202,7 @@
 		"runningConversations": "実行中のチャット",
 		"elsewhereBadge": "他の場所",
 		"elsewhereTip": "他のタブ/デバイスで実行中の会話（右クリックでこのページに引き継ぐ）",
+		"elsewhereActions": "操作（このページに引き継ぐ / IDをコピー…）",
 		"takeoverConversation": "このページに引き継ぐ",
 		"takeoverHasQuestion": "回答待ちの質問あり — クリックでここで回答",
 		"waitingQuestionBadge": "回答待ちの質問 — クリックで表示",

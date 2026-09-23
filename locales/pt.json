@@ -202,6 +202,7 @@
 		"runningConversations": "Conversas em andamento",
 		"elsewhereBadge": "Outro local",
 		"elsewhereTip": "Conversa em execução em outra aba/dispositivo (botão direito para assumir)",
+		"elsewhereActions": "Ações (assumir nesta página, copiar ID…)",
 		"takeoverConversation": "Assumir nesta página",
 		"takeoverHasQuestion": "Tem uma pergunta pendente — clique para responder aqui",
 		"waitingQuestionBadge": "Pergunta pendente — clique para ver",

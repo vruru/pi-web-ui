@@ -29,7 +29,7 @@ import voiceInput, {
 	whisperFullLang,
 	whisperLang,
 } from "../../plugins/voice-input/index.mjs";
-import { encodeWavPCM, srExplain } from "../../plugins/voice-input/client/entry.mjs";
+import { encodeWavPCM, srExplain, srTotalText } from "../../plugins/voice-input/client/entry.mjs";
 
 const pluginDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "plugins", "voice-input");
 const manifest = JSON.parse(readFileSync(join(pluginDir, "manifest.json"), "utf8"));
@@ -254,6 +254,20 @@ describe("srExplain", () => {
 			expect(typeof m.msg).toBe("string");
 			expect(m.msg.length).toBeGreaterThan(4);
 		}
+	});
+});
+
+describe("srTotalText", () => {
+	it("最终文本 + 中间结果拼成全文并去首尾空白", () => {
+		expect(srTotalText("你好", "世界")).toBe("你好世界");
+		expect(srTotalText("你好 ", "")).toBe("你好");
+		expect(srTotalText("", "  ")).toBe("");
+		expect(srTotalText(null, undefined)).toBe("");
+	});
+	it("直接发送走当前对话：entry 调用 startChat 时 newChat:false", () => {
+		const src = readFileSync(join(pluginDir, "client", "entry.mjs"), "utf8");
+		expect(src).toContain("newChat: false");
+		expect(src).toContain("startChat");
 	});
 });
 

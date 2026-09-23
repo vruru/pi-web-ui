@@ -202,6 +202,7 @@
 		"runningConversations": "Discussions en cours",
 		"elsewhereBadge": "Ailleurs",
 		"elsewhereTip": "Conversation en cours dans un autre onglet/appareil (clic droit pour transférer)",
+		"elsewhereActions": "Actions (transférer vers cette page, copier l'ID…)",
 		"takeoverConversation": "Transférer vers cette page",
 		"takeoverHasQuestion": "A une question en attente — cliquer pour répondre ici",
 		"waitingQuestionBadge": "Question en attente — cliquer pour voir",

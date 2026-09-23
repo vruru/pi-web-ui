@@ -5,7 +5,9 @@
  *   manifest `ui.composer` 声明 🎤 按钮（宿主渲染，见 ChatInput）→ 用户点击 →
  *   宿主 `triggerPluginUiAction` 按需 import 本文件（view:false，平时不加载）→
  *   顶层代码注册 `onUiAction("voice-input:toggle")` → toggle() 开始/结束录音 →
- *   文本经 `window.__piWebUiHost.compose({ text })` 并入输入框草稿（用户再自己发）。
+ *   「填入输入框」经 `window.__piWebUiHost.compose({ text })` 并入输入框草稿
+ *   （用户再编辑发送）；「直接发送」经 `startChat({ prompt, newChat:false })`
+ *   发给当前对话，不需要编辑。
  *
  * 识别策略：
  *   1. 有 Web Speech API（Chrome/Edge）→ 浏览器本地识别，免费实时出字；
@@ -55,7 +57,11 @@ const T = {
 	listening: isZh ? "正在聆听…（再点 🎤 结束）" : "Listening… (click 🎤 again to finish)",
 	recording: isZh ? "正在录音…（再点 🎤 结束并转写）" : "Recording… (click 🎤 again to transcribe)",
 	uploading: isZh ? "转写中…" : "Transcribing…",
-	done: isZh ? "完成" : "Done",
+	send: isZh ? "直接发送" : "Send",
+	fill: isZh ? "填入输入框" : "Fill composer",
+	sendFailed: isZh
+		? "直接发送没接通，已填入输入框，请手动发送"
+		: "Direct send unavailable — filled into the composer, please send manually",
 	cancel: isZh ? "取消" : "Cancel",
 	close: isZh ? "关闭" : "Close",
 	useServer: isZh ? "改用服务端录音" : "Use server recording",
@@ -336,10 +342,16 @@ function openOverlay() {
 /* 会话状态机：idle | sr(浏览器识别) | rec(服务端录音)                  */
 /* ------------------------------------------------------------------ */
 
+/** 浏览器识别的最终文本 + 中间结果拼成要发送的全文。纯函数，单测覆盖。 */
+export function srTotalText(finalText, interim) {
+	return `${String(finalText ?? "")}${String(interim ?? "")}`.trim();
+}
+
 const session = {
 	mode: "idle", // idle | sr | rec
 	recognition: null,
 	finalText: "",
+	interim: "",
 	manualStop: false,
 	// 切服务端途中：吞掉 abort 激起的 onend/onerror，避免“字进了输入框还弹录音”。
 	switching: false,
@@ -363,9 +375,83 @@ function resetSession() {
 	session.recognition = null;
 	session.rec = null;
 	session.finalText = "";
+	session.interim = "";
 	session.manualStop = false;
 	session.switching = false;
 	session.srRestarts = 0;
+}
+
+/** 文本进输入框草稿（用户再编辑/手动发送）。返回是否接通。 */
+function tryComposeText(t) {
+	try {
+		return hostApi()?.compose({ text: t }) ?? false;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * 文本直接发给当前对话（不进草稿、不新建对话、不需要编辑）。
+ * startChat 默认 newChat=true 会另起对话，这里必须显式 newChat:false
+ * 留在当前对话里发出去。
+ */
+function trySendDirect(t) {
+	try {
+		const fn = hostApi()?.startChat;
+		if (typeof fn !== "function") return false;
+		return fn.call(hostApi(), { prompt: t, newChat: false }) ?? false;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * 文本收尾·直接发送：接通就关浮层；没接通（断线/旧宿主没有 startChat）
+ * 就回落到填入输入框，并用一行 note 告诉用户手动点发送；两条路都走不通
+ * 才给复制按钮（不丢字）。
+ */
+async function sendDirectText(text) {
+	const t = String(text ?? "").trim();
+	resetSession();
+	if (!t) {
+		const ui = openOverlay();
+		ui.setStatus("🎤");
+		ui.setText(T.empty, true);
+		ui.setButtons([{ label: T.close, primary: true, onClick: closeOverlay }]);
+		setTimeout(closeOverlay, 2500);
+		return;
+	}
+	if (trySendDirect(t)) {
+		closeOverlay();
+		return;
+	}
+	if (tryComposeText(t)) {
+		const ui = openOverlay();
+		ui.setStatus("🎤");
+		ui.setText(t);
+		ui.setNote(T.sendFailed);
+		ui.setButtons([{ label: T.close, primary: true, onClick: closeOverlay }]);
+		setTimeout(closeOverlay, 3000);
+		return;
+	}
+	const ui = openOverlay();
+	ui.setStatus("🎤");
+	ui.setText(t);
+	ui.setButtons([
+		{
+			label: isZh ? "复制" : "Copy",
+			primary: true,
+			onClick: async () => {
+				try {
+					await navigator.clipboard.writeText(t);
+				} catch {
+					/* ignore */
+				}
+				closeOverlay();
+			},
+		},
+		{ label: T.close, onClick: closeOverlay },
+	]);
 }
 
 /** 文本收尾：进输入框草稿；进不去就给复制按钮（不丢字）。 */
@@ -445,6 +531,7 @@ function startSpeechRecognition(lang, cfg) {
 	session.recognition = rec;
 	session.mode = "sr";
 	session.finalText = "";
+	session.interim = "";
 	session.manualStop = false;
 	session.srRestarts = 0;
 	const ui = openOverlay();
@@ -452,7 +539,8 @@ function startSpeechRecognition(lang, cfg) {
 	ui.setStatus(`🎤 ${T.listening}`);
 	const wireButtons = () => {
 		const btns = [
-			{ label: T.done, primary: true, onClick: () => finishWithText(session.finalText) },
+			{ label: T.fill, primary: true, onClick: () => finishWithText(srTotalText(session.finalText, session.interim)) },
+			{ label: T.send, onClick: () => sendDirectText(srTotalText(session.finalText, session.interim)) },
 			{
 				label: T.cancel,
 				onClick: () => {
@@ -471,6 +559,7 @@ function startSpeechRecognition(lang, cfg) {
 					session.switching = true;
 					session.manualStop = true;
 					session.finalText = "";
+					session.interim = "";
 					try {
 						rec.abort();
 					} catch {
@@ -483,15 +572,15 @@ function startSpeechRecognition(lang, cfg) {
 		ui.setButtons(btns);
 	};
 	wireButtons();
-	let interim = "";
 	rec.onresult = (ev) => {
-		interim = "";
+		let interim = "";
 		for (let i = ev.resultIndex; i < ev.results.length; i++) {
 			const r = ev.results[i];
 			if (r.isFinal) session.finalText += r[0].transcript;
 			else interim += r[0].transcript;
 		}
-		ui.setText((session.finalText + interim).trim());
+		session.interim = interim;
+		ui.setText(srTotalText(session.finalText, interim));
 	};
 	rec.onerror = (ev) => {
 		if (session.mode !== "sr") return;
@@ -533,16 +622,17 @@ function startSpeechRecognition(lang, cfg) {
 		// 切服务端途中 abort 激起的 onend：有字就收尾（收尾把 mode 置 idle，
 		// 挂起的延迟切换自动取消，成功优先）；没字才让路给服务端录音。
 		if (session.switching) {
-			if (session.finalText.trim()) void finishWithText(session.finalText);
+			if (srTotalText(session.finalText, session.interim))
+				void finishWithText(srTotalText(session.finalText, session.interim));
 			return;
 		}
 		if (session.manualStop) {
-			void finishWithText(session.finalText);
+			void finishWithText(srTotalText(session.finalText, session.interim));
 			return;
 		}
 		// 有字就收尾（浏览器按静音断的句）；没字才续听，且最多续 N 次。
-		if (session.finalText.trim()) {
-			void finishWithText(session.finalText);
+		if (srTotalText(session.finalText, session.interim)) {
+			void finishWithText(srTotalText(session.finalText, session.interim));
 			return;
 		}
 		if (session.srRestarts >= MAX_SR_RESTARTS) {
@@ -776,20 +866,25 @@ async function startRecorderFlow() {
 	const ui = openOverlay();
 	session.ui = ui;
 	ui.setStatus(`🎤 ${T.recording}`);
+	const stopAndTranscribe = (mode) => {
+		session.manualStop = true;
+		try {
+			const r = session.rec?.stop(true);
+			if (r && r.samples) void handleRecorded(r.samples, cfg, false, mode);
+		} catch {
+			resetSession();
+			closeOverlay();
+		}
+	};
 	ui.setButtons([
 		{
-			label: T.done,
+			label: T.fill,
 			primary: true,
-			onClick: () => {
-				session.manualStop = true;
-				try {
-					const r = session.rec?.stop(true);
-					if (r && r.samples) void handleRecorded(r.samples, cfg, false);
-				} catch {
-					resetSession();
-					closeOverlay();
-				}
-			},
+			onClick: () => stopAndTranscribe("compose"),
+		},
+		{
+			label: T.send,
+			onClick: () => stopAndTranscribe("send"),
 		},
 		{
 			label: T.cancel,
@@ -822,7 +917,11 @@ async function startRecorderFlow() {
 	}
 }
 
-async function handleRecorded(samples, cfg, timedOut) {
+/**
+ * 录音收尾 → 转写 → 按 mode 收尾：compose=填入输入框（用户再编辑发送），
+ * send=直接发给当前对话（不需要编辑）。mode 默认 compose（自动收尾/旧调用）。
+ */
+async function handleRecorded(samples, cfg, timedOut, mode = "compose") {
 	const rec = session.rec;
 	resetSession();
 	if (!samples || !samples.length) {
@@ -876,7 +975,8 @@ async function handleRecorded(samples, cfg, timedOut) {
 		showError(err instanceof Error ? err.message : String(err));
 		return;
 	}
-	await finishWithText(text);
+	if (mode === "send") await sendDirectText(text);
+	else await finishWithText(text);
 }
 
 /* ---------------- 一键安装本地 Whisper ---------------- */

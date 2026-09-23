@@ -202,6 +202,7 @@
 		"runningConversations": "실행 중인 대화",
 		"elsewhereBadge": "다른 곳",
 		"elsewhereTip": "다른 탭/기기에서 실행 중인 대화(우클릭으로 가져오기)",
+		"elsewhereActions": "작업(이 페이지로 가져오기 / ID 복사…)",
 		"takeoverConversation": "이 페이지로 가져오기",
 		"takeoverHasQuestion": "대기 중인 질문 있음 — 클릭하여 여기서 답변",
 		"waitingQuestionBadge": "대기 중인 질문 — 클릭하여 보기",

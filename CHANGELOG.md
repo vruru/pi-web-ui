@@ -18,6 +18,10 @@
 
 ### Fixed
 
+- **工具看门狗强制重置不再留下悬空 toolCall（#280）** — 流式卡死 → 看门狗 abort 无效 → `forceResetConversation` 从磁盘重建时，内存里未落盘的工具结果蒸发，文件尾留下「有调用、无结果」的悬空 toolCall；重建后继续 prompt 会把非法转录链喂给 provider（请求有发起迹象但零落盘、零报错）。现三处修复：① 重建前向**本次对话自己的会话文件**补一条合成 toolResult（append-only，历史字节不动），重建后弹提示建议重执行工具；② 重建改回**同文件**（`SessionManager.open(ownFile)`），不再按 cwd 取最近（多会话会接错文件）；③ 发送前/打开历史会话时复查转录尾，残留悬空即自动补合成结果，补不上则响亮拒绝发送（不再静默黑洞）。
+
+- **Docker 构建阶段安装 Python 工具链** — `Dockerfile` 的 `build` 阶段增加 `python3 make g++` 安装，避免在缺少 `node-pty` 预编译二进制的平台架构下执行 `npm ci` 时因 `node-gyp rebuild` 找不到 Python 报错（#279）。
+
 - 界面插件市场及已安装列表仅在确认插件来源有更新时显示更新按钮；按插件子目录内容比较，忽略同仓无关提交，安装后立即重新检查，未知版本或网络失败不误报。
 
 - 左右面板改为百分比宽度，拖拽比例随窗口与整体缩放保持；输入区按窗口高度限制并允许内部滚动，防止遮挡底栏。空白会话模板从顶部浏览，不再误跟随到末尾。
@@ -40,7 +44,7 @@
 <!-- auto-i18n:start -->
 ### i18n
 
-- 前端新增 key（24）：`coreUpdateTitle`、`coreUpdateRunningVersion`、`coreUpdateLatestVersion`、`coreUpdateUpdating`、`coreUpdateStarting`、`coreUpdateInstalling`、`coreUpdateRestarting`、`coreUpdateSucceeded`、`coreUpdateReconnecting`、`coreUpdateFailed`、`coreUpdateChecking`、`coreUpdateAvailable`、`coreUpdateCurrent`、`coreUpdateNotChecked`、`coreUpdateCheckFailed`、`coreUpdateHint`、`coreUpdateCheckedAt`、`coreUpdateCheck`、`coreUpdateInstall`、`generationRate`、`generationRateTip`、`uiZoomTitle`、`uiZoomHint`、`uiZoomCurrent`
+- 前端新增 key（25）：`coreUpdateTitle`、`coreUpdateRunningVersion`、`coreUpdateLatestVersion`、`coreUpdateUpdating`、`coreUpdateStarting`、`coreUpdateInstalling`、`coreUpdateRestarting`、`coreUpdateSucceeded`、`coreUpdateReconnecting`、`coreUpdateFailed`、`coreUpdateChecking`、`coreUpdateAvailable`、`coreUpdateCurrent`、`coreUpdateNotChecked`、`coreUpdateCheckFailed`、`coreUpdateHint`、`coreUpdateCheckedAt`、`coreUpdateCheck`、`coreUpdateInstall`、`generationRate`、`generationRateTip`、`uiZoomTitle`、`uiZoomHint`、`uiZoomCurrent`、`elsewhereActions`
 - 前端中文变更（1）：`tps`
 - 前端英文变更（1）：`tps`
 <!-- auto-i18n:end -->

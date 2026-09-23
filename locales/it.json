@@ -202,6 +202,7 @@
 		"runningConversations": "Chat in esecuzione",
 		"elsewhereBadge": "Altrove",
 		"elsewhereTip": "Conversazione in esecuzione in un’altra scheda/dispositivo (tasto destro per spostarla qui)",
+		"elsewhereActions": "Azioni (sposta in questa pagina, copia ID…)",
 		"takeoverConversation": "Sposta in questa pagina",
 		"takeoverHasQuestion": "Ha una domanda in attesa — fai clic per rispondere qui",
 		"waitingQuestionBadge": "Domanda in attesa — fai clic per vederla",

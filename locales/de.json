@@ -202,6 +202,7 @@
 		"runningConversations": "Laufende Chats",
 		"elsewhereBadge": "Anderswo",
 		"elsewhereTip": "Unterhaltung läuft in einem anderen Tab/Gerät (Rechtsklick zum Übernehmen)",
+		"elsewhereActions": "Aktionen (Auf diese Seite übernehmen, ID kopieren …)",
 		"takeoverConversation": "Auf diese Seite übernehmen",
 		"takeoverHasQuestion": "Hat eine offene Frage — hier klicken zum Beantworten",
 		"waitingQuestionBadge": "Wartende Frage — klicken zum Ansehen",
