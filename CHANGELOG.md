@@ -18,6 +18,8 @@
 
 ### Fixed
 
+- 插件更新按钮现在会先解除 Pi 配置中旧版本的固定，再安装最新版；重新打开更新面板时强制刷新版本，修复终端显示“Updated”但实际仍停留在旧版本的问题。
+
 - **工具看门狗强制重置不再留下悬空 toolCall（#280）** — 流式卡死 → 看门狗 abort 无效 → `forceResetConversation` 从磁盘重建时，内存里未落盘的工具结果蒸发，文件尾留下「有调用、无结果」的悬空 toolCall；重建后继续 prompt 会把非法转录链喂给 provider（请求有发起迹象但零落盘、零报错）。现三处修复：① 重建前向**本次对话自己的会话文件**补一条合成 toolResult（append-only，历史字节不动），重建后弹提示建议重执行工具；② 重建改回**同文件**（`SessionManager.open(ownFile)`），不再按 cwd 取最近（多会话会接错文件）；③ 发送前/打开历史会话时复查转录尾，残留悬空即自动补合成结果，补不上则响亮拒绝发送（不再静默黑洞）。
 
 - **Docker 构建阶段安装 Python 工具链** — `Dockerfile` 的 `build` 阶段增加 `python3 make g++` 安装，避免在缺少 `node-pty` 预编译二进制的平台架构下执行 `npm ci` 时因 `node-gyp rebuild` 找不到 Python 报错（#279）。

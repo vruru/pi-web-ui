@@ -441,7 +441,7 @@ export function TopBar({
 
 	/** Run the right update command for one or more components in a visible
 	 *  terminal tab (same SCM-style pattern as the self-update above): pi
-	 *  extensions go through `pi update npm:<name>` (they live under
+	 *  extensions go through `pi install` and `pi update` (they live under
 	 *  <agentDir>/npm), everything globally installed via `npm i -g`.
 	 *  Multi-target runs are chained with `;` so one failing step never
 	 *  blocks the rest. Reuses the tab with the same title, else creates one. */
@@ -1059,7 +1059,7 @@ export function TopBar({
 					setUpdateOpen(v);
 					if (v) {
 						appSend({ type: "check_update" });
-						appSend({ type: "check_updates_all" });
+						appSend({ type: "check_updates_all", force: true });
 					}
 				}}
 				fit

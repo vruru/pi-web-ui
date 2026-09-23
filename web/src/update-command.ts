@@ -3,10 +3,10 @@
  * terminal tab. The command depends on WHERE each component lives:
  *
  * - "package" (pi extensions, installed under <agentDir>/npm — e.g.
- *   ~/.pi/agent/npm): `pi update npm:<name>` is the ONLY command that updates
- *   the copy pi actually loads. A bare `npm i -g` installs to the npm global
- *   root instead, leaving the checked copy stale — the next update check would
- *   still report an update (the bug this kind split fixes).
+ *   ~/.pi/agent/npm): first re-register an unpinned source, then update it.
+ *   Pi silently skips `npm:<name>@<version>` during `pi update` while still
+ *   printing "Updated"; `pi install npm:<name>` replaces that source in
+ *   settings, and the following `pi update` installs the latest version.
  * - "git-extension" (git-source pi extensions, cloned under <agentDir>/git):
  *   `pi update git:<host>/<path>` — the `git:` prefix is required (a bare
  *   `host/path` fails with "No matching package found"; issue #178).
@@ -26,7 +26,7 @@ export function buildUpdateCommand(targets: UpdateTarget[]): string {
 	return targets
 		.map((t) =>
 			t.kind === "package"
-				? `pi update npm:${t.name}`
+				? `pi install npm:${t.name} && pi update npm:${t.name}`
 				: t.kind === "git-extension"
 					? `pi update ${toGitUpdateArg(t.source ?? t.name)}`
 					: `npm i -g ${t.name}@latest`,
