@@ -7761,12 +7761,17 @@ div.chead[role="button"]:focus-visible,
 
 /* -------------------------------------------------------------- empty state */
 
+/* Empty cards follow the chat column, including zoom and side-panel resizing. */
+.messages:has(> .empty-state) {
+	padding-inline: 12px;
+}
+
 .empty-state {
 	display: flex;
 	flex-direction: column;
 	align-items: center;
 	text-align: center;
-	padding: 40px 20px 30px;
+	padding: 40px 0 30px;
 	color: var(--text-dim);
 }
 
@@ -7785,7 +7790,9 @@ div.chead[role="button"]:focus-visible,
 /* ---- 提示词模板（空态推荐卡片） ---- */
 .empty-templates {
 	margin-top: 0;
-	width: min(720px, calc(92vw / var(--ui-zoom)));
+	width: 100%;
+	max-width: 720px;
+	min-width: 0;
 }
 
 .empty-templates-head {
@@ -7810,11 +7817,12 @@ div.chead[role="button"]:focus-visible,
 
 .empty-templates-grid {
 	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+	grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
 	gap: 10px;
 }
 
 .empty-template {
+	min-width: 0;
 	display: flex;
 	align-items: flex-start;
 	gap: 10px;
