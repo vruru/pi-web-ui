@@ -1,13 +1,21 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 /** Follow live output unless an actual reading gesture explicitly pauses it. */
-export function useMessageScroll({ active = true, resetKey }: { active?: boolean; resetKey: string }) {
+export function useMessageScroll({
+	active = true,
+	hasMessages = true,
+	resetKey,
+}: {
+	active?: boolean;
+	hasMessages?: boolean;
+	resetKey: string;
+}) {
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const stickRef = useRef(true);
 	const escapedRef = useRef(false);
 	const [stickBottom, setStickBottom] = useState(true);
 	const activeRef = useRef(active);
-	activeRef.current = active;
+	activeRef.current = active && hasMessages;
 	const previousTop = useRef(0);
 	const scrollbarDrag = useRef(false);
 
@@ -42,8 +50,16 @@ export function useMessageScroll({ active = true, resetKey }: { active?: boolean
 	}, [pause, scrollToBottom, snap]);
 
 	useLayoutEffect(() => {
-		if (active) scrollToBottom();
-	}, [active, resetKey, scrollToBottom]);
+		if (!active) return;
+		if (hasMessages) scrollToBottom();
+		else {
+			if (scrollRef.current) scrollRef.current.scrollTop = 0;
+			previousTop.current = 0;
+			stickRef.current = true;
+			escapedRef.current = false;
+			setStickBottom(true);
+		}
+	}, [active, hasMessages, resetKey, scrollToBottom]);
 
 	useEffect(() => {
 		const el = scrollRef.current;

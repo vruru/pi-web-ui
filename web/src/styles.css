@@ -313,10 +313,12 @@ body {
 
 /* ---- Panel width drag handle (ResizeHandle) ---- */
 .drawer-left .panel {
-	width: var(--left-w, 240px);
+	width: var(--left-w, 20%);
+	min-width: 0;
 }
 .drawer-right .panel {
-	width: var(--right-w, 240px);
+	width: var(--right-w, 20%);
+	min-width: 0;
 }
 
 .resize-handle {
@@ -1794,6 +1796,9 @@ body.rp-resizing .rp-sash.dragging::after {
 /* 输入框上方的快捷短语按钮行：与上面的文件引用 chips（.attach-row）是两套
  * 独立 UI —— 文件引用管附件，短语管一键发送，视觉与职责都不重叠。 */
 .quick-row {
+	/* Keep shortcuts above the composer without pushing it over the footer. */
+	max-height: calc(15dvh / var(--ui-zoom));
+	overflow-y: auto;
 	margin: 0 0 6px;
 	display: flex;
 	flex-wrap: wrap;
@@ -3787,7 +3792,12 @@ body.panel-resizing .scm-divider::after {
 
 .statusbar-left {
 	flex: 1 1 auto;
-	overflow: hidden;
+	overflow-x: auto;
+	scrollbar-width: thin;
+}
+
+.statusbar-left > * {
+	flex-shrink: 0;
 }
 
 .statusbar-right {
@@ -9059,6 +9069,9 @@ div.chead[role="button"]:focus-visible,
 }
 
 .inputbox textarea {
+	/* A saved manual size must still leave space for the toolbar and footer. */
+	max-height: calc(25dvh / var(--ui-zoom)) !important;
+	overflow-y: auto !important;
 	flex: none; /* 不能用 flex:1 —— flex-basis:0% 会覆盖 JS 设置的 inline height，
 	             * 导致自适应高度失效（输入多行也不长高、不出现滚动条） */
 	resize: none;

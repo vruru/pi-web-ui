@@ -1,9 +1,17 @@
-import { toUiZoomPixels } from "./ui-zoom";
+import {
+	draggedPanelPercent,
+	PANEL_DEFAULT_PERCENT,
+	PANEL_RATIOS_KEY,
+	readPanelRatios,
+	resizePanelRatio,
+	type PanelSide,
+} from "./panel-widths";
 import {
 	lazy,
 	Suspense,
 	useCallback,
 	useEffect,
+	useLayoutEffect,
 	useMemo,
 	useRef,
 	useState,
@@ -140,15 +148,6 @@ function NoticeToast({ notice, onDismiss }: { notice: Notice; onDismiss: (id: nu
 const EMPTY_MESSAGES: UiMessage[] = [];
 
 // ---- 可拖拽面板宽度（桌面端；≤768px 抽屉模式固定宽度不受影响）----
-const PANEL_MIN = 180;
-const PANEL_MAX = 520;
-const PANEL_DEFAULT = 240;
-type PanelSide = "left" | "right";
-const panelWidthKey = (side: PanelSide) => `pi-web-ui:${side}-panel-width`;
-function readPanelWidth(side: PanelSide): number {
-	const v = Number(localStorage.getItem(panelWidthKey(side)));
-	return Number.isFinite(v) && v >= PANEL_MIN && v <= PANEL_MAX ? v : PANEL_DEFAULT;
-}
 const panelCollapsedKey = (side: PanelSide) => `pi-web-ui:${side}-panel-collapsed`;
 function readPanelCollapsed(side: PanelSide): boolean {
 	return localStorage.getItem(panelCollapsedKey(side)) === "1";
@@ -162,18 +161,16 @@ function ResizeHandle({ side, width, onResize }: { side: PanelSide; width: numbe
 			e.preventDefault();
 			const startX = e.clientX;
 			const startW = width;
-			let last = startW;
+			const layoutWidth = e.currentTarget.closest(".layout")?.getBoundingClientRect().width ?? 0;
 			const move = (ev: PointerEvent) => {
 				// 左侧手柄向右拖变宽，右侧相反
-				const delta = toUiZoomPixels(side === "left" ? ev.clientX - startX : startX - ev.clientX);
-				last = Math.min(PANEL_MAX, Math.max(PANEL_MIN, Math.round(startW + delta)));
-				onResize(last);
+				const delta = side === "left" ? ev.clientX - startX : startX - ev.clientX;
+				onResize(draggedPanelPercent(startW, delta, layoutWidth));
 			};
 			const up = () => {
 				window.removeEventListener("pointermove", move);
 				window.removeEventListener("pointerup", up);
 				document.body.classList.remove("panel-resizing");
-				localStorage.setItem(panelWidthKey(side), String(last));
 			};
 			window.addEventListener("pointermove", move);
 			window.addEventListener("pointerup", up);
@@ -186,7 +183,7 @@ function ResizeHandle({ side, width, onResize }: { side: PanelSide; width: numbe
 			className={`resize-handle resize-${side}`}
 			title={t("dragToResize")}
 			onPointerDown={onPointerDown}
-			onDoubleClick={() => onResize(PANEL_DEFAULT)}
+			onDoubleClick={() => onResize(PANEL_DEFAULT_PERCENT)}
 		/>
 	);
 }
@@ -554,11 +551,23 @@ export function App() {
 		);
 		return () => installPluginHostApi(null);
 	}, [send]);
-	// 左右面板可拖拽宽度（桌面端）：localStorage 持久化，双击手柄复位。
-	const [leftWidth, setLeftWidth] = useState(() => readPanelWidth("left"));
-	const [rightWidth, setRightWidth] = useState(() => readPanelWidth("right"));
-	const resizeLeft = useCallback((w: number) => setLeftWidth(w), []);
-	const resizeRight = useCallback((w: number) => setRightWidth(w), []);
+	// Browser-local proportions retain column positions when the interface zoom changes.
+	const layoutRef = useRef<HTMLDivElement>(null);
+	const [panelRatios, setPanelRatios] = useState(() => readPanelRatios(localStorage, 0));
+	useLayoutEffect(() => {
+		const migrated = readPanelRatios(localStorage, layoutRef.current?.getBoundingClientRect().width ?? 0);
+		setPanelRatios(migrated);
+		localStorage.setItem(PANEL_RATIOS_KEY, JSON.stringify(migrated));
+	}, []);
+	const resizePanel = useCallback((side: PanelSide, percent: number) => {
+		setPanelRatios((current) => {
+			const next = resizePanelRatio(current, side, percent);
+			localStorage.setItem(PANEL_RATIOS_KEY, JSON.stringify(next));
+			return next;
+		});
+	}, []);
+	const resizeLeft = useCallback((percent: number) => resizePanel("left", percent), [resizePanel]);
+	const resizeRight = useCallback((percent: number) => resizePanel("right", percent), [resizePanel]);
 	// 左右面板折叠状态（桌面端）：localStorage 持久化，点击面板内收起按钮折叠，
 	// 靠边缘的展开条恢复；移动端抽屉不受影响（始终由顶栏按钮开关）。
 	const [leftCollapsed, setLeftCollapsed] = useState(() => readPanelCollapsed("left"));
@@ -1373,7 +1382,8 @@ export function App() {
 			<TemplateProvider currentModelId={model ? `${model.provider}/${model.id}` : null}>
 				<div
 					className="layout"
-					style={{ "--left-w": `${leftWidth}px`, "--right-w": `${rightWidth}px` } as CSSProperties}
+					ref={layoutRef}
+					style={{ "--left-w": `${panelRatios.left}%`, "--right-w": `${panelRatios.right}%` } as CSSProperties}
 				>
 					{drawer && <div className="drawer-backdrop" onClick={() => setDrawer(null)} />}
 					<div className={`view-pane ${view === "chat" ? "" : "hidden"}`}>
@@ -1403,7 +1413,7 @@ export function App() {
 								presetNames={presetNames}
 							/>
 						</div>
-						{!isMobile && <ResizeHandle side="left" width={leftWidth} onResize={resizeLeft} />}
+						{!isMobile && <ResizeHandle side="left" width={panelRatios.left} onResize={resizeLeft} />}
 						<main className={wide ? "main wide-chat" : "main"}>
 							{/* 对话头部条（chat.header 槽位）：纯插件新增位，无条目时不渲染。 */}
 							{uiChatHeader.length > 0 && (
@@ -1833,7 +1843,7 @@ export function App() {
 								sessionId={chat.state?.sessionId ?? ""}
 							/>
 						</main>
-						{!isMobile && <ResizeHandle side="right" width={rightWidth} onResize={resizeRight} />}
+						{!isMobile && <ResizeHandle side="right" width={panelRatios.right} onResize={resizeRight} />}
 						<div
 							className={`panel-drawer drawer-right ${drawer === "right" ? "open" : ""}${
 								isMobile ? "" : rightCollapsed ? " hidden" : ""

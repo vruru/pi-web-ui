@@ -208,7 +208,11 @@ export function MessageList({
 		onScroll: followOnScroll,
 		pause,
 		snap,
-	} = useMessageScroll({ active, resetKey: `${state.conversationId}:${state.sessionFile ?? ""}` });
+	} = useMessageScroll({
+		active,
+		hasMessages: state.messages.length > 0 || !!state.streamingMessage,
+		resetKey: `${state.conversationId}:${state.sessionFile ?? ""}`,
+	});
 	/** Messages the user expanded from the collapsed view — stay expanded. */
 	const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
 	/** 会话内搜索栏（Ctrl+F / Cmd+F）。 */

@@ -13,7 +13,7 @@ let viewport: number;
 let frames: FrameRequestCallback[];
 let resize: ResizeObserverCallback;
 
-let current = { active: true, resetKey: "a" };
+let current = { active: true, resetKey: "a", hasMessages: true };
 function StableHarness() {
 	hook = useMessageScroll(current);
 	return createElement("div", {
@@ -36,8 +36,8 @@ function StableHarness() {
 		onScroll: hook.onScroll,
 	});
 }
-function update(active = true, resetKey = "a") {
-	current = { active, resetKey };
+function update(active = true, resetKey = "a", hasMessages = true) {
+	current = { active, resetKey, hasMessages };
 	act(() => root.render(createElement(StableHarness)));
 }
 function flushFrames() {
@@ -156,4 +156,16 @@ describe("message transcript follows actual reading intent", () => {
 		expect(top).toBe(1600);
 		expect(hook.stickBottom).toBe(true);
 	});
+});
+
+it("空白模板从顶部显示且缩放不吸到底部，首条消息恢复跟随", () => {
+	update(true, "empty", false);
+	expect(top).toBe(0);
+	top = 100;
+	resize([], {} as ResizeObserver);
+	flushFrames();
+	expect(top).toBe(100);
+	expect(hook.stickBottom).toBe(true);
+	update(true, "empty", true);
+	expect(top).toBe(800);
 });

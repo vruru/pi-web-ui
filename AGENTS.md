@@ -244,6 +244,8 @@ npm run desktop:dist # 本地打桌面安装包 → release/（gitignore；CI �
 
 **测试规范**：端口隔离（≥8900）；data-dir 隔离（`mkdtempSync`）；精确清理自己进程；不允许 `pkill -f` 杀全局。
 
+桌面聊天左右面板使用 `web/src/panel-widths.ts` 的百分比宽度（默认各 20%，拖拽与双击复位仍可用），不随全局缩放额外挤占中间区域；输入区高度按视口限制。空白模板区不参与消息贴底，首条消息出现后恢复跟随。
+
 ## 6. 发布流程
 
 > 详细文档见 `docs/release.md`
