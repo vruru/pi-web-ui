@@ -26,6 +26,7 @@
 
 /** The client messages that install or replace software on the machine. */
 export const MANAGED_MESSAGES = [
+	"update_pi_core",
 	/** Update check behind the top-bar badge. */
 	"check_update",
 	/** "Re-check all" in the UPDATE panel (app + components). */

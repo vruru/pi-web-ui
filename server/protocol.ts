@@ -8,6 +8,29 @@
 // Serialized messages (server -> client snapshot)
 // ---------------------------------------------------------------------------
 
+export interface CoreUpdateJob {
+	id: string;
+	phase: "installing" | "restarting" | "succeeded" | "failed";
+	targetVersion: string;
+	startedAt: number;
+	updatedAt: number;
+	workerPid?: number;
+	error?: string;
+}
+export interface CoreUpdateState {
+	currentVersion: string;
+	latestVersion: string | null;
+	updateAvailable: boolean;
+	checkedAt: number | null;
+	checking: boolean;
+	checkError?: string;
+	canUpdate: boolean;
+	unsupportedReason?: string;
+	/** Transient admission constraint, separate from installation support. */
+	busyReason?: string;
+	job: CoreUpdateJob | null;
+}
+
 export interface UiTextBlock {
 	type: "text";
 	text: string;
@@ -570,6 +593,8 @@ export type ClientMessage =
 	 *  this process exits and its supervisor brings it back). The server refuses
 	 *  when no supervisor manages this instance (foreground / dev / Docker). */
 	| { type: "restart_service" }
+	| { type: "check_core_update"; force?: boolean }
+	| { type: "update_pi_core" }
 	// -- pi agent setup ------------------------------------------------------
 	/** Auto-install the pi agent (mkdir config dir + npm i -g the CLI). */
 	| { type: "install_pi_agent" }
@@ -1810,8 +1835,8 @@ export interface ConversationSummary {
  *  read-only awareness for issue #145. The owning client holds the only
  *  writer for that transcript; this entry lets other tabs discover that
  *  "someone else is running in this project" without creating a second
- *  writer. Finished-but-still-held conversations stay listed (isStreaming:
- *  false) so they can still be taken over and viewed after the run ends.
+ *  writer. Inactive conversations stay discoverable but open directly using the same
+ *  runtime; only another connected page's selection requires explicit takeover.
  *  Rows ARE actionable since manual takeover: owner/convId identify
  *  the takeover target (take_over_conversation); absent = legacy sender
  *  (e.g. DSH engine) that cannot be taken over. */
@@ -1821,6 +1846,8 @@ export interface ElsewhereRunning {
 	/** Workspace it runs in (lets the client group by project). */
 	cwd: string;
 	isStreaming: boolean;
+	/** Only another connected page's selected conversation requires explicit takeover. */
+	requiresTakeover?: boolean;
 	/** 落盘会话文件（有则前端可直接按路径打开；缺省 = inMemory/未知）。 */
 	sessionFile?: string;
 	/** Owning client id (takeover target's holder). Absent = 不可过户. */
@@ -2094,7 +2121,9 @@ export type ServerMessage =
 			 *  foreground/dev/Docker: no supervisor, so the client hides the
 			 *  "restart service" action and the server refuses restart_service. */
 			service?: UiServiceInfo;
+			coreUpdate?: CoreUpdateState;
 	  }
+	| { type: "core_update_state"; state: CoreUpdateState }
 	| { type: "snapshot"; state: UiState }
 	| {
 			/** Incremental snapshot: everything EXCEPT `messages` travels in

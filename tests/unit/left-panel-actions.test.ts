@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { getContextMenu, resetContextMenu } from "../../web/src/context-menu-state";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -72,6 +73,7 @@ function mountLeftPanel(overrides: Record<string, unknown> = {}) {
 afterEach(() => {
 	vi.unstubAllGlobals();
 	resetAppGlobals();
+	resetContextMenu();
 	if (root) act(() => root!.unmount());
 	root = null;
 	document.body.innerHTML = "";
@@ -299,5 +301,56 @@ describe("LeftPanel 会话行内嵌区", () => {
 		});
 		expect(container.querySelector(".lp-slot-sessions")).toBeNull();
 		expect(container.querySelector(".lp-slot-btn")).toBeNull();
+	});
+});
+
+describe("LeftPanel selected-page ownership", () => {
+	const elsewhere = {
+		title: "Conversation 2",
+		cwd: "/test",
+		isStreaming: false,
+		owner: "browser-a",
+		convId: "conv-2",
+		sessionFile: "/test/two.jsonl",
+	};
+	const uiContextSession = [
+		{ id: "host:conv-takeover", source: "host", label: "Take over", type: "action", slot: "contextmenu.session" },
+	];
+	it("opens an inactive retained conversation directly, without a takeover badge or action", () => {
+		setAppGlobals({ cwd: "/test", ready: true, status: "open" });
+		const { container, sent } = mountLeftPanel({
+			elsewhere: [{ ...elsewhere, requiresTakeover: false }],
+			uiContextSession,
+		});
+		const button = container.querySelector<HTMLButtonElement>(".convs-scroll button.session-item")!;
+		expect(button).not.toBeNull();
+		expect(button.textContent).toContain("Conversation 2");
+		expect(button.title).toContain("打开");
+		expect(container.querySelector(".elsewhere-badge")).toBeNull();
+		sent.length = 0;
+		act(() => button.click());
+		expect(sent).toEqual([{ type: "switch_session", path: "/test/two.jsonl" }]);
+		act(() => button.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })));
+		expect(getContextMenu()?.entries.find((entry) => entry.id === "host:conv-takeover")?.hidden).toBe(true);
+	});
+	it.each([true, undefined])(
+		"keeps manual takeover for another page's selected or legacy conversation (%s)",
+		(requiresTakeover) => {
+			setAppGlobals({ cwd: "/test", ready: true, status: "open" });
+			const { container } = mountLeftPanel({ elsewhere: [{ ...elsewhere, requiresTakeover }], uiContextSession });
+			expect(container.querySelector(".convs-scroll button.session-item")).toBeNull();
+			const row = container.querySelector(".elsewhere-item")!;
+			expect(row).not.toBeNull();
+			act(() => row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })));
+			expect(getContextMenu()?.entries.find((entry) => entry.id === "host:conv-takeover")?.hidden).not.toBe(true);
+		},
+	);
+	it("does not invent a session path for a legacy in-memory conversation", () => {
+		setAppGlobals({ cwd: "/test", ready: true, status: "open" });
+		const { container } = mountLeftPanel({
+			elsewhere: [{ ...elsewhere, sessionFile: undefined, requiresTakeover: false }],
+		});
+		expect(container.querySelector(".convs-scroll button.session-item")).toBeNull();
+		expect(container.querySelector(".elsewhere-item")).not.toBeNull();
 	});
 });

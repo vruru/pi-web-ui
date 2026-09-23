@@ -14,7 +14,7 @@ npm run format:check # 只检查不改写（CI 跑这个）
 npm run build        # build:web (vite) + build:server (tsc) + build:dsh-runtime + build:mermaid-vendor + build:runtrace-vendor
 npm start            # 跑编译产物 dist/server/index.js（生产）
 npm test             # vitest 纯函数单测（tests/unit/，毫秒级零 token）
-npm run test:smoke   # 零 token 协议冒烟聚合跑器（tests/run-smoke.mjs，66 个自包含测试）
+npm run test:smoke   # 零 token 协议冒烟聚合跑器（tests/run-smoke.mjs，67 个自包含测试）
 npm run test:freeze  # 冻结/重连回归测试（Playwright，需要本机 chromium headless）
 ```
 
@@ -22,7 +22,7 @@ npm run test:freeze  # 冻结/重连回归测试（Playwright，需要本机 chr
 
 GitHub Actions ubuntu-latest（`.github/workflows/ci.yml`，push/PR → main 触发）：`format:check → lint → check:protocol → typecheck → build → build:extension → pack:extension → vitest → test:smoke`。
 
-冒烟清单（tests/run-smoke.mjs 的 ALL，66 个）只收**自包含、零 token、跨平台**的测试；attach 型（需外部 server）、需真模型、平台相关的脚本不进 CI，本地手动跑（分类见 run-smoke.mjs 头部注释）。
+冒烟清单（tests/run-smoke.mjs 的 ALL，67 个）只收**自包含、零 token、跨平台**的测试；attach 型（需外部 server）、需真模型、平台相关的脚本不进 CI，本地手动跑（分类见 run-smoke.mjs 头部注释）。
 
 ## 编码约定
 
@@ -103,3 +103,13 @@ spawn 后记录 `server.pid`，测试收尾（含异常 catch 路径）用 `proc
 **Playwright 脚本**：Chrome 路径不再写死——`tests/lib/chrome.mjs` 逐平台探测（`PI_WEB_CHROME` 可覆盖）。跨平台两条硬规则：① 脚本里取仓库根用 `fileURLToPath(new URL("..", import.meta.url))`，`URL.pathname` 在 Windows 上是 `/E:/...`，`spawn` 的 cwd/脚本参数都会 ENOENT；② 服务端进程清理在 win32 用 `tests/lib/port-utils.mjs` 的 `freePort(port)`（Windows 没有负数 PID 的进程组，`process.kill(-pid)` 静默失败会留下监听进程）。
 
 **测试脚本里禁止在 try 块内直接 `process.exit`**：`process.exit` 会跳过 `finally`，spawn 的 server 永远不会被杀 → 每次运行泄漏一个进程，下次跑同端口测试报 "port busy — abort"（steer-queue-smoke 踩过，已修：设 ok 标志 + finally 里杀进程并等端口释放再 exit）。
+
+### Pi 核心更新
+
+底栏连接入口使用 `CoreUpdateStatus`，服务端 `CoreUpdateManager` 维护真实运行 SDK 版本与 npm 官方 `latest` 稳定版。启动及每 6 小时检查，强制检查也有 30 秒去重；`PI_WEB_CORE_UPDATE_CHECK=off` 仅关闭自动检查，隔离测试默认设置。
+
+当前自动安装支持 macOS launchd 管理、`PI_WEB_SDK=global` 的独立 npm 全局核心。必须从已加载 SDK 路径确定实际安装前缀，不能用另一套 Node 的默认 npm 前缀。其他安装形态仍可查看版本，但明确显示无法自动安装。`PI_WEB_MANAGED=1` 在服务端拒绝更新。
+
+点击更新走 `update_pi_core`：先由 `CoreUpdateAdmission` 同步暂停接收新工作，并拒绝有运行中对话、已接收但尚在准备的消息、会话初始化、排队消息或插件安装的情况；独立 worker 将核心及依赖备份到 data-dir，安装精确稳定版本，校验 SDK 导入，重启同一 launchd 服务并校验新 PID/目标版本。失败时从本地备份恢复。全过程不更新 pi-web-ui，不触碰 Pi 配置和会话。持久化 `core-update.json` 让重启后的服务恢复状态；`/api/core-update` 为遵守现有 token 鉴权的只读状态接口，供断线页面轮询。页面只有在聊天连接恢复后才显示升级完成。
+
+`core-update-test` 覆盖真实 HTTP/WS 协议、鉴权和不支持环境的拒绝路径；对应 unit 测试覆盖安装状态机、版本检查、并发锁、恢复、接收新工作控制以及浮层提醒和重连显示。

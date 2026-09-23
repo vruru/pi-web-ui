@@ -40,6 +40,7 @@ import {
 import { Type } from "typebox";
 import { BgServerTracker } from "./bg-servers.js";
 import { GenerationStatsTracker } from "./generation-stats.js";
+import { pendingCoreWork as pendingCoreWorkFor, withCoreWork } from "./core-work.js";
 import {
 	checkAll as checkAllUpdates,
 	collectTargets,
@@ -905,6 +906,10 @@ export { workspacePath };
  * 导出给过户载荷类型（TakeoverPayload）用：对话对象本身在会话之间整体搬迁。
  */
 export interface Conversation {
+	/** Extension UI belongs to this runtime and follows it across browser ownership. */
+	extensionUi?: WebUIContext;
+	extensionUiSession?: AgentSession;
+	emitExtensionError?: (text: string) => void;
 	/** Runtime-only generation timing belongs to this conversation, never session totals. */
 	generationStats?: GenerationStatsTracker;
 	id: string;
@@ -1211,6 +1216,9 @@ function contextWindowOf(session: {
  *  streaming 照拦（后台 run 不随标签页消失），idle 警告不再打扰。 */
 export interface SessionOwnerInfo {
 	clientId: string;
+	conversationId?: string;
+	requiresTakeover?: boolean;
+	transferring?: boolean;
 	title: string;
 	cwd: string;
 	isStreaming: boolean;
@@ -1298,6 +1306,11 @@ export function sameCwd(a: string, b: string): boolean {
 }
 
 export class ClientSession {
+	/** Accepted prompts and session mutations, including pre-stream async work. */
+	pendingCoreWork(): number {
+		return pendingCoreWorkFor(this);
+	}
+
 	readonly clientId: string;
 	/** Set by AgentService.attach: reflects the SERVICE-wide quiesce flag
 	 *  (server draining — new work rejected). Default false for direct use. */
@@ -1587,8 +1600,8 @@ export class ClientSession {
 				// 子代理的扩展照常拿到完整 ExtensionUIContext（扩展调用新增方法不会因
 				// 局部 mock 缺失而崩），但它是 headless 的：UI 输出全部丢弃、弹窗按取消返回，
 				// 因此既不与主对话的 widget/status 串台，也不会让扩展卡在永远无人应答的弹窗上。
-				uiContext: WebUIContext.headless(),
-				onError: (err) => this.emit({ type: "notice", level: "error", text: err.error, textEn: err.error }),
+				uiContext: this.extensionUiFor(conv, true),
+				onError: (err) => conv.emitExtensionError?.(err.error),
 			});
 		} catch {
 			// 绑定失败不阻断运行。
@@ -1929,7 +1942,49 @@ export class ClientSession {
 	}
 
 	/** Web-facing extension UI context (widgets, notifications). */
-	private webUi = new WebUIContext((msg) => this.emit(msg));
+	private webUi = new WebUIContext((msg) => this.emitHostUi(msg));
+	/** Outbound runtimes must survive source active-view repair during takeover. */
+	private takeoverDepartures = new Set<Conversation>();
+
+	private activeExtensionUi(): WebUIContext | undefined {
+		return this.convs.get(this.activeId)?.extensionUi;
+	}
+
+	private emitHostUi(msg: ServerMessage): void {
+		if (msg.type === "widgets") {
+			this.emit({ ...msg, widgets: [...msg.widgets, ...(this.activeExtensionUi()?.snapshot() ?? [])] });
+		} else if (msg.type === "statuses") {
+			this.emit({ ...msg, statuses: [...msg.statuses, ...(this.activeExtensionUi()?.statusSnapshot() ?? [])] });
+		} else this.emit(msg);
+	}
+
+	private emitConversationUi(conv: Conversation, msg: ServerMessage): void {
+		if (msg.type === "widgets" || msg.type === "statuses") {
+			if (conv.id !== this.activeId || this.convs.get(conv.id) !== conv) return;
+			if (msg.type === "widgets") this.emit({ ...msg, widgets: [...this.webUi.snapshot(), ...msg.widgets] });
+			else this.emit({ ...msg, statuses: [...this.webUi.statusSnapshot(), ...msg.statuses] });
+		} else this.emit(msg);
+	}
+
+	private refreshConversationUi(): void {
+		this.webUi.refresh();
+		this.activeExtensionUi()?.refresh();
+		// Switching must replace the former view even when neither widget changed.
+		this.emitHostUi({ type: "widgets", widgets: this.webUi.snapshot() });
+		this.emitHostUi({ type: "statuses", statuses: this.webUi.statusSnapshot() });
+	}
+
+	private extensionUiFor(conv: Conversation, headless = false): WebUIContext {
+		if (!conv.extensionUi || conv.extensionUiSession !== conv.session) {
+			conv.extensionUi?.dispose();
+			conv.extensionUi = headless
+				? WebUIContext.headless()
+				: new WebUIContext((msg) => this.emitConversationUi(conv, msg));
+			conv.extensionUiSession = conv.session;
+		}
+		conv.emitExtensionError = (text) => this.emit({ type: "notice", level: "error", text, textEn: text });
+		return conv.extensionUi;
+	}
 
 	/**
 	 * 第一方子代理 host（见 subagents.ts 设计头注）。子代理 = 一个标记
@@ -2390,7 +2445,7 @@ export class ClientSession {
 		clientId: string,
 		cwd: string,
 		stateStore: ClientStateStore,
-		opts?: { blank?: boolean; blankTitle?: string; idleHeld?: boolean },
+		opts?: { blank?: boolean; blankTitle?: string; idleHeld?: boolean; resumePath?: string },
 	): Promise<ClientSession> {
 		const agentDir = process.env.PI_CODING_AGENT_DIR ?? getAgentDir();
 
@@ -2404,7 +2459,12 @@ export class ClientSession {
 		// issue #235：坏转录（重复压缩标记成环）修一次再试，否则整项目首屏
 		// "Failed to initialize session"。
 		const opened = await cs.openManagerAndRuntime(
-			() => (opts?.blank ? SessionManager.create(cwd) : SessionManager.continueRecent(cwd)),
+			() =>
+				opts?.blank
+					? SessionManager.create(cwd)
+					: opts?.resumePath
+						? SessionManager.open(opts.resumePath)
+						: SessionManager.continueRecent(cwd),
 			(m) =>
 				createAgentSessionRuntime(cs.makeRuntimeFactory(terminals, undefined, conversationId), {
 					cwd,
@@ -2441,14 +2501,14 @@ export class ClientSession {
 					? {
 							type: "notice",
 							level: "info",
-							text: `该项目最近的对话「${opts.blankTitle}」在另一处开着（当前空闲），为你停在了空白新对话 —— 可在左栏「运行的对话」里把它过户过来继续看，或从历史对话里打开（只留一处发送消息，否则历史分叉）。`,
-							textEn: `The most recent conversation ("${opts.blankTitle}") is still open in another window (currently idle), so you landed on a blank chat instead — take it over from Running chats (tagged "Elsewhere") or reopen it from History (send new messages from only one place, or the history will fork).`,
+							text: `该项目最近的对话「${opts.blankTitle}」在另一处开着（当前空闲），为你停在了空白新对话 —— 请在左栏「运行的对话」里点击接管，或等待对方切换到别的对话后直接打开。`,
+							textEn: `The most recent conversation ("${opts.blankTitle}") is still open in another window (currently idle), so you landed on a blank chat instead — take it over from Running chats, or open it directly after the other page selects another conversation.`,
 						}
 					: {
 							type: "notice",
 							level: "info",
-							text: `该项目最近的对话「${opts.blankTitle}」正在另一处运行，为你停在了新对话 —— 直接打开会造出第二个写者。左栏「运行的对话」里能看到它（标着“另一处”），等它跑完再打开。`,
-							textEn: `The most recent conversation ("${opts.blankTitle}") is running in another window, so you landed on a new chat instead — opening it here would create a second writer. It is listed under Running chats (tagged "Elsewhere"); open it after it finishes.`,
+							text: `该项目最近的对话「${opts.blankTitle}」正在另一处运行，为你停在了新对话 —— 直接打开会造出第二个写者。请在左栏「运行的对话」里点击接管，或等待对方切换到别的对话后直接打开。`,
+							textEn: `The most recent conversation ("${opts.blankTitle}") is running in another window, so you landed on a new chat instead — opening it here would create a second writer. Take it over from Running chats, or open it directly after the other page selects another conversation.`,
 						},
 			);
 		}
@@ -2866,6 +2926,12 @@ export class ClientSession {
 	 *  Called once on the first attach after a restart (fire-and-forget from
 	 *  the attach path — each step is internally guarded and never throws). */
 	async resumeInterrupted(
+		...args: Parameters<ClientSession["resumeInterruptedImpl"]>
+	): ReturnType<ClientSession["resumeInterruptedImpl"]> {
+		return withCoreWork(this, () => this.resumeInterruptedImpl(...args));
+	}
+
+	private async resumeInterruptedImpl(
 		list: { title: string; cwd: string; at: number; sessionFile?: string }[] | undefined,
 	): Promise<void> {
 		if (!list || list.length === 0) return;
@@ -2916,9 +2982,9 @@ export class ClientSession {
 		this.pendingNotices = [];
 		// Replay current extension widgets (setWidget may have fired during
 		// session creation, before any socket was attached).
-		const widgets = this.webUi.snapshot();
+		const widgets = [...this.webUi.snapshot(), ...(this.activeExtensionUi()?.snapshot() ?? [])];
 		if (widgets.length > 0) send({ type: "widgets", widgets });
-		const statuses = this.webUi.statusSnapshot();
+		const statuses = [...this.webUi.statusSnapshot(), ...(this.activeExtensionUi()?.statusSnapshot() ?? [])];
 		if (statuses.length > 0) send({ type: "statuses", statuses });
 		// Reconnect: push the current project's running-conversation list so the
 		// left panel shows every background chat (a fresh socket never got the
@@ -2971,9 +3037,9 @@ export class ClientSession {
 		conv.session = conv.runtime.session;
 		await conv.session.bindExtensions({
 			mode: "rpc",
-			uiContext: this.webUi,
+			uiContext: this.extensionUiFor(conv),
 			onError: (err) => {
-				this.emit({ type: "notice", level: "error", text: err.error, textEn: err.error });
+				conv.emitExtensionError?.(err.error);
 			},
 		});
 		conv.unsubscribe = conv.session.subscribe((event) => this.onEvent(conv, event));
@@ -2984,7 +3050,7 @@ export class ClientSession {
 		// 软上限覆盖同路重放（新 runtime 的 SettingsManager 是干净的，issue #229）。
 		this.applyCompactionOverrides();
 		this.scheduleSnapshot();
-		this.webUi.refresh();
+		this.refreshConversationUi();
 		this.startWidgetsTimer();
 		this.startStallTimer();
 	}
@@ -2994,7 +3060,10 @@ export class ClientSession {
 	private startWidgetsTimer(): void {
 		if (this.widgetsTimer) return;
 		this.widgetsTimer = setInterval(() => {
-			if (!this.disposed && this.webUi.hasWidgets()) this.webUi.refresh();
+			if (!this.disposed) {
+				if (this.webUi.hasWidgets()) this.webUi.refresh();
+				this.activeExtensionUi()?.refresh();
+			}
 		}, WIDGET_REFRESH_MS);
 	}
 
@@ -4130,6 +4199,7 @@ export class ClientSession {
 	/** Resolve a browser-bridged dialog (select/confirm/input) for this session. */
 	resolveDialog(id: number, value: string | boolean | null): void {
 		this.webUi.resolveDialog(id, value);
+		for (const conv of this.convs.values()) conv.extensionUi?.resolveDialog(id, value);
 	}
 
 	// -----------------------------------------------------------------------
@@ -4593,6 +4663,8 @@ export class ClientSession {
 	 *  - onRunningChanged：本实例流式集合变化时触发，AgentService 借此让其他
 	 *    客户端重推 conversations（elsewhere 列表近实时）。 */
 	findSessionOwner: ((targetPath: string) => SessionOwnerInfo | null) | undefined = undefined;
+	adoptInactiveSession: ((targetPath: string) => Promise<boolean>) | undefined = undefined;
+	reserveSessionFile: ((targetPath: string) => () => void) | undefined = undefined;
 	/** 插件 steer 跨客户端兜底钩子：attach 时由 AgentService 接线（见 steerElsewhere），
 	 *  在其他客户端的 conversations 里找对话并由持有方执行 steer，未持有回 undefined。 */
 	steerConversationElsewhere:
@@ -5396,6 +5468,13 @@ export class ClientSession {
 		return undefined;
 	}
 
+	/** Only the selected conversation (or its selected descendant) is controlled here. */
+	requiresManualTakeover(id: string): boolean {
+		if (this.sinkCount() === 0) return false;
+		if (this.activeId === id) return true;
+		return collectSubagentDescendantIds(this.takeoverBriefs(), id).includes(this.activeId);
+	}
+
 	/** issue #145：某对话是否正在流式运行（替换中按未跑处理，不误拦）。 */
 	conversationStreaming(conv: Conversation): boolean {
 		try {
@@ -5555,7 +5634,11 @@ export class ClientSession {
 		this.emit(msg);
 	}
 
-	async prompt(
+	async prompt(...args: Parameters<ClientSession["promptImpl"]>): ReturnType<ClientSession["promptImpl"]> {
+		return withCoreWork(this, () => this.promptImpl(...args));
+	}
+
+	private async promptImpl(
 		text: string,
 		attachments?: {
 			path: string;
@@ -5886,7 +5969,11 @@ export class ClientSession {
 	 *  本轮已停止并标红，用户点「重试」再触发一轮 LLM 调用。不新增用户气泡——
 	 *  用 display:false 的 custom 消息 triggerTurn 续跑，模型基于完整上下文
 	 * （含上次报错）继续生成。流式中 / 无可重试失败时只发 notice 拒绝。 */
-	async retryLast(): Promise<void> {
+	async retryLast(...args: Parameters<ClientSession["retryLastImpl"]>): ReturnType<ClientSession["retryLastImpl"]> {
+		return withCoreWork(this, () => this.retryLastImpl(...args));
+	}
+
+	private async retryLastImpl(): Promise<void> {
 		const conv = this.conv;
 		try {
 			if (this.quiesceBlocked()) return;
@@ -6192,6 +6279,7 @@ export class ClientSession {
 			conv.generationStats = undefined;
 			this.clearAllToolWatchdogs(conv);
 			conv.toolStartTimes.clear();
+			conv.extensionUi?.dispose();
 			await conv.runtime.dispose();
 			// #235：转录链损坏时修一次再试（见 openManagerAndRuntime）。
 			const opened = await this.openManagerAndRuntime(
@@ -6233,7 +6321,11 @@ export class ClientSession {
 	 *  空白新对话」——/new <prompt> 只在 true 时投递首条提示；false 表示没能进入
 	 *  新对话（准入关闭 / 同项目对话数达上限 / runtime 创建失败），此时照发会把
 	 *  首条提示投进用户原本正在用的那个对话里。 */
-	async newChat(_preset?: string): Promise<boolean> {
+	async newChat(...args: Parameters<ClientSession["newChatImpl"]>): ReturnType<ClientSession["newChatImpl"]> {
+		return withCoreWork(this, () => this.newChatImpl(...args));
+	}
+
+	private async newChatImpl(_preset?: string): Promise<boolean> {
 		// _preset: DSH Agent 预设（pi 引擎无此概念，忽略；wire 统一见 protocol new_chat）。
 		if (this.quiesceBlocked()) return false;
 		// Reuse an already-open blank conversation instead of piling up new ones
@@ -6250,12 +6342,12 @@ export class ClientSession {
 			}
 		};
 		const active = this.conv;
-		if (active && isBlank(active)) {
+		if (active && !this.takeoverDepartures.has(active) && isBlank(active)) {
 			this.flushSnapshot();
 			return true;
 		}
 		for (const conv of this.convs.values()) {
-			if (conv.id === this.activeId) continue;
+			if (conv.id === this.activeId || this.takeoverDepartures.has(conv)) continue;
 			if (isBlank(conv)) {
 				await this.switchConversation(conv.id);
 				this.flushSnapshot();
@@ -6554,6 +6646,7 @@ export class ClientSession {
 
 	private displaceActive(): Conversation | null {
 		const conv = this.conv;
+		if (this.takeoverDepartures.has(conv)) return null;
 		// 子代理不受切换关闭影响（见上）。
 		if (conv.isSubagent) {
 			conv.listed = true;
@@ -6619,6 +6712,7 @@ export class ClientSession {
 		conv.terminals.killAll();
 		conv.unsubscribe?.();
 		conv.unsubscribe = undefined;
+		conv.extensionUi?.dispose();
 		void conv.runtime.dispose().catch(() => {});
 	}
 
@@ -6632,13 +6726,21 @@ export class ClientSession {
 	}
 
 	/** 过户用的对话摘要（AgentService 拼移动集合 + 容量检查用）。 */
-	takeoverBriefs(): { id: string; title: string; cwd: string; parentId?: string; isSubagent: boolean }[] {
+	takeoverBriefs(): {
+		id: string;
+		title: string;
+		cwd: string;
+		parentId?: string;
+		isSubagent: boolean;
+		sessionFile?: string;
+	}[] {
 		return [...this.convs.values()].map((c) => ({
 			id: c.id,
 			title: c.title,
 			cwd: c.cwd,
 			...(c.parentId ? { parentId: c.parentId } : {}),
 			isSubagent: c.isSubagent,
+			sessionFile: c.session?.sessionFile ?? undefined,
 		}));
 	}
 
@@ -6654,44 +6756,50 @@ export class ClientSession {
 	): Promise<{ ok: true; payload: TakeoverPayload } | { ok: false; reason: "missing" | "empty" }> {
 		const set = new Set(ids);
 		const convs = [...this.convs.values()].filter((c) => set.has(c.id));
-		if (convs.length === 0) return { ok: false, reason: "missing" };
-		if (set.has(this.activeId)) {
-			const remaining =
-				[...this.convs.values()].find((c) => !set.has(c.id) && !c.isSubagent) ??
-				[...this.convs.values()].find((c) => !set.has(c.id));
-			if (remaining) {
-				await this.switchConversation(remaining.id);
-			} else if (!(await this.newChat())) {
-				return { ok: false, reason: "empty" };
+		if (convs.length === 0 || convs.some((conv) => this.takeoverDepartures.has(conv)))
+			return { ok: false, reason: "missing" };
+		for (const conv of convs) this.takeoverDepartures.add(conv);
+		try {
+			if (set.has(this.activeId)) {
+				const remaining =
+					[...this.convs.values()].find((c) => !set.has(c.id) && !c.isSubagent) ??
+					[...this.convs.values()].find((c) => !set.has(c.id));
+				if (remaining) {
+					await this.switchConversation(remaining.id);
+				} else if (!(await this.newChat())) {
+					return { ok: false, reason: "empty" };
+				}
 			}
-		}
-		for (const conv of convs) {
-			this.convs.delete(conv.id);
-			this.clearAllToolWatchdogs(conv);
-			conv.unsubscribe?.();
-			conv.unsubscribe = undefined;
-		}
-		const questions: TakeoverQuestion[] = [];
-		for (const [qid, p] of this.pendingQuestions) {
-			if (p.conversationId !== undefined && set.has(p.conversationId)) {
-				this.pendingQuestions.delete(qid);
-				questions.push({ resolve: p.resolve, questions: p.questions, conversationId: p.conversationId });
-				// 源页面的对话框可能是即时通道弹出的（live），快照为 null 收不掉它 ——
-				// 明确撤回，让源页面立即收起（目标页主对话由转入方重推 question_pending 或快照呈现）。
-				this.emit({ type: "question_retracted", id: qid });
+			for (const conv of convs) {
+				this.convs.delete(conv.id);
+				this.clearAllToolWatchdogs(conv);
+				conv.unsubscribe?.();
+				conv.unsubscribe = undefined;
 			}
-		}
-		const pageCalls: TakeoverPageCall[] = [];
-		for (const [pid, p] of this.pendingPageCalls) {
-			if (p.conversationId !== undefined && set.has(p.conversationId)) {
-				this.pendingPageCalls.delete(pid);
-				clearTimeout(p.timer);
-				pageCalls.push({ resolve: p.resolve, req: p.req, timeoutMs: p.timeoutMs, conversationId: p.conversationId });
+			const questions: TakeoverQuestion[] = [];
+			for (const [qid, p] of this.pendingQuestions) {
+				if (p.conversationId !== undefined && set.has(p.conversationId)) {
+					this.pendingQuestions.delete(qid);
+					questions.push({ resolve: p.resolve, questions: p.questions, conversationId: p.conversationId });
+					// 源页面的对话框可能是即时通道弹出的（live），快照为 null 收不掉它 ——
+					// 明确撤回，让源页面立即收起（目标页主对话由转入方重推 question_pending 或快照呈现）。
+					this.emit({ type: "question_retracted", id: qid });
+				}
 			}
+			const pageCalls: TakeoverPageCall[] = [];
+			for (const [pid, p] of this.pendingPageCalls) {
+				if (p.conversationId !== undefined && set.has(p.conversationId)) {
+					this.pendingPageCalls.delete(pid);
+					clearTimeout(p.timer);
+					pageCalls.push({ resolve: p.resolve, req: p.req, timeoutMs: p.timeoutMs, conversationId: p.conversationId });
+				}
+			}
+			this.emitConversations();
+			this.flushSnapshot();
+			return { ok: true, payload: { convs, questions, pageCalls } };
+		} finally {
+			for (const conv of convs) this.takeoverDepartures.delete(conv);
 		}
-		this.emitConversations();
-		this.flushSnapshot();
-		return { ok: true, payload: { convs, questions, pageCalls } };
 	}
 
 	/**
@@ -6716,6 +6824,8 @@ export class ClientSession {
 			if (conv.parentId) conv.parentId = fix(conv.parentId);
 			if (!conv.isSubagent && !mainId) mainId = conv.id;
 			conv.lastActiveAt = Date.now();
+			conv.extensionUi?.rebindEmit((msg) => this.emitConversationUi(conv, msg));
+			conv.emitExtensionError = (text) => this.emit({ type: "notice", level: "error", text, textEn: text });
 			conv.terminals.rebindEmit((msg) => this.emitTerminal(conv.id, msg));
 			conv.terminals.onAgentIdle = (terminalId, idleMs, title, lastLines) =>
 				this.notifyTerminalIdle(conv.id, terminalId, idleMs, title, lastLines);
@@ -6788,7 +6898,7 @@ export class ClientSession {
 		if (displaced) this.removeConversation(displaced.id);
 		this.conv.promptedSinceActive = false;
 		this.conv.lastActiveAt = Date.now();
-		this.webUi.refresh();
+		this.refreshConversationUi();
 		this.emitConversations();
 		this.goalSvc.emitGoalStatus();
 		this.pushTerminals();
@@ -6916,7 +7026,10 @@ export class ClientSession {
 			const sig = JSON.stringify(
 				[...this.convs.values()]
 					.filter((c) => this.conversationStreaming(c) || (!c.isSubagent && this.shownInRunningList(c)))
-					.map((c) => `${c.id}:${this.conversationStreaming(c) ? 1 : 0}:${this.isWaitingOnUser(c.id) ? 1 : 0}`)
+					.map(
+						(c) =>
+							`${c.id}:${this.conversationStreaming(c) ? 1 : 0}:${this.isWaitingOnUser(c.id) ? 1 : 0}:${this.requiresManualTakeover(c.id) ? 1 : 0}`,
+					)
 					.sort(),
 			);
 			if (sig !== this.lastRunningSig) {
@@ -7713,10 +7826,17 @@ export class ClientSession {
 	 * current runtime, which would otherwise stop a response merely because the
 	 * user opened history while it was streaming.
 	 */
-	async switchSession(path: string): Promise<void> {
+	async switchSession(
+		...args: Parameters<ClientSession["switchSessionImpl"]>
+	): ReturnType<ClientSession["switchSessionImpl"]> {
+		return withCoreWork(this, () => this.switchSessionImpl(...args));
+	}
+
+	private async switchSessionImpl(path: string): Promise<void> {
 		if (this.quiesceBlocked()) return;
 		let openedRuntime: AgentSessionRuntime | null = null;
 		let openedTerminals: TerminalManager | null = null;
+		let releaseOpening: (() => void) | undefined;
 		try {
 			const targetPath = resolve(path);
 			if (!isInsideSessionsDir(this.agentDir, targetPath)) {
@@ -7740,33 +7860,26 @@ export class ClientSession {
 				}
 			}
 
-			// issue #145：同一文件在别处已有持有者 —— 绝不建第二个 writer。
-			// 正在跑：直接拒绝（否则两支 run 并发写同一份 JSONL，事后只有一支可读）；
-			// 空闲：放行打开（只剩一处能发送时不会分叉），但提醒用户别处也开着，
-			// 发消息前的 prompt() 守卫会再查一次（开时空闲、发时在跑的竞态也拦得住）。
+			// Reuse a retained runtime on another browser when it is not selected
+			// there. Never create another writer, even when that runtime is idle.
 			const owner = this.findSessionOwner?.(targetPath);
-			if (owner && owner.isStreaming) {
+			if (owner) {
+				if (owner.requiresTakeover === false && (await this.adoptInactiveSession?.(targetPath))) return;
 				this.emit({
 					type: "notice",
 					level: "warning",
-					text: `该对话正在另一处运行中（「${owner.title}」），为避免两个 agent 同时写同一份记录，已停止打开。请等它结束后再试，或回到原窗口继续。`,
-					textEn: `This conversation is running in another window ("${owner.title}"). Opening it here would create a second writer for the same transcript, so it was blocked. Wait for it to finish, or continue in the original window.`,
+					text: owner.transferring
+						? "该对话正在切换，请稍后再试。"
+						: `该对话正在另一页面中打开（「${owner.title}」），请点击接管后继续。`,
+					textEn: owner.transferring
+						? "This conversation is being moved; retry shortly."
+						: `This conversation is selected in another page ("${owner.title}"). Take it over to continue here.`,
 				});
 				this.flushSnapshot();
 				return;
 			}
-			if (owner) {
-				// 对端已断开（标签页关了）只剩残留会话 —— 不打扰，直接开。
-				if (owner.connected) {
-					this.emit({
-						type: "notice",
-						level: "info",
-						text: `提醒：该对话在另一处也开着（「${owner.title}」，当前空闲）。请只留一处发送消息，否则两边轮流发送会让历史分叉、其中一支事后不可见。`,
-						textEn: `Note: this conversation is also open in another window ("${owner.title}", currently idle). Send new messages from only one place — alternating between two writers forks the history and hides one branch.`,
-					});
-				}
-			}
 
+			releaseOpening = this.reserveSessionFile?.(targetPath);
 			// #235：先修后开——坏转录到 open 后的 getBranch 会死循环，修完再读。
 			// 单文件预扫描，健康文件只多一次小读；修过即弹提示（含压缩被打断）。
 			this.repairTranscriptFileBeforeOpen(targetPath);
@@ -7824,7 +7937,7 @@ export class ClientSession {
 			await this.restoreProjectProviderKeysForCwd(targetCwd);
 			await this.restoreProjectModelForCwd(targetCwd);
 			this.conv.lastActiveAt = Date.now();
-			this.webUi.refresh();
+			this.refreshConversationUi();
 			this.emitConversations();
 			this.goalSvc.emitGoalStatus();
 			this.pushTerminals();
@@ -7841,6 +7954,8 @@ export class ClientSession {
 				text: `切换会话失败：${(err as Error).message}`,
 				textEn: `Failed to switch session: ${(err as Error).message}`,
 			});
+		} finally {
+			releaseOpening?.();
 		}
 		this.flushSnapshot();
 	}
@@ -7882,6 +7997,12 @@ export class ClientSession {
 	 * newly pasted/dropped ones). Text-only edits pass undefined.
 	 */
 	async editMessage(
+		...args: Parameters<ClientSession["editMessageImpl"]>
+	): ReturnType<ClientSession["editMessageImpl"]> {
+		return withCoreWork(this, () => this.editMessageImpl(...args));
+	}
+
+	private async editMessageImpl(
 		messageId: string,
 		text: string,
 		attachments?: Parameters<ClientSession["prompt"]>[1],
@@ -8318,7 +8439,12 @@ export class ClientSession {
 		this.flushSnapshot();
 	}
 
-	async setCwd(newCwd: string): Promise<void> {
+	async setCwd(...args: Parameters<ClientSession["setCwdImpl"]>): ReturnType<ClientSession["setCwdImpl"]> {
+		return withCoreWork(this, () => this.setCwdImpl(...args));
+	}
+
+	private async setCwdImpl(newCwd: string): Promise<void> {
+		let releaseOpening: (() => void) | undefined;
 		try {
 			const { resolve, sep } = await import("node:path");
 			this.files.unwatchGit(); // stale repo's watcher must not fire across projects
@@ -8391,25 +8517,30 @@ export class ClientSession {
 				// files fork the same way — 第二个写者不只跑着时才危险). Land
 				// blank instead.
 				let resumeSkipped: SessionOwnerInfo | null = null;
+				let resumePath: string | undefined;
 				// 别处无可见行时不扫目录（首访切项目的常见情形零开销）。
-				if ((this.listExternalRunning?.() ?? []).length > 0) {
+				{
 					try {
 						const infos = await SessionManager.list(abs, piSessionsRoot());
 						const recent = infos[0]?.path ? resolve(infos[0].path) : undefined;
+						resumePath = recent;
 						const owner = recent ? this.findSessionOwner?.(recent) : null;
-						if (owner && (owner.connected || owner.isStreaming)) {
+						if (owner && recent && owner.requiresTakeover === false && (await this.adoptInactiveSession?.(recent)))
+							return;
+						if (owner) {
 							resumeSkipped = owner;
 						}
 					} catch {
 						// 列表失败不挡正常恢复
 					}
 				}
+				if (resumePath && !resumeSkipped) releaseOpening = this.reserveSessionFile?.(resumePath);
 				const conversationId = this.nextConversationId();
 				const terminals = this.makeTerminalManager(conversationId, abs);
 				// #235：manager＋runtime 一起建，转录链损坏时修最近文件后重试一次
 				// （见 openManagerAndRuntime）。blank（别处在跑）是全新空会话，不会坏。
 				const opened = await this.openManagerAndRuntime(
-					() => (resumeSkipped ? SessionManager.create(abs) : SessionManager.continueRecent(abs)),
+					() => (resumeSkipped || !resumePath ? SessionManager.create(abs) : SessionManager.open(resumePath)),
 					(m) =>
 						createAgentSessionRuntime(this.makeRuntimeFactory(terminals, undefined, conversationId), {
 							cwd: abs,
@@ -8438,14 +8569,14 @@ export class ClientSession {
 							? {
 									type: "notice",
 									level: "info",
-									text: `该项目最近的对话「${resumeSkipped.title}」正在另一处运行，为你停在了新对话 —— 直接打开会造出第二个写者。左栏「运行的对话」里能看到它（标着“另一处”），等它跑完再打开。`,
-									textEn: `The most recent conversation ("${resumeSkipped.title}") is running in another window, so you landed on a new chat instead — opening it here would create a second writer. It is listed under Running chats (tagged "Elsewhere"); open it after it finishes.`,
+									text: `该项目最近的对话「${resumeSkipped.title}」正在另一处运行，为你停在了新对话 —— 直接打开会造出第二个写者。请在左栏「运行的对话」里点击接管，或等待对方切换到别的对话后直接打开。`,
+									textEn: `The most recent conversation ("${resumeSkipped.title}") is running in another window, so you landed on a new chat instead — opening it here would create a second writer. Take it over from Running chats, or open it directly after the other page selects another conversation.`,
 								}
 							: {
 									type: "notice",
 									level: "info",
-									text: `该项目最近的对话「${resumeSkipped.title}」在另一处开着（当前空闲），为你停在了空白新对话 —— 可在左栏「运行的对话」里把它过户过来继续看，或从历史对话里打开（只留一处发送消息，否则历史分叉）。`,
-									textEn: `The most recent conversation ("${resumeSkipped.title}") is still open in another window (currently idle), so you landed on a blank chat instead — take it over from Running chats (tagged "Elsewhere") or reopen it from History (send new messages from only one place, or the history will fork).`,
+									text: `该项目最近的对话「${resumeSkipped.title}」在另一处开着（当前空闲），为你停在了空白新对话 —— 请在左栏「运行的对话」里点击接管，或等待对方切换到别的对话后直接打开。`,
+									textEn: `The most recent conversation ("${resumeSkipped.title}") is still open in another window (currently idle), so you landed on a blank chat instead — take it over from Running chats, or open it directly after the other page selects another conversation.`,
 								},
 					);
 				}
@@ -8481,7 +8612,7 @@ export class ClientSession {
 			// Remember the new workspace (restore target + recent-project entry).
 			this.stateStore.remember(this.clientId, abs);
 			void this.pushProjects();
-			this.webUi.refresh();
+			this.refreshConversationUi();
 			this.emitConversations();
 			this.goalSvc.emitGoalStatus();
 			// Skills / prompt templates are project-bound — refresh the catalog.
@@ -8505,6 +8636,8 @@ export class ClientSession {
 				text: `切换工作目录失败：${(err as Error).message}`,
 				textEn: `Failed to switch directory: ${(err as Error).message}`,
 			});
+		} finally {
+			releaseOpening?.();
 		}
 		this.flushSnapshot();
 	}
@@ -8808,6 +8941,7 @@ export class ClientSession {
 			this.clearAllToolWatchdogs(conv);
 			conv.unsubscribe?.();
 			try {
+				conv.extensionUi?.dispose();
 				await conv.runtime.dispose();
 			} catch {
 				// best effort
@@ -8850,6 +8984,14 @@ export function checkPluginCwd(cwd: string): { ok: boolean; abs?: string; error?
 }
 
 export class AgentService {
+	private transferringSessions = new Map<string, SessionOwnerInfo>();
+	/** Unlike queue/stream counts, includes attachment preparation and SDK setup. */
+	pendingCoreWork(): number {
+		let count = pendingCoreWorkFor(this);
+		for (const client of this.clients.values()) count += client.pendingCoreWork();
+		return count;
+	}
+
 	/** index.ts 注入：SDK 工具执行事件的插件转发钩子，attach 时拷贝到每个新会话。 */
 	onToolEvent: ((ev: PluginToolEvent) => void) | undefined = undefined;
 	/** index.ts 注入：运行轨迹事件的插件转发钩子，attach 时拷贝到每个新会话。 */
@@ -8934,12 +9076,16 @@ export class AgentService {
 	/** issue #145：跨客户端同会话查重 —— 找持有某 session 文件的别处对话。
 	 *  调用方在 SessionManager.open() 之前问这一句，就造不出第二个 writer。 */
 	findSessionOwner(targetPath: string, excludeClientId: string): SessionOwnerInfo | null {
+		const transferring = this.transferringSessions.get(resolve(targetPath));
+		if (transferring) return transferring;
 		for (const [clientId, cs] of this.clients) {
 			if (clientId === excludeClientId) continue;
 			const conv = cs.findConversationBySessionFile(targetPath);
 			if (conv) {
 				return {
 					clientId,
+					conversationId: conv.id,
+					requiresTakeover: AgentService.isPseudoClientId(clientId) || cs.requiresManualTakeover(conv.id),
 					title: conv.title,
 					cwd: conv.cwd,
 					isStreaming: cs.conversationStreaming(conv),
@@ -8980,6 +9126,12 @@ export class AgentService {
 	 *  护栏（各客户端计数器都从 c1 开始，不校验会把报告投进无关项目）。压缩进行中
 	 *  的持有方回 busy:true（调用方另寻视口兄弟，而不是当成“不在”静默转无头）。 */
 	async wakeConversation(
+		...args: Parameters<AgentService["wakeConversationImpl"]>
+	): ReturnType<AgentService["wakeConversationImpl"]> {
+		return withCoreWork(this, () => this.wakeConversationImpl(...args));
+	}
+
+	private async wakeConversationImpl(
 		id: string,
 		text: string,
 		opts?: { sessionFile?: string; cwd?: string },
@@ -9080,6 +9232,12 @@ export class AgentService {
 	 *  的对话（用户当前正看着的面），而不是静默转无头。excludeIds 跳过已知忙对话；
 	 *  候选全部忙回 busy:true；无候选回 ok:false。成功带回实际投递方（调用方重绑定）。 */
 	async wakeViewportInCwd(
+		...args: Parameters<AgentService["wakeViewportInCwdImpl"]>
+	): ReturnType<AgentService["wakeViewportInCwdImpl"]> {
+		return withCoreWork(this, () => this.wakeViewportInCwdImpl(...args));
+	}
+
+	private async wakeViewportInCwdImpl(
 		cwd: string,
 		text: string,
 		excludeIds?: Set<string>,
@@ -9164,7 +9322,12 @@ export class AgentService {
 		const out: ElsewhereRunning[] = [];
 		for (const [clientId, cs] of this.clients) {
 			if (clientId === excludeClientId) continue;
-			for (const r of cs.streamingSummariesAll()) out.push({ ...r, owner: clientId });
+			for (const r of cs.streamingSummariesAll())
+				out.push({
+					...r,
+					owner: clientId,
+					requiresTakeover: AgentService.isPseudoClientId(clientId) || cs.requiresManualTakeover(r.convId),
+				});
 		}
 		return out;
 	}
@@ -9236,7 +9399,13 @@ export class AgentService {
 	 *  投递（网页端实时可见，miss 则回落无头）；cwd 显式 pin 住（不存在/系统
 	 *  目录即拒绝，不默默跑错目录）；model/thinkingLevel 投递前应用（失败即
 	 *  拒绝，不回落，避免账单/效果与预期不符）。 */
-	async chatFromPlugin(pluginId: string, req: PluginChatRequest): Promise<PluginChatResult> {
+	async chatFromPlugin(
+		...args: Parameters<AgentService["chatFromPluginImpl"]>
+	): ReturnType<AgentService["chatFromPluginImpl"]> {
+		return withCoreWork(this, () => this.chatFromPluginImpl(...args));
+	}
+
+	private async chatFromPluginImpl(pluginId: string, req: PluginChatRequest): Promise<PluginChatResult> {
 		const safe = String(pluginId ?? "plugin").replace(/[^A-Za-z0-9_-]/g, "") || "plugin";
 		const acct = String(req?.accountId ?? "default").replace(/[^A-Za-z0-9_-]/g, "") || "default";
 		const clientId = `plugin:${safe}:${acct}`;
@@ -9292,7 +9461,13 @@ export class AgentService {
 	 *  fire-and-forget 投递后等待运行结束（最长 10 分钟轮询），回填真实 outcome
 	 * （成功/失败/耗时/会话 id）供历史记录与通知使用；超时按失败记录（运行本身
 	 *  不中止，继续在后台跑完）。 */
-	async chatFromScheduler(task: {
+	async chatFromScheduler(
+		...args: Parameters<AgentService["chatFromSchedulerImpl"]>
+	): ReturnType<AgentService["chatFromSchedulerImpl"]> {
+		return withCoreWork(this, () => this.chatFromSchedulerImpl(...args));
+	}
+
+	private async chatFromSchedulerImpl(task: {
 		id: string;
 		cwd: string;
 		prompt: string;
@@ -9368,6 +9543,12 @@ export class AgentService {
 	 *  不建对话、不进历史、不碰任何会话状态；花费走用户自己的模型额度。
 	 *  quiesced 时拒绝；无客户端时用进程 cwd + 默认模型照常跑。 */
 	async completeForPlugins(
+		...args: Parameters<AgentService["completeForPluginsImpl"]>
+	): ReturnType<AgentService["completeForPluginsImpl"]> {
+		return withCoreWork(this, () => this.completeForPluginsImpl(...args));
+	}
+
+	private async completeForPluginsImpl(
 		pluginId: string,
 		req: { prompt?: string; system?: string; model?: string; maxChars?: number; timeoutMs?: number },
 	): Promise<{
@@ -9489,6 +9670,8 @@ export class AgentService {
 	 */
 	private wireClient(cs: ClientSession, clientId: string): void {
 		cs.findSessionOwner = (targetPath) => this.findSessionOwner(targetPath, clientId);
+		cs.adoptInactiveSession = (targetPath) => this.adoptInactiveSession(clientId, targetPath);
+		cs.reserveSessionFile = (targetPath) => this.reserveSessionFile(targetPath, clientId, cs.cwd);
 		cs.hasStreamingElsewhere = () => this.hasStreamingElsewhere(clientId);
 		cs.listProjectRunners = (cwd) => this.listProjectRunners(cwd, clientId);
 		cs.getClaimStore = () => this.claimStore;
@@ -9500,13 +9683,39 @@ export class AgentService {
 		cs.schedulerStore = this.schedulerStore;
 	}
 
+	private reserveSessionFile(path: string, clientId: string, cwd: string): () => void {
+		const file = resolve(path);
+		if (this.findSessionOwner(file, clientId))
+			throw new Error("该对话正在切换，请稍后再试。 / This conversation is being opened or moved; retry shortly.");
+		const reservation: SessionOwnerInfo = {
+			clientId,
+			title: basename(file),
+			cwd,
+			connected: true,
+			isStreaming: false,
+			requiresTakeover: true,
+			transferring: true,
+		};
+		this.transferringSessions.set(file, reservation);
+		return () => {
+			if (this.transferringSessions.get(file) === reservation) this.transferringSessions.delete(file);
+		};
+	}
+
+	private async adoptInactiveSession(targetId: string, path: string): Promise<boolean> {
+		const owner = this.findSessionOwner(path, targetId);
+		if (!owner || owner.requiresTakeover || !owner.conversationId) return false;
+		await this.takeOverConversation(targetId, owner.clientId, owner.conversationId, true);
+		return !!this.clients.get(targetId)?.findConversationBySessionFile(path);
+	}
+
 	/**
 	 * 手动过户（take_over_conversation）：把 owner 会话的某主对话（含子代理后代、
 	 * 等答复问卷/页调用）整体搬到 target 会话并切过去。搬的是 runtime 本体不是
 	 * 副本，单 writer 不变 —— 从在线标签页手里接管也是安全的；源会话修好 active
 	 * 并推全量刷新，双方都收到去向通知。quiesce 排空期也放行（重连既有工作）。
 	 */
-	async takeOverConversation(targetId: string, ownerId: string, convId: string): Promise<void> {
+	async takeOverConversation(targetId: string, ownerId: string, convId: string, automatic = false): Promise<void> {
 		const target = this.clients.get(targetId);
 		if (!target) return;
 		const fail = (text: string, textEn: string): void => {
@@ -9535,6 +9744,7 @@ export class AgentService {
 			target.refreshExternalRunning();
 			return;
 		}
+		if (automatic && source.requiresManualTakeover(convId)) return;
 		const briefs = source.takeoverBriefs();
 		const main = briefs.find((b) => b.id === convId);
 		if (!main) {
@@ -9565,6 +9775,24 @@ export class AgentService {
 			);
 			return;
 		}
+		const reservedFiles = briefs
+			.filter((brief) => moveSet.has(brief.id) && brief.sessionFile)
+			.map((brief) => resolve(brief.sessionFile!));
+		if (reservedFiles.some((file) => this.transferringSessions.has(file))) {
+			fail("该对话正在切换，请稍后再试。", "This conversation is being moved; retry shortly.");
+			return;
+		}
+		const reservation: SessionOwnerInfo = {
+			clientId: targetId,
+			conversationId: convId,
+			title: main.title,
+			cwd: main.cwd,
+			isStreaming: false,
+			connected: true,
+			requiresTakeover: true,
+			transferring: true,
+		};
+		for (const file of reservedFiles) this.transferringSessions.set(file, reservation);
 		try {
 			const detached = await source.detachTakeoverConversations(moveIds);
 			if (!detached.ok) {
@@ -9582,21 +9810,28 @@ export class AgentService {
 			const newMainId = target.insertTakeoverConvs(detached.payload);
 			// 源会话修好 active（detach 内部已处理）→ 推全量刷新 + 告知去向；
 			// 无 sink 时 emit 即丢，无需判断。
-			source.sendNotice({
-				type: "notice",
-				level: "info",
-				text: `「${main.title}」已过户到另一处接管，本页不再持有它。`,
-				textEn: `"${main.title}" was taken over by another page and is no longer held here.`,
-			});
-			target.sendNotice({
-				type: "notice",
-				level: "info",
-				text: `已将「${main.title}」过户到当前页面，可直接继续查看与操作。`,
-				textEn: `"${main.title}" was moved to this page — pick up right where it left off.`,
-			});
+			if (!automatic) {
+				source.sendNotice({
+					type: "notice",
+					level: "info",
+					text: `「${main.title}」已过户到另一处接管，本页不再持有它。`,
+					textEn: `"${main.title}" was taken over by another page and is no longer held here.`,
+				});
+				target.sendNotice({
+					type: "notice",
+					level: "info",
+					text: `已将「${main.title}」过户到当前页面，可直接继续查看与操作。`,
+					textEn: `"${main.title}" was moved to this page — pick up right where it left off.`,
+				});
+			}
+
 			await target.switchConversation(newMainId);
 		} catch (err) {
 			fail(`过户失败：${(err as Error).message}`, `Takeover failed: ${(err as Error).message}`);
+		} finally {
+			for (const file of reservedFiles) {
+				if (this.transferringSessions.get(file) === reservation) this.transferringSessions.delete(file);
+			}
 		}
 	}
 
@@ -9663,7 +9898,11 @@ export class AgentService {
 	}
 
 	/** Get or create the session for a client, racing attach calls safely. */
-	async attach(clientId: string, send: (msg: ServerMessage) => void): Promise<ClientSession> {
+	async attach(...args: Parameters<AgentService["attachImpl"]>): ReturnType<AgentService["attachImpl"]> {
+		return withCoreWork(this, () => this.attachImpl(...args));
+	}
+
+	private async attachImpl(clientId: string, send: (msg: ServerMessage) => void): Promise<ClientSession> {
 		let cs = this.clients.get(clientId);
 		if (!cs) {
 			const inflight = this.pending.get(clientId);
@@ -9713,36 +9952,66 @@ export class AgentService {
 					// （跑着或空闲），建之前就决定空白（第二个 writer 根本不会被打开，
 					// 也无需事后拆 runtime）。之前只拦 running：空闲持有照样恢复出双
 					// writer，两边轮流发送分叉历史。其他客户端不存在时不扫目录。
-					let createOpts: { blank?: boolean; blankTitle?: string; idleHeld?: boolean } | undefined;
-					if (this.clients.size > 0) {
+					let createOpts: { blank?: boolean; blankTitle?: string; idleHeld?: boolean; resumePath?: string } = {
+						blank: true,
+					};
+					let recentToAdopt: string | undefined;
+					{
 						try {
 							const infos = await SessionManager.list(cwd, piSessionsRoot());
 							const recent = infos[0]?.path ? resolve(infos[0].path) : undefined;
 							const owner = recent ? this.findSessionOwner(recent, clientId) : null;
-							if (owner && (owner.connected || owner.isStreaming)) {
-								createOpts = { blank: true, blankTitle: owner.title, ...(owner.isStreaming ? {} : { idleHeld: true }) };
+							if (owner) {
+								if (owner.requiresTakeover === false) recentToAdopt = recent;
+								createOpts =
+									owner.requiresTakeover === false
+										? { blank: true }
+										: { blank: true, blankTitle: owner.title, ...(owner.isStreaming ? {} : { idleHeld: true }) };
+							} else if (recent) {
+								createOpts = { resumePath: recent };
 							}
 						} catch {
 							// 列表失败不挡正常恢复
 						}
 					}
-					const creating = ClientSession.create(clientId, cwd, this.stateStore, createOpts).finally(() => {
-						this.pending.delete(clientId);
-					});
-					this.pending.set(clientId, creating);
-					cs = await creating;
-					this.clients.set(clientId, cs);
-					// issue #145 接线提前：首帧 elsewhere 依赖它。
-					this.wireClient(cs, clientId);
-					// Make sure the restored/default workspace appears in the project list.
-					this.stateStore.remember(clientId, cwd);
-					if (cwd !== this.cwd) {
-						send({
-							type: "notice",
-							level: "info",
-							text: `已恢复上次的工作目录：${cwd}`,
-							textEn: `Restored the last working directory: ${cwd}`,
-						});
+					// Another hello with this same client id may have crossed the async
+					// history scan. Join its creation instead of replacing its runtime.
+					const lateClient = this.clients.get(clientId);
+					const latePending = this.pending.get(clientId);
+					if (lateClient || latePending) {
+						cs = lateClient ?? (await latePending!);
+					} else {
+						const releaseOpening = createOpts.resumePath
+							? this.reserveSessionFile(createOpts.resumePath, clientId, cwd)
+							: undefined;
+						const creating = ClientSession.create(clientId, cwd, this.stateStore, createOpts)
+							.then((created) => {
+								this.clients.set(clientId, created);
+								return created;
+							})
+							.finally(() => {
+								this.pending.delete(clientId);
+							});
+						this.pending.set(clientId, creating);
+						try {
+							cs = await creating;
+							this.clients.set(clientId, cs);
+						} finally {
+							releaseOpening?.();
+						}
+						// issue #145 接线提前：首帧 elsewhere 依赖它。
+						this.wireClient(cs, clientId);
+						if (recentToAdopt) await this.adoptInactiveSession(clientId, recentToAdopt);
+						// Make sure the restored/default workspace appears in the project list.
+						this.stateStore.remember(clientId, cwd);
+						if (cwd !== this.cwd) {
+							send({
+								type: "notice",
+								level: "info",
+								text: `已恢复上次的工作目录：${cwd}`,
+								textEn: `Restored the last working directory: ${cwd}`,
+							});
+						}
 					}
 				}
 			}

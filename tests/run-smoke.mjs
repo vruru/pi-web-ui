@@ -27,6 +27,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const WIN32_KNOWN_ENV_FAIL = new Set(["terminal-smoke-test", "restart-handoff-test"]);
 
 const ALL = [
+	"core-update-test",
 	"ui-zoom-settings-test",
 	"clear-provider-key-test",
 	"conv-cross-project-test",
@@ -91,7 +92,7 @@ const ALL = [
 	"orphan-adopt-test",
 	// 手动过户：右键「另一处」行把对话（含等答复问卷）搬到本页，问卷可直接回答。
 	"takeover-test",
-	// 已结束对话的过户：run 跑完后 elsewhere 仍保留空闲行可过户；新页面不自动恢复别处持有的会话。
+	// 已结束对话的过户：另一在线页面当前选中的会话仍需过户；未选中会话直接复用 runtime。
 	"idle-takeover-test",
 	// 跨页作答：点 elsewhere 行的 `?` 把问卷拉到本页回答，不搬迁对话。
 	"remote-answer-test",

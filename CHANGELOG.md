@@ -12,9 +12,13 @@
 
 ### Added
 
+- 左下角连接状态增加 Pi 核心版本浮层：启动与每 6 小时检查官方稳定版，发现新版就地提醒；支持 macOS 全局核心的一键备份、安装、服务重启及重连验证，失败自动恢复。
+
 - 界面布局增加六档整页缩放（90%–175%）：服务端全局保存，全部浏览器实时同步，重启保留，不新增快捷键。
 
 ### Fixed
+
+- 修复跨浏览器过户时释放待转交会话、留下失效扩展上下文的问题；会话运行实例与扩展界面一起移交。只有另一页面当前选中的会话需要显式过户，其余会话可直接打开并接续原运行。
 
 - 消息默认持续贴底；仅主动查看历史时暂停跟随。切换会话或返回聊天页面时即时显示最新消息，修复布局变化被误判为用户上滚的问题。
 - MCP 配置热加载增加低频内容校验，修复文件监视静默漏报时配置不生效；重载串行执行，关闭后丢弃排队任务。
@@ -28,7 +32,7 @@
 <!-- auto-i18n:start -->
 ### i18n
 
-- 前端新增 key（5）：`generationRate`、`generationRateTip`、`uiZoomTitle`、`uiZoomHint`、`uiZoomCurrent`
+- 前端新增 key（24）：`coreUpdateTitle`、`coreUpdateRunningVersion`、`coreUpdateLatestVersion`、`coreUpdateUpdating`、`coreUpdateStarting`、`coreUpdateInstalling`、`coreUpdateRestarting`、`coreUpdateSucceeded`、`coreUpdateReconnecting`、`coreUpdateFailed`、`coreUpdateChecking`、`coreUpdateAvailable`、`coreUpdateCurrent`、`coreUpdateNotChecked`、`coreUpdateCheckFailed`、`coreUpdateHint`、`coreUpdateCheckedAt`、`coreUpdateCheck`、`coreUpdateInstall`、`generationRate`、`generationRateTip`、`uiZoomTitle`、`uiZoomHint`、`uiZoomCurrent`
 - 前端中文变更（1）：`tps`
 - 前端英文变更（1）：`tps`
 <!-- auto-i18n:end -->

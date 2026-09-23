@@ -11,6 +11,8 @@ import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent"
 import type { ServerMessage } from "./protocol.js";
 
 const WIDGET_WIDTH = 80;
+// Dialog ids must remain unique when conversation UI contexts change owners.
+let nextDialogId = 0;
 
 /** ANSI 转义序列（CSI + OSC 两类）：扩展 widget/status 文本里常混有 TUI 颜色码
  *  （如 pi-powerline-footer），浏览器会把它渲染成字面 `[38;5;244m` 乱码（issue #16）。 */
@@ -79,6 +81,14 @@ export class WebUIContext {
 	constructor(emit: (msg: ServerMessage) => void, options: { headless?: boolean } = {}) {
 		this.headless = options.headless === true;
 		this.emit = this.headless ? () => {} : emit;
+	}
+
+	/** Move live UI ownership without restarting extensions or resolving dialogs. */
+	rebindEmit(emit: (msg: ServerMessage) => void): void {
+		if (this.headless) return;
+		for (const id of this.pendingDialogs.keys()) this.emit({ type: "dialog_closed", id });
+		this.emit = emit;
+		for (const message of this.pendingDialogMessages.values()) this.emit(message);
 	}
 
 	/** 子代理会话用的上下文：方法面与挂浏览器的那个完全一致（扩展调用任何
@@ -219,7 +229,7 @@ export class WebUIContext {
 
 	// -- dialogs (select/confirm/input bridged to the browser) ---------------
 
-	private dialogSeq = 0;
+	private pendingDialogMessages = new Map<number, Extract<ServerMessage, { type: "dialog" }>>();
 	private pendingDialogs = new Map<number, (value: string | boolean | null) => void>();
 
 	select = (title: string, options: string[]): Promise<string | undefined> =>
@@ -237,9 +247,11 @@ export class WebUIContext {
 		// headless：没人能应答，立刻按「取消」结束（与 cancelPendingDialogs 同值）。
 		if (this.headless) return Promise.resolve(null);
 		return new Promise((resolve) => {
-			const id = ++this.dialogSeq;
+			const id = ++nextDialogId;
 			this.pendingDialogs.set(id, resolve);
-			this.emit({ type: "dialog", id, kind, title, args });
+			const message = { type: "dialog" as const, id, kind, title, args };
+			this.pendingDialogMessages.set(id, message);
+			this.emit(message);
 		});
 	}
 
@@ -248,6 +260,7 @@ export class WebUIContext {
 		const resolve = this.pendingDialogs.get(id);
 		if (resolve) {
 			this.pendingDialogs.delete(id);
+			this.pendingDialogMessages.delete(id);
 			resolve(value);
 			this.emit({ type: "dialog_closed", id });
 		}
@@ -258,6 +271,7 @@ export class WebUIContext {
 	cancelPendingDialogs(): void {
 		for (const [id, resolve] of this.pendingDialogs) {
 			this.pendingDialogs.delete(id);
+			this.pendingDialogMessages.delete(id);
 			resolve(null);
 			this.emit({ type: "dialog_closed", id });
 		}
@@ -304,5 +318,7 @@ export class WebUIContext {
 			this.emit({ type: "dialog_closed", id });
 		}
 		this.pendingDialogs.clear();
+		this.pendingDialogMessages.clear();
+		this.statuses.clear();
 	}
 }

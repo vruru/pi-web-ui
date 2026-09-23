@@ -32,7 +32,7 @@ import { composeToComposer, focusComposer } from "../composer-bridge";
 interface LeftPanelProps {
 	sessionFile: string | null;
 	conversations: ConversationSummary[];
-	/** issue #145：其他客户端正在跑的对话（只读，不可点）。 */
+	/** Other clients’ conversations: selected rows need takeover; inactive persisted rows open directly. */
 	elsewhere: ElsewhereRunning[];
 	sessions: SessionSummary[];
 	projects: ProjectSummary[];
@@ -98,6 +98,8 @@ type SessionMenuTarget = {
 	kind: "running" | "history" | "section" | "elsewhere";
 	label: string;
 	owner?: string;
+	/** A retained remote row has no inline rename editor until it is opened. */
+	allowRename?: boolean;
 };
 
 /** 右键落点是不是「输入类」元素：重命名输入框里的右键要留给浏览器（复制 / 粘贴 /
@@ -307,7 +309,9 @@ export const LeftPanel = memo(function LeftPanel({
 				// 重命名：运行中对话行与历史行才有；区域空白处 /「另一处」行隐藏
 				// （与悬停 ✎ 铅笔同一套内嵌输入框，见 dispatchHostSessionEntry）。
 				if (entry.id === "host:conv-rename")
-					return target.kind === "running" || target.kind === "history" ? entry : { ...entry, hidden: true };
+					return target.allowRename !== false && (target.kind === "running" || target.kind === "history")
+						? entry
+						: { ...entry, hidden: true };
 				// 过户：只在「另一处」行出现（无 owner/convId 的旧条目同样隐藏）。
 				if (entry.id === "host:conv-takeover")
 					return isElsewhere && takeId && target.owner ? entry : { ...entry, hidden: true };
@@ -536,7 +540,13 @@ export const LeftPanel = memo(function LeftPanel({
 		[sessionMenuAvailable, showSessionMenu],
 	);
 
-	type RowConv = ConversationSummary & { elsewhere?: boolean; owner?: string; convId?: string; hasQuestion?: boolean };
+	type RowConv = ConversationSummary & {
+		elsewhere?: boolean;
+		owner?: string;
+		convId?: string;
+		hasQuestion?: boolean;
+		openSessionPath?: string;
+	};
 	const panelRef = useRef<HTMLElement>(null);
 	const [weights, setWeights] = useState<LpWeights>(() => loadLpWeights());
 	useEffect(() => {
@@ -556,6 +566,7 @@ export const LeftPanel = memo(function LeftPanel({
 			isStreaming: w.isStreaming,
 			isSubagent: false as const,
 			elsewhere: true as const,
+			...(w.requiresTakeover === false && w.sessionFile ? { openSessionPath: w.sessionFile } : {}),
 			// 过户目标定位（无则沿用旧行为：只读行，无过户入口）。
 			...(w.owner && w.convId ? { owner: w.owner, convId: w.convId } : {}),
 			...(w.hasQuestion ? { hasQuestion: true as const } : {}),
@@ -788,6 +799,36 @@ export const LeftPanel = memo(function LeftPanel({
 										for (const orphan of g.convs) append(orphan, 0);
 										return rows.map(({ c, depth }) => {
 											if ((c as RowConv).elsewhere) {
+												const openPath = (c as RowConv).openSessionPath;
+												if (openPath)
+													return (
+														<div
+															className="lp-row"
+															key={c.id}
+															onContextMenu={(e) =>
+																openSessionMenu(e, {
+																	id: openPath,
+																	kind: "history",
+																	label: c.title,
+																	allowRename: false,
+																})
+															}
+														>
+															<button
+																type="button"
+																className="session-item"
+																title={`${t("gsOpen")}: ${c.title}\n${c.cwd}`}
+																onClick={() => panelSend({ type: "switch_session", path: openPath })}
+															>
+																<FiMessageSquare className="session-icon" />
+																<span className="session-info">
+																	<span className="session-title">{c.title}</span>
+																	<span className="session-sub">{projectName(c.cwd)}</span>
+																</span>
+																{c.isStreaming && <span className="conv-streaming" title={t("streaming")} />}
+															</button>
+														</div>
+													);
 												return (
 													<div
 														className="lp-row"

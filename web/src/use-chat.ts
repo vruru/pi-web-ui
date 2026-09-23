@@ -1,3 +1,4 @@
+import { setCoreUpdateState } from "./core-update-state";
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { randomUuid } from "./uuid";
 import { applyUiZoom } from "./ui-zoom";
@@ -1293,7 +1294,11 @@ export function useChat() {
 				return;
 			}
 			switch (msg.type) {
+				case "core_update_state":
+					setCoreUpdateState(msg.state);
+					break;
 				case "ready": {
+					setCoreUpdateState(msg.coreUpdate ?? null);
 					applyUiZoom(msg.uiZoomPercent ?? 100);
 					dispatch({ type: "ui_settings", uiZoomPercent: msg.uiZoomPercent ?? 100 });
 					// Stale-build self-reload: the server reports the on-disk bundle

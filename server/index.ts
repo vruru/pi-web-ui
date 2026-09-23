@@ -65,12 +65,16 @@ import { McpBridge } from "./mcp-bridge.js";
 import { createMcpHotReload } from "./mcp-hot-reload.js";
 import { createHostMetricsSampler } from "./host-metrics.js";
 import { UiSettingsStore } from "./ui-settings.js";
+import { CoreUpdateManager } from "./core-update.js";
+import { CoreUpdateAdmission } from "./core-update-admission.js";
+import { CoreUpdateWorkTracker } from "./core-update-work.js";
 import { SchedulerStore } from "./scheduler-tasks.js";
 import { initHttpProxy } from "./http-proxy.js";
 import { buildPiWebTokenCookie, decodeCookieToken, isTlsRequest } from "./auth-cookie.js";
 import type {
 	BgServer,
 	ClientMessage,
+	CoreUpdateState,
 	UiLayoutPrefs,
 	CommandDef,
 	PromptAttachment,
@@ -346,6 +350,13 @@ app.get("/api/health", (_req, res) => {
 		pid: process.pid,
 		engine: ENGINE,
 	});
+});
+
+// Read-only progress works while session admission is paused for an update.
+// This route follows the normal PI_WEB_TOKEN middleware (unlike /api/health).
+app.get("/api/core-update", (_req, res) => {
+	res.setHeader("Cache-Control", "no-store");
+	res.json(coreUpdateState());
 });
 
 /**
@@ -1154,6 +1165,7 @@ export interface EngineService {
 	};
 	activeConversations(): number;
 	pendingMessages(): number;
+	pendingCoreWork?(): number;
 	applyPluginAgentTools(): void;
 	applyPluginCommandCatalog(): void;
 	refreshBackgroundServers(): void;
@@ -1702,6 +1714,58 @@ service.onClientCwdChanged = (cwd, roots) => {
 	pluginMgr.notifyWorkspaceRoots(roots);
 };
 
+// Pi core installation runs in an independent process; the browser and this
+// server are observers. Persisted worker state survives the service restart.
+const coreWork = new CoreUpdateWorkTracker();
+let coreAdmission: CoreUpdateAdmission | undefined;
+let lastCoreState = "";
+function coreUpdateState(): CoreUpdateState {
+	const state = coreAdmission ? coreAdmission.getState() : coreUpdater.getState();
+	if (ENGINE !== "pi" || MANAGED) {
+		return {
+			...state,
+			canUpdate: false,
+			unsupportedReason:
+				ENGINE !== "pi"
+					? "当前服务使用其他引擎。 / This service uses a different agent engine."
+					: "此实例由部署方管理更新。 / Updates are managed by the deployer.",
+		};
+	}
+	return state;
+}
+function pushCoreUpdateState(initial?: CoreUpdateState): void {
+	const state = coreAdmission ? coreUpdateState() : initial;
+	if (!state) return;
+	const payload = JSON.stringify({ type: "core_update_state", state } satisfies ServerMessage);
+	if (payload === lastCoreState) return;
+	lastCoreState = payload;
+	for (const client of wss.clients) {
+		if (client.readyState === WebSocket.OPEN) client.send(payload);
+	}
+}
+const coreUpdater = new CoreUpdateManager({
+	dataDir: DATA_DIR,
+	currentVersion: VERSION,
+	sdkEntry: import.meta.resolve("@earendil-works/pi-coding-agent"),
+	origin: ORIGIN,
+	port: PORT,
+	onChange: pushCoreUpdateState,
+});
+coreAdmission = new CoreUpdateAdmission(
+	coreUpdater,
+	service,
+	() => !!pluginInstaller.busyJobId,
+	() => coreWork.pending + (service.pendingCoreWork?.() ?? 0),
+);
+coreAdmission.sync();
+const coreUpdatePoll = setInterval(() => pushCoreUpdateState(), 1000);
+coreUpdatePoll.unref();
+const automaticCoreChecks =
+	ENGINE === "pi" && !MANAGED && !/^(off|0|false|no)$/i.test(process.env.PI_WEB_CORE_UPDATE_CHECK ?? "");
+const coreCheckTimer = automaticCoreChecks ? setInterval(() => void coreUpdater.check(), 6 * 60 * 60_000) : null;
+coreCheckTimer?.unref();
+if (automaticCoreChecks) void coreUpdater.check();
+
 // ---------------------------------------------------------------------------
 // Self-update
 // ---------------------------------------------------------------------------
@@ -1834,7 +1898,8 @@ wss.on("connection", (ws) => {
 			pending.push(msg);
 			return;
 		}
-		const cs = service.get(clientId);
+		const session = service.get(clientId);
+		const cs = session ? coreWork.wrap(session) : undefined;
 		if (!cs) {
 			// Session not ready yet (hello processing) — hold the command.
 			pending.push(msg);
@@ -1849,7 +1914,47 @@ wss.on("connection", (ws) => {
 			send({ type: "notice", level: "error", text: refusal });
 			return;
 		}
+		// Existing sockets remain connected to observe progress. Mutations that
+		// could create sessions, spawn tools, or restart the service wait until
+		// the core package has been installed and the new process verified.
+		if (
+			coreAdmission?.isBusy() &&
+			!["check_core_update", "update_pi_core", "get_state", "draft_update"].includes(msg.type)
+		) {
+			send({
+				type: "notice",
+				level: "warning",
+				text: "Pi 核心正在更新，请等待更新完成并重新连接。",
+				textEn: "Pi core is updating. Wait for completion and reconnection.",
+			});
+			return;
+		}
 		switch (msg.type) {
+			case "check_core_update":
+				void coreUpdater
+					.check(msg.force === true)
+					.then(() => send({ type: "core_update_state", state: coreUpdateState() }));
+				break;
+			case "update_pi_core":
+				if (ENGINE !== "pi") {
+					send({ type: "core_update_state", state: coreUpdateState() });
+					break;
+				}
+				void coreAdmission!
+					.start()
+					.catch((error: unknown) => {
+						send({
+							type: "notice",
+							level: "error",
+							text: `核心更新未开始：${(error as Error).message}`,
+							textEn: `Core update could not start: ${(error as Error).message}`,
+						});
+					})
+					.finally(() => {
+						pushCoreUpdateState();
+						send({ type: "core_update_state", state: coreUpdateState() });
+					});
+				break;
 			case "prompt":
 				void cs.prompt(msg.text, msg.attachments, msg.queue);
 				break;
@@ -2634,6 +2739,11 @@ wss.on("connection", (ws) => {
 		}
 
 		if (msg.type === "hello") {
+			if (coreAdmission?.isBusy()) {
+				send({ type: "core_update_state", state: coreUpdateState() });
+				ws.close(4403, "core update in progress");
+				return;
+			}
 			const cid = msg.clientId || randomUUID();
 			clientId = cid;
 			service
@@ -2645,6 +2755,7 @@ wss.on("connection", (ws) => {
 						uiZoomPercent: uiSettings.uiZoomPercent,
 						clientId: cid,
 						serverVersion: VERSION,
+						coreUpdate: coreUpdateState(),
 						protocolVersion: PROTOCOL_VERSION,
 						engine: ENGINE,
 						// This package's own version. `serverVersion` is the pi SDK's,
@@ -2901,6 +3012,9 @@ async function shutdown(signal: "SIGINT" | "SIGTERM" = "SIGINT"): Promise<void> 
 	let code = 0;
 	try {
 		clearInterval(heartbeatTimer);
+		clearInterval(coreUpdatePoll);
+		if (coreCheckTimer) clearInterval(coreCheckTimer);
+		coreUpdater.dispose();
 		stopControl();
 		scheduler.stop();
 		pluginMgr.dispose();

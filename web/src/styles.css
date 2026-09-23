@@ -14165,3 +14165,87 @@ button.source-default-toggle {
 	color: var(--accent);
 	background: var(--accent-soft);
 }
+
+/* Pi core update: anchored to the connection indicator, includes zoomed portals. */
+.core-update-trigger {
+	border: 0;
+	padding: 0;
+	background: transparent;
+	font: inherit;
+	cursor: pointer;
+}
+.core-update-trigger:hover {
+	text-decoration: underline;
+}
+.core-update-badge {
+	color: var(--accent);
+	flex-shrink: 0;
+}
+.core-update-popover {
+	z-index: 1200;
+	width: 360px;
+	max-width: calc(100vw / var(--ui-zoom, 1) - 16px);
+	max-height: calc(100dvh / var(--ui-zoom, 1) - 16px);
+	overflow: auto;
+	box-sizing: border-box;
+	padding: 14px;
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	background: var(--bg);
+	color: var(--text);
+	box-shadow: 0 8px 32px #0004;
+	font-size: 13px;
+	line-height: 1.5;
+}
+.core-update-popover header,
+.core-update-popover dl > div,
+.core-update-actions {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+}
+.core-update-close {
+	display: flex;
+	padding: 3px;
+	border: 0;
+	background: transparent;
+	color: var(--text-dim);
+	cursor: pointer;
+}
+.core-update-popover dl {
+	margin: 14px 0;
+}
+.core-update-popover dt {
+	color: var(--text-dim);
+}
+.core-update-popover dd {
+	margin: 0;
+	font-variant-numeric: tabular-nums;
+	overflow-wrap: anywhere;
+}
+.core-update-popover p {
+	margin: 9px 0;
+}
+.core-update-progress {
+	font-weight: 500;
+}
+.core-update-error,
+.core-update-progress.error {
+	color: var(--red);
+	overflow-wrap: anywhere;
+}
+.core-update-help,
+.core-update-checked {
+	color: var(--text-dim);
+	font-size: 12px;
+}
+.core-update-actions {
+	margin-top: 14px;
+	flex-wrap: wrap;
+}
+.core-update-actions button {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}

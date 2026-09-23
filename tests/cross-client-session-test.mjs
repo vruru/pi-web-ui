@@ -6,14 +6,14 @@
 //      B 的 conversationId / sessionFile 不变（改前 RED：B 会打开成功并持有同一文件）；
 //   2. B 在自己的会话（同一项目）发消息 → 允许并行，但 B 收到同项目并行提醒，
 //      A 收到对端并行通告；两边 run 都能正常跑完；
-//   3. A 跑完后 B 再 switch_session 同一文件 → 允许（owner 空闲），B 能打开。
+//   3. A 跑完但仍选中时 B 仍被拒；A 切走后 B 直接打开同一 runtime。
 //
 // 零 token：mock SSE 模型（prompt 含 SLOW 即慢速输出），纯 WS 协议，无需浏览器。
 // Usage: node tests/cross-client-session-test.mjs [port]   （先 npm run build）
 import { createServer } from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { realpathSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -282,7 +282,7 @@ try {
 	// 1. B 试图打开 A 正在跑的同一文件 → 必须被拒绝，不建第二个 writer。
 	const convBBefore = clientB.state.conversationId;
 	clientB.send({ type: "switch_session", path: runningFile });
-	const blocked = await clientB.waitForType("notice", (m) => noticeText(m).includes("另一处运行中"), 15000);
+	const blocked = await clientB.waitForType("notice", (m) => noticeText(m).includes("请点击接管"), 15000);
 	if (!blocked) throw new Error("B 打开 streaming 会话未被拒绝");
 	await sleep(500);
 	if (clientB.state.conversationId !== convBBefore)
@@ -309,10 +309,34 @@ try {
 	await clientA.waitForState((s) => !s.isStreaming, 15000);
 	console.log("✓ A 的 run 正常跑完（不受 B 影响）");
 
-	// 3. owner 空闲后 B 再打开同一文件 → 允许。
+	// 3. 运行结束不等于放弃当前选择：A仍选中时需要明确接管。
+	clientB.send({ type: "switch_session", path: runningFile });
+	await clientB.waitForType("notice", (m) => noticeText(m).includes("请点击接管"), 15000);
+	if (clientB.state.sessionFile === runningFile) throw new Error("A仍选中时B创建了第二个writer");
+	clientA.send({ type: "new_chat" });
+	await clientA.waitForState((s) => s.sessionFile !== runningFile, 15000);
+	// A切换后，B直接打开既有runtime，不需要手动接管。
 	clientB.send({ type: "switch_session", path: runningFile });
 	await clientB.waitForState((s) => s.sessionFile === runningFile, 15000);
-	console.log("✓ A 结束后 B 可正常打开该会话");
+	console.log("✓ A结束仍选中需接管，A切走后B直接打开既有会话");
+
+	// Cold history: simultaneous open requests must reserve just this file,
+	// so only one browser can construct its SDK runtime.
+	const coldFile = join(dirname(runningFile), `cold-${Date.now()}.jsonl`);
+	const coldLines = readFileSync(runningFile, "utf8").trimEnd().split("\n");
+	const coldHeader = JSON.parse(coldLines[0]);
+	coldHeader.id = `cold-${Date.now()}`;
+	coldLines[0] = JSON.stringify(coldHeader);
+	writeFileSync(coldFile, coldLines.join("\n") + "\n");
+	clientA.send({ type: "switch_session", path: coldFile });
+	clientB.send({ type: "switch_session", path: coldFile });
+	const coldDeadline = Date.now() + 15000;
+	while (Date.now() < coldDeadline && ![clientA, clientB].some((c) => c.state.sessionFile === coldFile))
+		await sleep(50);
+	await sleep(500);
+	if ([clientA, clientB].filter((c) => c.state.sessionFile === coldFile).length !== 1)
+		throw new Error("Concurrent cold history opens created zero or multiple writers");
+	console.log("✓ 同一冷历史文件并发打开只有一个runtime/writer");
 
 	// 4. 幽灵持有者：B 建一条新对话后关掉标签页，A 再打开 B 的文件 → 不应再警告“另一处也开着”。
 	clientB.send({ type: "new_chat" });

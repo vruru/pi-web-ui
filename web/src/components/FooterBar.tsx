@@ -1,3 +1,4 @@
+import { CoreUpdateStatus } from "./CoreUpdateStatus";
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { FiFolder } from "react-icons/fi";
 import type { ChatState } from "../use-chat";
@@ -122,7 +123,14 @@ export function FooterBar({ chat, bottombarItems, onUiAction }: FooterBarProps) 
 		samplesRef.current = trimRateSamples([...prev, { t: now, out: streamEst }], now);
 	}, [streamingNow, streamEst]);
 
-	if (!state) return null;
+	if (!state)
+		return (
+			<footer className="statusbar">
+				<div className="statusbar-left">
+					<CoreUpdateStatus connected={chat.ready} status={chat.status} allowAutoNotice={false} />
+				</div>
+			</footer>
+		);
 	const s = state.stats;
 
 	const cache = cacheMetrics(s.tokens);
@@ -135,9 +143,6 @@ export function FooterBar({ chat, bottombarItems, onUiAction }: FooterBarProps) 
 	const rateText = hasRate
 		? `${generation?.estimated !== false ? "~" : ""}${rate.toFixed(1)} ${t("tps")}`
 		: `— ${t("tps")}`;
-
-	const connClass = chat.ready ? "ok" : chat.status === "closed" ? "error" : "busy";
-	const connLabel = chat.ready ? t("connected") : chat.status === "closed" ? t("reconnecting") : t("connecting");
 
 	const context = s.contextUsage;
 	// 压缩软上限（issue #229 / #245）：设置了有效软上限时，底栏进度条与数字显示以该上限为满格刻度
@@ -218,12 +223,7 @@ export function FooterBar({ chat, bottombarItems, onUiAction }: FooterBarProps) 
 	 * 条件不满足 → 返回 null → 那一条**连同分隔符**一起不画（不留孤零零的 `·`）。
 	 */
 	const hostNodes: Record<string, ReactNode> = {
-		"host:conn": (
-			<span className={`status-item status-conn ${connClass}`} title={connLabel}>
-				<span className={`status-dot ${connClass}`} />
-				<span className="status-conn-label">{connLabel}</span>
-			</span>
-		),
+		"host:conn": <CoreUpdateStatus connected={chat.ready} status={chat.status} />,
 		"host:engine":
 			engine !== "pi" ? (
 				<span className={`status-item engine-badge engine-${engine}`} title={`${t("engineBadge")}: ${engine}`}>

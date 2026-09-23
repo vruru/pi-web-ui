@@ -11,6 +11,7 @@ export function isolatedTestEnv(label, inherited = process.env) {
 			PI_WEB_DATA_DIR: join(root, "data"),
 			PI_CODING_AGENT_DIR: join(root, "agent"),
 			PI_WEB_PLUGIN_CATALOG_URL: "off",
+			PI_WEB_CORE_UPDATE_CHECK: "off",
 		},
 		cleanup: () => rmSync(root, { recursive: true, force: true }),
 	};
