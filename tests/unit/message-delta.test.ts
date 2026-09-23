@@ -109,3 +109,17 @@ describe("applyMessageDelta", () => {
 		expect(applyMessageDelta(ui, delta({ assistantMessageEvent: { type: "text_delta", delta: "" } }))).toBe(ui);
 	});
 });
+
+describe("generation rate deltas", () => {
+	it("merges generation without losing usage and preserves it for older deltas", () => {
+		const before = makeUi();
+		const generation = { tokensPerSecond: 25, outputTokens: 50, durationMs: 2000, estimated: true, isStreaming: true };
+		const next = applyMessageDelta(before, delta({ generation }));
+		expect(next.stats.generation).toEqual(generation);
+		expect(next.stats.tokens).toBe(before.stats.tokens);
+		expect(before.stats.generation).toBeUndefined();
+		expect(applyMessageDelta(next, delta({ usage: { input: 1, output: 2, total: 3 } })).stats.generation).toEqual(
+			generation,
+		);
+	});
+});

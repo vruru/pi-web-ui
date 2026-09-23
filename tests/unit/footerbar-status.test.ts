@@ -154,3 +154,42 @@ describe("FooterBar 连接状态", () => {
 		expect(ctxWrapper?.title).toContain("1000K");
 	});
 });
+
+describe("FooterBar generation speed", () => {
+	it("keeps a visible placeholder before any generation", () => {
+		const { container } = mountFooter(makeChatState());
+		expect(container.querySelector(".status-rate")?.textContent).toBe("— tok/s");
+	});
+
+	it("keeps the completed provider-token rate visible after streaming stops", () => {
+		const chat = makeChatState();
+		chat.state!.stats.generation = {
+			tokensPerSecond: 42.56,
+			outputTokens: 213,
+			durationMs: 5000,
+			estimated: false,
+			isStreaming: false,
+		};
+		const { container } = mountFooter(chat);
+		expect(container.querySelector(".status-rate")?.textContent).toBe("42.6 tok/s");
+		expect(container.querySelector(".working")).toBeNull();
+	});
+
+	it("marks live estimated tokens and clears the value when switching conversation", () => {
+		const chat = makeChatState();
+		chat.state!.isStreaming = true;
+		chat.state!.stats.generation = {
+			tokensPerSecond: 12.34,
+			outputTokens: 37,
+			durationMs: 3000,
+			estimated: true,
+			isStreaming: true,
+		};
+		const { container } = mountFooter(chat);
+		expect(container.querySelector(".status-rate")?.textContent).toBe("~12.3 tok/s");
+		const other = makeChatState();
+		other.state!.conversationId = "other-conversation";
+		act(() => root!.render(createElement(LanguageProvider, null, createElement(FooterBar, { chat: other }))));
+		expect(container.querySelector(".status-rate")?.textContent).toBe("— tok/s");
+	});
+});

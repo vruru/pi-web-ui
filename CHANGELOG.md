@@ -10,7 +10,19 @@
 
 ## [Unreleased]
 
-暂无未发布内容。
+### Changed
+
+- 底栏生成速度独立常驻：流式显示估算 tok/s，完成后用服务商输出 token 校准并保留；按对话隔离，排除首 token 等待和工具耗时。
+
+<!-- auto-i18n:start -->
+
+### i18n
+
+- 前端新增 key（2）：`generationRate`、`generationRateTip`
+- 前端中文变更（1）：`tps`
+- 前端英文变更（1）：`tps`
+
+<!-- auto-i18n:end -->
 
 ## [0.94.1] — 2026-09-22
 
@@ -41,11 +53,13 @@
 - **复制为图片浅色主题色差（#273）** — html-to-image 把 `color-mix(...)` / 半透明 `rgba` 画到默认黑画布上，浅色气泡变成深紫、深字叠黑底。导出前把计算色拍成不透明 rgb，画布底用主题 `--card-bg`/`--bg` 实底，并去掉 `backdrop-filter`（否则 SVG 里会变成黑罩）。
 
 <!-- auto-i18n:start -->
+
 ### i18n
 
 - 前端新增 key（13）：`saveAsImage`、`copyImageBtn`、`savingImage`、`imageTitle`、`imageTitlePlaceholder`、`imageBorder`、`imageWatermark`、`imageWatermarkPlaceholder`、`exportSelectHint`、`exportTooLong`、`exportSelectedCount`、`exportIncludeTools`、`exportIncludeThinking`
 - 前端中文变更（2）：`softCapHint`、`softCapOff`
 - 前端英文变更（2）：`softCapHint`、`softCapOff`
+
 <!-- auto-i18n:end -->
 
 ## [0.93.0] — 2026-09-21
@@ -82,6 +96,7 @@
 - **文件行右键也能「上传文件到当前目录」** —— 上传入口原先只对**目录**行显示，右键一个文件时菜单里根本没有这一项（想往当前目录传文件只能去右键空白处）。现在文件行也给，落点是它所在的目录：当前目录里的文件显示「上传文件到当前目录」，子目录里的文件显示「上传文件到文件夹」；只有机器根（不能往盘符根写）仍然隐藏，文件树右键菜单的其余条目不变。
 
 <!-- auto-i18n:start -->
+
 ### i18n
 
 - 前端新增 key（34）：`themeLight`、`themeDark`、`quickPhrasesSendTip`、`persistSubagent`、`toolImages`、`toolImagesDesc`、`toolImageZoom`、`toolWatchdogTimeout`、`toolWatchdogTimeoutDesc`、`toolWatchdogOff`、`uiLayoutContextToolcall`、`pluginSettingsTitle`、`pluginSettingsShow`、`pluginSettingsHide`、`claimFilesEnabledDesc`、`claimFilesOffHint`、`toolInfoMenuLabel`、`toolInfoTitle`、`toolInfoLoading`、`toolInfoUnsupported`、`toolInfoMissing`、`toolInfoActive`、`toolInfoInactive`、`toolInfoSource`、`toolInfoDescription`、`toolInfoNoDescription`、`toolInfoPromptSnippet`、`toolInfoGuidelines`、`toolInfoParams`、`toolInfoParamsNone`、`toolInfoSchemaDropped`、`toolInfoRawSchema`、`toolInfoRequired`、`toolInfoFootnote`
@@ -89,6 +104,7 @@
 - 前端英文变更（1）：`elsewhereTip`
 - 服务端新增 key（1）：`agent.conv.limit.reached`
 - 服务端文案变更（2）：`subagents.spawn.started`、`subagents.list.empty`
+
 <!-- auto-i18n:end -->
 
 ## [0.92.0] — 2026-09-20

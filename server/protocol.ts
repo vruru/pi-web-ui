@@ -104,6 +104,16 @@ export interface UiHostMetrics {
 	memoryPercent: number;
 }
 
+/** Most recent assistant message only; streamed content uses estimated tokens
+ *  until final provider usage arrives. Duration excludes time to first token. */
+export interface UiGenerationStats {
+	tokensPerSecond: number | null;
+	outputTokens: number;
+	durationMs: number;
+	estimated: boolean;
+	isStreaming: boolean;
+}
+
 export interface UiState {
 	clientId: string;
 	cwd: string;
@@ -215,6 +225,7 @@ export interface UiState {
 	piAgentInstalled: boolean;
 	/** Live session stats for the footer status bar. */
 	stats: {
+		generation?: UiGenerationStats;
 		totalMessages: number;
 		tokens: {
 			input: number;
@@ -2133,6 +2144,7 @@ export type ServerMessage =
 			seq: number;
 			messageId: string;
 			usage: { input: number; output: number; total: number } | null;
+			generation?: UiGenerationStats;
 			assistantMessageEvent: { type: string; contentIndex?: number; delta?: string };
 	  }
 	/** A tool FINISHED executing (SDK tool_execution_end). Unlike toolResult

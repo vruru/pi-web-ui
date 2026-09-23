@@ -274,6 +274,10 @@ _Built-in terminal_
 
 _Git source control panel_
 
+### Footer generation speed
+
+The footer keeps a `tok/s` indicator visible, showing `— tok/s` when timing is unavailable. Pi streams display a `~` token estimate; message completion replaces it with provider-reported output tokens and keeps the result visible. The rate is output tokens divided by seconds from first output to message completion, excluding time to first token and tool execution. This is client-observed generation throughput, not the provider's internal inference timing. Conversations track rates independently, and historical sessions without timing do not invent a rate. The indicator is a separate configurable bottom-bar item.
+
 ## Install
 
 ```bash

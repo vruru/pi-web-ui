@@ -36,6 +36,7 @@ pi-web-ui/
 │   ├── index.ts                # 入口：express 静态 + /ws 端点、消息分发、心跳、优雅停机
 │   ├── protocol.ts             # ★ 唯一事实源：wire 协议类型（client↔server 消息）
 │   ├── agent-service.ts        # 核心：ClientSession（每客户端一个会话组，可并行多个对话）+ AgentService
+│   ├── generation-stats.ts     # Pi 每条 assistant 消息的生成计时：首输出起算，usage 定稿，供常驻底栏 tok/s
 │   ├── serialize.ts            # SDK 消息 → UiMessage 序列化
 │   ├── text-sniff.ts           # 文件预览纯函数（previewKind/looksLikeText/decodeText/sniffImageMime/hexDump/countLines）
 │   ├── queue-utils.ts          # 排队消息纯函数（removeFirstOccurrence：只移除第一条匹配，重复文本不连带删除）

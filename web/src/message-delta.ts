@@ -1,3 +1,5 @@
+import type { UiState } from "./types";
+
 /**
  * Pure patch logic for `message_delta` — the live assistant-message increment
  * channel that bypasses snapshot backpressure (see protocol.ts).
@@ -26,7 +28,7 @@ type DeltaContentBlock = DeltaTextBlock | DeltaThinkingBlock | { type: string };
  *  pass the full protocol UiState; tests pass a minimal lookalike). */
 export interface MessageDeltaUiState {
 	streamingMessage?: { id: string; content: DeltaContentBlock[] } | null;
-	stats: { tokens: object };
+	stats: { tokens: object; generation?: UiState["stats"]["generation"] };
 }
 
 /** The wire shape of a message_delta (mirrors server/protocol.ts). */
@@ -36,6 +38,7 @@ export interface MessageDeltaMsg {
 	seq: number;
 	messageId: string;
 	usage: { input: number; output: number; total: number } | null;
+	generation?: UiState["stats"]["generation"];
 	assistantMessageEvent: { type: string; contentIndex?: number; delta?: string };
 }
 
@@ -48,7 +51,10 @@ export function applyMessageDelta<S extends MessageDeltaUiState>(ui: S, msg: Mes
 	// fields the delta channel doesn't carry keep their last known values.
 	const prevTokens = ui.stats.tokens as Record<string, number>;
 	const tokens = msg.usage !== null ? { ...prevTokens, ...msg.usage } : prevTokens;
-	const stats = tokens === prevTokens ? ui.stats : { ...ui.stats, tokens };
+	const stats =
+		tokens === prevTokens && msg.generation === undefined
+			? ui.stats
+			: { ...ui.stats, tokens, ...(msg.generation === undefined ? {} : { generation: msg.generation }) };
 	if (ame.type !== "text_delta" && ame.type !== "thinking_delta") {
 		return stats === ui.stats ? ui : { ...ui, stats };
 	}

@@ -405,6 +405,15 @@ export const BUILTIN_UI_ITEMS: BuiltinUiItem[] = [
 		group: "usage",
 	},
 	{
+		id: "host:generation-rate",
+		slot: "bottombar",
+		labelKey: "generationRate",
+		icon: "activity",
+		kind: "badge",
+		order: 12.5,
+		group: "usage",
+	},
+	{
 		id: "host:msg-count",
 		slot: "bottombar",
 		labelKey: "messages",

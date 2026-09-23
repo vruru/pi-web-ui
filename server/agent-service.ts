@@ -39,6 +39,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { BgServerTracker } from "./bg-servers.js";
+import { GenerationStatsTracker } from "./generation-stats.js";
 import {
 	checkAll as checkAllUpdates,
 	collectTargets,
@@ -904,6 +905,8 @@ export { workspacePath };
  * 导出给过户载荷类型（TakeoverPayload）用：对话对象本身在会话之间整体搬迁。
  */
 export interface Conversation {
+	/** Runtime-only generation timing belongs to this conversation, never session totals. */
+	generationStats?: GenerationStatsTracker;
 	id: string;
 	/** Display title: first user prompt (truncated) or the default. */
 	title: string;
@@ -3415,6 +3418,8 @@ export class ClientSession {
 	}
 
 	private onEvent(conv: Conversation, event: AgentSessionEvent): void {
+		// Track background conversations too, before routing active-view events.
+		(conv.generationStats ??= new GenerationStatsTracker()).observe(event);
 		// Any SDK event proves the run is alive — feeds the stall watchdog below.
 		conv.lastSdkEventAt = Date.now();
 		conv.stallNoticed = false;
@@ -3800,6 +3805,7 @@ export class ClientSession {
 					// Must match serializeStreamingMessage()'s stable id so deltas
 					// patch onto the snapshot's streamingMessage and reconcile.
 					messageId: `stream-${m?.timestamp ?? 0}`,
+					generation: conv.generationStats?.snapshot(),
 					usage: (() => {
 						try {
 							const t = this.sessionStats().tokens;
@@ -4020,6 +4026,7 @@ export class ClientSession {
 		} catch {
 			// stats are best-effort
 		}
+		stats.generation = conv.generationStats?.snapshot();
 		// 流式 error 同样是中间态（定稿走 message_end/agent_end）：先藏起
 		// errorMessage，避免红色在 streaming 气泡里闪一下。最终失败会经由
 		// messages 永久标红，不影响告警。
@@ -6182,6 +6189,7 @@ export class ClientSession {
 		try {
 			conv.unsubscribe?.();
 			conv.unsubscribe = undefined;
+			conv.generationStats = undefined;
 			this.clearAllToolWatchdogs(conv);
 			conv.toolStartTimes.clear();
 			await conv.runtime.dispose();

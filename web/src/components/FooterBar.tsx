@@ -25,6 +25,7 @@ const FALLBACK_BOTTOMBAR: { id: string; align: "start" | "end" }[] = [
 	{ id: "host:ctx", align: "start" },
 	{ id: "host:cost", align: "start" },
 	{ id: "host:cache", align: "start" },
+	{ id: "host:generation-rate", align: "start" },
 	{ id: "host:msg-count", align: "start" },
 	{ id: "host:plugin-status", align: "start" },
 	{ id: "host:working", align: "start" },
@@ -128,7 +129,12 @@ export function FooterBar({ chat, bottombarItems, onUiAction }: FooterBarProps) 
 	const hitPct = cache.hitRate * 100;
 	const hitClass = cache.totalInput === 0 ? "" : cache.hitRate >= 0.7 ? "ok" : cache.hitRate >= 0.4 ? "mid" : "warn";
 	const hitText = cache.totalInput > 0 ? `${hitPct.toFixed(1)}%` : "—";
-	const rate = streamingNow ? streamRate(samplesRef.current) : 0;
+	const generation = s.generation;
+	const rate = generation ? generation.tokensPerSecond : streamingNow ? streamRate(samplesRef.current) : null;
+	const hasRate = rate !== null && Number.isFinite(rate) && rate > 0;
+	const rateText = hasRate
+		? `${generation?.estimated !== false ? "~" : ""}${rate.toFixed(1)} ${t("tps")}`
+		: `— ${t("tps")}`;
 
 	const connClass = chat.ready ? "ok" : chat.status === "closed" ? "error" : "busy";
 	const connLabel = chat.ready ? t("connected") : chat.status === "closed" ? t("reconnecting") : t("connecting");
@@ -262,6 +268,16 @@ export function FooterBar({ chat, bottombarItems, onUiAction }: FooterBarProps) 
 				<b className={`cache-pct ${hitClass}`}>{hitText}</b>
 			</span>
 		),
+		"host:generation-rate": (
+			<span
+				className="status-item status-rate"
+				title={t("generationRateTip")}
+				aria-label={`${t("generationRate")}: ${rateText}`}
+			>
+				{generation?.isStreaming && <span className="working-spin rate-spin" />}
+				{rateText}
+			</span>
+		),
 		"host:msg-count": (
 			<span className="status-item" title={t("sessionMessages")}>
 				{t("messages")} {s.totalMessages}
@@ -283,11 +299,6 @@ export function FooterBar({ chat, bottombarItems, onUiAction }: FooterBarProps) 
 							⏳ {queueTotal} {t("queued")}
 						</span>
 					)}
-				</span>
-				<span className="status-item status-rate" title={t("rateTip")}>
-					{/* 手机上「工作中」文案被隐藏，这里给个小转圈（仅窄屏显示） */}
-					<span className="working-spin rate-spin" />
-					{rate > 0 ? `${Math.round(rate)}${t("tps")}` : "…"}
 				</span>
 			</>
 		) : null,
