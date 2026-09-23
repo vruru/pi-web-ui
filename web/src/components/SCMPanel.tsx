@@ -1,3 +1,4 @@
+import { toUiZoomPixels } from "../ui-zoom";
 /* ------------------------------------------------------------------ */
 /* read-only git queries (server-side execFile)                        */
 /*                                                                     */
@@ -193,10 +194,10 @@ export function ScmPanel({ chat, terminal, active, onSwitchToTerminal, uiScmTool
 			e.preventDefault();
 			const startX = e.clientX;
 			const startWidth = sidebarWidthRef.current;
-			const containerPx = bodyRef.current?.getBoundingClientRect().width ?? 0;
+			const containerPx = bodyRef.current?.clientWidth ?? 0;
 			let last = startWidth;
 			const move = (ev: PointerEvent) => {
-				last = clampScmSidebarWidth(startWidth + (ev.clientX - startX), containerPx);
+				last = clampScmSidebarWidth(startWidth + toUiZoomPixels(ev.clientX - startX), containerPx);
 				setSidebarWidth(last);
 			};
 			const up = () => {

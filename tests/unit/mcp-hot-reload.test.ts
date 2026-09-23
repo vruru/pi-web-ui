@@ -4,13 +4,18 @@
  *  - 真 fs 监视（fs.watch 命中；目录不存在 → 回落到轮询；dispose 后不再触发）；
  *  - 端到端一条：真 McpBridge + 真文件，改完 mcp.json 工具表跟着变，全程不重启服务。
  */
-import { describe, expect, it, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { describe, expect, it, afterEach, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, watch } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createMcpHotReload } from "../../server/mcp-hot-reload.js";
 import { McpBridge, type McpReloadSummary } from "../../server/mcp-bridge.js";
+
+vi.mock("node:fs", async (importOriginal) => {
+	const fs = await importOriginal<typeof import("node:fs")>();
+	return { ...fs, watch: vi.fn(fs.watch) };
+});
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = resolve(__dirname, "../fixtures/mcp-echo-server.mjs");
@@ -89,6 +94,32 @@ describe("mcp.json 热加载：什么时候该动、什么时候不该动", () =
 		expect(state.reloads).toBe(2);
 	});
 
+	it("上一轮 reload 未完成时再次保存，后续应用排队而不并发替换实例", async () => {
+		const dir = tempDir();
+		writeConfig(dir, { srv: SPEC });
+		let reloads = 0;
+		let release!: (summary: McpReloadSummary) => void;
+		const firstReload = new Promise<McpReloadSummary>((resolve) => {
+			release = resolve;
+		});
+		const hot = createMcpHotReload({
+			dataDir: dir,
+			reload: async () => (++reloads === 1 ? firstReload : SUMMARY),
+		});
+		disposables.push(() => hot.dispose());
+		const first = hot.apply();
+		await Promise.resolve();
+		expect(reloads).toBe(1);
+		writeConfig(dir, { srv: SPEC, added: SPEC });
+		const second = hot.apply();
+		await Promise.resolve();
+		expect(reloads).toBe(1);
+		release(SUMMARY);
+		expect(await Promise.all([first, second])).toEqual(["reloaded", "reloaded"]);
+		expect(reloads).toBe(2);
+		expect(await hot.apply()).toBe("unchanged");
+	});
+
 	it("内容没变（重排服务器顺序、改缩进、env 键序）→ 一个子进程都不动", async () => {
 		const dir = tempDir();
 		writeConfig(dir, { b: { ...SPEC, env: { B: "2", A: "1" } }, a: SPEC });
@@ -163,6 +194,49 @@ describe("mcp.json 热加载：文件监视", () => {
 		await waitFor(() => state.reloads === 1);
 	});
 
+	it("fs.watch 注册成功却静默漏报，轮询仍应用新文件且不重复重载", async () => {
+		const dir = tempDir();
+		writeConfig(dir, { srv: SPEC });
+		const { watch: realWatch } = await vi.importActual<typeof import("node:fs")>("node:fs");
+		// 保留真实 watcher 的生命周期，但确定性丢弃所有事件：不依赖平台或调度偶然性。
+		vi.mocked(watch).mockImplementationOnce((filename, options) =>
+			realWatch(filename, options as import("node:fs").WatchOptions, () => {}),
+		);
+		const { hot, state } = harness(dir);
+		hot.start();
+		writeConfig(dir, { srv: SPEC, added: SPEC });
+		await waitFor(() => state.reloads === 1);
+		expect(state.toolsChanged).toBe(1);
+		await sleep(200);
+		expect(state.reloads).toBe(1);
+	});
+
+	it("dispose 丢弃等待中的 reload，进行中的旧任务不再发送通知", async () => {
+		const dir = tempDir();
+		writeConfig(dir, { srv: SPEC });
+		let reloads = 0;
+		let release!: (summary: McpReloadSummary) => void;
+		const firstReload = new Promise<McpReloadSummary>((resolve) => {
+			release = resolve;
+		});
+		const onToolsChanged = vi.fn();
+		const hot = createMcpHotReload({
+			dataDir: dir,
+			reload: async () => (++reloads === 1 ? firstReload : SUMMARY),
+			onToolsChanged,
+		});
+		disposables.push(() => hot.dispose());
+		const first = hot.apply();
+		await Promise.resolve();
+		writeConfig(dir, { srv: SPEC, added: SPEC });
+		const second = hot.apply();
+		hot.dispose();
+		release(SUMMARY);
+		expect(await Promise.all([first, second])).toEqual(["unchanged", "unchanged"]);
+		expect(reloads).toBe(1);
+		expect(onToolsChanged).not.toHaveBeenCalled();
+	});
+
 	it("dispose 之后不再响应文件变化", async () => {
 		const dir = tempDir();
 		writeConfig(dir, { srv: SPEC });
@@ -186,7 +260,7 @@ describe("mcp.json 热加载：端到端（真桥 + 真文件）", () => {
 		await bridge.load();
 		expect(bridge.getTools().map((t) => t.name)).toContain("pid");
 
-		const hot = createMcpHotReload({ dataDir: dir, reload: () => bridge.reload(), debounceMs: 40 });
+		const hot = createMcpHotReload({ dataDir: dir, reload: () => bridge.reload(), debounceMs: 40, pollIntervalMs: 60 });
 		disposables.push(() => hot.dispose());
 		hot.start();
 

@@ -13,6 +13,7 @@
  * 用法：node tests/run-smoke.mjs [name1 name2 …]   # 无参 = 全量
  */
 import { spawn } from "node:child_process";
+import { isolatedTestEnv } from "./lib/isolated-env.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -26,6 +27,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const WIN32_KNOWN_ENV_FAIL = new Set(["terminal-smoke-test", "restart-handoff-test"]);
 
 const ALL = [
+	"ui-zoom-settings-test",
 	"clear-provider-key-test",
 	"conv-cross-project-test",
 	"conv-cwd-test",
@@ -130,16 +132,19 @@ for (const name of targets) {
 	}
 	const file = join(here, `${name}.mjs`);
 	process.stdout.write(`\n▶ ${name}\n`);
+	const isolated = isolatedTestEnv(name);
 	const ok = await new Promise((resolveRun) => {
 		const child = spawn(process.execPath, [file], {
 			// 测试脚本内相对路径（如 dist/server/index.js）以仓库根为基准
 			cwd: dirname(here),
 			stdio: "inherit",
-			env: process.env,
+			// 冒烟测试默认离线；专测预同步的脚本可显式覆盖为本地 fixture。
+			// Fallback isolation for every subprocess; fixtures may override with their own temp dirs.
+			env: isolated.env,
 		});
 		child.on("exit", (code) => resolveRun(code === 0));
 		child.on("error", () => resolveRun(false));
-	});
+	}).finally(isolated.cleanup);
 	results.push({ name, ok });
 }
 

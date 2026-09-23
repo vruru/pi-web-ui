@@ -14,7 +14,7 @@ npm run format:check # 只检查不改写（CI 跑这个）
 npm run build        # build:web (vite) + build:server (tsc) + build:dsh-runtime + build:mermaid-vendor + build:runtrace-vendor
 npm start            # 跑编译产物 dist/server/index.js（生产）
 npm test             # vitest 纯函数单测（tests/unit/，毫秒级零 token）
-npm run test:smoke   # 零 token 协议冒烟聚合跑器（tests/run-smoke.mjs，62 个自包含测试）
+npm run test:smoke   # 零 token 协议冒烟聚合跑器（tests/run-smoke.mjs，66 个自包含测试）
 npm run test:freeze  # 冻结/重连回归测试（Playwright，需要本机 chromium headless）
 ```
 
@@ -22,7 +22,7 @@ npm run test:freeze  # 冻结/重连回归测试（Playwright，需要本机 chr
 
 GitHub Actions ubuntu-latest（`.github/workflows/ci.yml`，push/PR → main 触发）：`format:check → lint → check:protocol → typecheck → build → build:extension → pack:extension → vitest → test:smoke`。
 
-冒烟清单（tests/run-smoke.mjs 的 ALL，62 个）只收**自包含、零 token、跨平台**的测试；attach 型（需外部 server）、需真模型、平台相关的脚本不进 CI，本地手动跑（分类见 run-smoke.mjs 头部注释）。
+冒烟清单（tests/run-smoke.mjs 的 ALL，66 个）只收**自包含、零 token、跨平台**的测试；attach 型（需外部 server）、需真模型、平台相关的脚本不进 CI，本地手动跑（分类见 run-smoke.mjs 头部注释）。
 
 ## 编码约定
 
@@ -65,6 +65,16 @@ spawn 后记录 `server.pid`，测试收尾（含异常 catch 路径）用 `proc
 ### data-dir 隔离
 
 测试 server 设 `PI_WEB_DATA_DIR` 为 `mkdtempSync(tmpdir…)`，`PI_WEB_CWD` 指本地仓库——避免污染真实 user data / client-state / session。
+
+### 界面缩放与消息跟随
+
+全局缩放由 `UiSettingsStore` 写入 `<dataDir>/ui-settings.json`，`ready` / `ui_settings` / `settings_state` 将权威值同步到所有浏览器。测试 `ui-zoom-settings-test` 覆盖跨客户端、后到客户端、非法值及真实重启；`ui-zoom.test` 和真实浏览器检查覆盖六档与固定浮层坐标。不要把该设置加入 per-client 状态或 localStorage。
+
+`use-message-scroll` 默认贴底，仅真实用户上翻或显式搜索跳转暂停；`MessageList.active` 在返回聊天视图时恢复。布局变化及流式结束不得伪造用户逃逸。
+
+### 插件市场同步回归
+
+冒烟聚合默认设置 `PI_WEB_PLUGIN_CATALOG_URL=off`，避免官方线上清单污染本地 fixture。`plugin-cwd-test` 显式覆盖为受控的本地 HTTP 清单，等插件激活后才释放启动同步响应；同时验证手动清单同步不重新激活插件、后续目录切换仍能触发钩子。仅市场元数据变化时推送 `plugin_catalog`，只有实际安装/更新后才重载插件。
 
 ### 自包含 vs 外部依赖
 

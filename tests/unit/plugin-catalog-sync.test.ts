@@ -104,11 +104,11 @@ describe("writeCustomCatalog", () => {
 });
 
 describe("syncPluginCatalog", () => {
-	it("本地文件来源：写盘 + afterWrite 重载（不装）", async () => {
+	it("本地文件来源：写盘后只刷新目录，不重载插件", async () => {
 		const src = join(dir, "remote.json");
 		writeFileSync(src, JSON.stringify({ entries: [ENTRY, { id: "bad", source: ".." }] }));
 		const { installer, calls } = fakeInstaller();
-		let afterWrites = 0;
+		const afterWrites: boolean[] = [];
 		const res = await syncPluginCatalog(
 			src,
 			{},
@@ -116,14 +116,14 @@ describe("syncPluginCatalog", () => {
 				customCatalogPath: custom,
 				pluginsDir,
 				installer,
-				afterWrite: async () => {
-					afterWrites += 1;
+				afterWrite: async (pluginsChanged) => {
+					afterWrites.push(pluginsChanged);
 				},
 			},
 		);
 		expect(res.ok).toBe(true);
 		expect(res.installed).toBeUndefined();
-		expect(afterWrites).toBe(1);
+		expect(afterWrites).toEqual([false]);
 		expect(calls).toHaveLength(0);
 		const written = JSON.parse(readFileSync(custom, "utf8")) as { entries: { id: string }[] };
 		expect(written.entries.map((e) => e.id)).toEqual(["third-party"]);
@@ -155,7 +155,7 @@ describe("syncPluginCatalog", () => {
 		const { installer, calls } = fakeInstaller((spec) =>
 			spec.id === "third-party" ? { ok: false, error: "clone failed" } : { ok: true },
 		);
-		let afterWrites = 0;
+		const afterWrites: boolean[] = [];
 		const res = await syncPluginCatalog(
 			src,
 			{ install: true },
@@ -163,8 +163,8 @@ describe("syncPluginCatalog", () => {
 				customCatalogPath: custom,
 				pluginsDir,
 				installer,
-				afterWrite: async () => {
-					afterWrites += 1;
+				afterWrite: async (pluginsChanged) => {
+					afterWrites.push(pluginsChanged);
 				},
 			},
 		);
@@ -177,8 +177,8 @@ describe("syncPluginCatalog", () => {
 			["third-party", "install"],
 			["installed-already", "update"],
 		]);
-		// 写盘一次 + 安装后再重载一次
-		expect(afterWrites).toBe(2);
+		// 写盘只刷新目录；安装完成才重载插件
+		expect(afterWrites).toEqual([false, true]);
 		expect(existsSync(custom)).toBe(true);
 	});
 });

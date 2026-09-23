@@ -1,3 +1,4 @@
+import { toUiZoomPixels } from "../ui-zoom";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { JSX } from "react";
 import { createPortal } from "react-dom";
@@ -36,7 +37,7 @@ export interface ContextMenuProps {
  * 关键取舍：
  *  - **portal 到 document.body + `position: fixed`**：右键菜单可能从任何地方弹出（消息、
  *    文件树、左栏会话），挂在使用处会被滚动容器 / `overflow: hidden` 裁剪。fixed 的
- *    「视口坐标」正好就是 `clientX/clientY`，不用自己换算。
+ *    测量与钳制使用 `clientX/clientY` 视口坐标；写入 CSS 定位时除以全局 zoom。
  *  - **先渲染再实测尺寸 → clampMenuPosition**：菜单宽度取决于文案长度（插件文案、语言），
  *    估算必然不准，所以用 `useLayoutEffect` 在**绘制前**量一次真实矩形再钳制，既不闪一下
  *    又不会越界。测量的那一帧用 `visibility: hidden`，用户看不到未定位的中间态。
@@ -340,7 +341,7 @@ export function ContextMenu({ onAction }: ContextMenuProps): JSX.Element | null 
 						role="menu"
 						aria-label={entry.label}
 						// 竖向越界只用 marginTop 上移（`top: -5px` 与父项对齐的基准留给 CSS，别在 JS 里写死）。
-						style={subShift ? { marginTop: subShift } : undefined}
+						style={subShift ? { marginTop: toUiZoomPixels(subShift) } : undefined}
 					>
 						{subRows.map((row) =>
 							row.kind === "sep" ? (
@@ -365,8 +366,8 @@ export function ContextMenu({ onAction }: ContextMenuProps): JSX.Element | null 
 			aria-label={menu.target.label ? `${menu.slot}: ${menu.target.label}` : menu.slot}
 			tabIndex={-1}
 			style={{
-				left: pos?.x ?? menu.x,
-				top: pos?.y ?? menu.y,
+				left: toUiZoomPixels(pos?.x ?? menu.x),
+				top: toUiZoomPixels(pos?.y ?? menu.y),
 				// 还没实测尺寸的那一帧先藏起来（layout effect 在绘制前就把它换成最终坐标）。
 				visibility: pos ? "visible" : "hidden",
 			}}

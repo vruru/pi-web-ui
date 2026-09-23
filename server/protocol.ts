@@ -706,10 +706,13 @@ export type ClientMessage =
 	/** Request the current settings state (also pushed automatically on attach). */
 	| { type: "get_settings" }
 	/** Apply a partial settings update: compose template / per-source overrides or
-	 *  skill/extension toggles. Each change is persisted per client; prompt
+	 *  skill/extension toggles. Changes are persisted per client except uiZoomPercent,
+	 *  which is shared by the whole server instance; prompt
 	 *  template changes reload the runtime, while review changes affect the next review. */
 	| {
 			type: "set_settings";
+			/** Instance-wide UI scale, persisted on the server and broadcast to all clients. */
+			uiZoomPercent?: number;
 			promptMode?: "append" | "replace";
 			customSystemPrompt?: string;
 			/** 组合模板文本（{{token}} 自由拼装，空 = 默认模板，见 prompt-composer）。 */
@@ -1937,6 +1940,8 @@ export interface UiMarkerInfo {
 
 /** Full settings state pushed to the browser (settings_state). */
 export interface UiSettingsState {
+	/** Instance-wide UI scale; absent on older servers. */
+	uiZoomPercent?: number;
 	promptMode: "append" | "replace";
 	customSystemPrompt: string;
 	/** 组合模板 + 各来源覆盖（见 server/prompt-composer.ts）。主会话系统提示词
@@ -2059,6 +2064,7 @@ export interface UiSettingsState {
 export type ServerMessage =
 	| {
 			type: "ready";
+			uiZoomPercent?: number;
 			clientId: string;
 			serverVersion: string;
 			/** 引擎标识（pi | dsh）—— 前端据此显示引擎徽标（只读展示）。 */
@@ -2452,6 +2458,7 @@ export type ServerMessage =
 	 *  extensions, saved presets). Pushed on attach and after every settings
 	 *  change. */
 	| { type: "settings_state"; settings: UiSettingsState }
+	| { type: "ui_settings"; uiZoomPercent: number }
 	// -- plugins (<dataDir>/plugins) -----------------------------------------
 	/** Installed-plugin catalog. Pushed on attach (the dir is re-scanned each
 	 *  time so freshly dropped plugins appear without a server restart) and

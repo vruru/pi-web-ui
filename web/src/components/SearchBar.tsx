@@ -1,3 +1,4 @@
+import { toUiZoomRect } from "../ui-zoom";
 import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { FiChevronDown, FiChevronUp, FiX } from "react-icons/fi";
 import type { UiMessage } from "../types";
@@ -167,8 +168,8 @@ function collectScrollers(start: HTMLElement | null, end: HTMLElement): HTMLElem
 function scrollRangeIntoView(wrap: HTMLElement, range: Range) {
 	const start = range.startContainer.parentElement as HTMLElement | null;
 	for (const s of collectScrollers(start, wrap)) {
-		const rr = range.getBoundingClientRect();
-		const sr = s.getBoundingClientRect();
+		const rr = toUiZoomRect(range.getBoundingClientRect());
+		const sr = toUiZoomRect(s.getBoundingClientRect());
 		if (rr.height <= 0 || rr.width <= 0) return;
 		if (!(rr.top >= sr.top + 4 && rr.bottom <= sr.bottom - 4)) {
 			s.scrollTop += rr.top - sr.top - (s.clientHeight - rr.height) / 2;
@@ -177,8 +178,8 @@ function scrollRangeIntoView(wrap: HTMLElement, range: Range) {
 			s.scrollLeft += rr.left - sr.left - (s.clientWidth - rr.width) / 2;
 		}
 	}
-	const rr = range.getBoundingClientRect();
-	const wr = wrap.getBoundingClientRect();
+	const rr = toUiZoomRect(range.getBoundingClientRect());
+	const wr = toUiZoomRect(wrap.getBoundingClientRect());
 	if (rr.height <= 0 || rr.width <= 0) return;
 	// 外层消息容器：横纵都完整可见（留 6px 余量）才不打扰，避免相邻命中抖动
 	const vVisible = rr.top >= wr.top + 6 && rr.bottom <= wr.bottom - 6;

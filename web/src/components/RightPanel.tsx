@@ -1,3 +1,4 @@
+import { toUiZoomPixels } from "../ui-zoom";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
 	FiCheck,
@@ -42,7 +43,7 @@ const RP_MIN_WIDGETS_PX = 56;
  *  测不到元素（极端时序）时退回 32px 的老近似值：宁可差几像素，也不要算出 NaN。 */
 function splitTopPx(panel: HTMLElement, split: HTMLElement | null): number {
 	if (!split) return 32;
-	return Math.max(0, split.getBoundingClientRect().top - panel.getBoundingClientRect().top);
+	return Math.max(0, toUiZoomPixels(split.getBoundingClientRect().top - panel.getBoundingClientRect().top));
 }
 
 type AttachMode = "inline" | "reference";
@@ -186,7 +187,7 @@ export const RightPanel = memo(function RightPanel({
 			const onMove = (ev: PointerEvent) => {
 				const { above, below } = applySashDrag({
 					start,
-					deltaPx: ev.clientY - startY,
+					deltaPx: toUiZoomPixels(ev.clientY - startY),
 					availablePx: available,
 					totalWeight: start.above + start.below,
 					minAbovePx: RP_MIN_FILES_PX,

@@ -1,14 +1,17 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react-dom/test-utils";
 import { clampSize, useResizable } from "../../web/src/use-resizable.js";
 
+import { applyUiZoom } from "../../web/src/ui-zoom.js";
+
 let root: Root | null = null;
 
 beforeEach(() => {
 	localStorage.clear();
+	applyUiZoom(100);
 });
 
 afterEach(() => {
@@ -16,6 +19,7 @@ afterEach(() => {
 	root = null;
 	document.body.innerHTML = "";
 	localStorage.clear();
+	applyUiZoom(100);
 });
 
 describe("useResizable & clampSize", () => {
@@ -95,5 +99,24 @@ describe("useResizable & clampSize", () => {
 		});
 
 		expect(hook!.size).toBe(200);
+	});
+	it.each([90, 150, 175])("缩放 %i%% 时拖拽仍与指针保持等长移动", (zoom) => {
+		applyUiZoom(zoom);
+		let hook: ReturnType<typeof useResizable> | null = null;
+		function TestComponent() {
+			hook = useResizable({ defaultSize: 200, min: 50, max: 400 });
+			return createElement("div", { className: "handle", ...hook.handleProps });
+		}
+		const container = document.createElement("div");
+		document.body.appendChild(container);
+		root = createRoot(container);
+		act(() => root!.render(createElement(TestComponent)));
+		const handle = container.querySelector<HTMLElement>(".handle")!;
+		handle.setPointerCapture = vi.fn();
+		handle.releasePointerCapture = vi.fn();
+		act(() => handle.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, clientX: 100, button: 0 })));
+		act(() => handle.dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 100 + zoom })));
+		expect(hook!.size).toBe(300);
+		act(() => handle.dispatchEvent(new MouseEvent("pointerup", { bubbles: true })));
 	});
 });

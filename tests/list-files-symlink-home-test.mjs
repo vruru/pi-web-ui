@@ -1,3 +1,4 @@
+// Prerequisite: npm run build once before running this test or the smoke suite.
 /**
  * Issue #262 regression (Android/Termux files-panel navigation):
  *
@@ -15,16 +16,19 @@
  * The unreadable-"/" machine-root fallback is Android-only (on Linux/CI "/"
  * is listable) and is not covered here.
  */
-import { portUp, freePort } from "./lib/port-utils.mjs";
+import { portUp } from "./lib/port-utils.mjs";
+import { isolatedTestEnv } from "./lib/isolated-env.mjs";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
-import { execSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 
+const isolated = isolatedTestEnv("list-files-symlink-home-test");
+process.once("exit", isolated.cleanup);
 const REPO_ROOT = fileURLToPath(new globalThis.URL("../", import.meta.url));
 const PORT = 8923;
 
@@ -33,13 +37,6 @@ const check = (name, ok, extra = "") => {
 	console.log(`${ok ? "✓" : "✗"} ${name}${extra ? " — " + extra : ""}`);
 	if (!ok) failures++;
 };
-
-try {
-	execSync("npm run build", { cwd: REPO_ROOT, stdio: "ignore" });
-} catch {
-	console.error("build failed");
-	process.exit(1);
-}
 
 // Workspace lives under $HOME (not the system temp dir) — otherwise "~" cannot point at it.
 const WS = join(homedir(), `.pi-web-ui-symtest-${randomUUID().slice(0, 8)}`);
@@ -57,13 +54,11 @@ try {
 }
 
 try {
-	try {
-		await freePort(PORT);
-	} catch {}
+	if (await portUp(PORT)) throw new Error(`Port ${PORT} is already occupied`);
 	await sleep(400);
 	const server = spawn("node", ["dist/server/index.js"], {
 		cwd: REPO_ROOT,
-		env: { ...process.env, PI_WEB_PORT: String(PORT), PI_WEB_CWD: WS },
+		env: { ...isolated.env, PI_WEB_PORT: String(PORT), PI_WEB_CWD: WS },
 		stdio: ["ignore", "ignore", "pipe"],
 	});
 	let serverErr = "";

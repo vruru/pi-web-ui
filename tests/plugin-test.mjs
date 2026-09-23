@@ -135,6 +135,8 @@ try {
 			PI_WEB_PORT: String(PORT),
 			PI_WEB_DATA_DIR: dataDir,
 			PI_WEB_CWD: import.meta.dirname,
+			// 固定本测试的 builtin/custom 两层输入，避免开机联网同步抢写。
+			PI_WEB_PLUGIN_CATALOG_URL: "off",
 		},
 		stdio: ["ignore", "pipe", "pipe"],
 	});

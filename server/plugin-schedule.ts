@@ -11,7 +11,7 @@
  *    坏文件当空表（不回写，避免一次磁盘抖动清空全部定时）。
  */
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 export interface CronParts {
 	minute: number[];

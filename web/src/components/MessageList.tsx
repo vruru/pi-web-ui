@@ -1,3 +1,4 @@
+import { toUiZoomPixels } from "../ui-zoom";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 
@@ -23,7 +24,7 @@ import {
 	type WinRect,
 } from "../lazy-window";
 import { SearchBar } from "./SearchBar";
-import { classifyScroll } from "./scroll-classify";
+import { useMessageScroll } from "../use-message-scroll";
 import { EmptyTemplateCards } from "./PromptTemplates";
 import { renderSlotToolbar } from "../slot-toolbar";
 import { useT } from "../i18n";
@@ -41,21 +42,6 @@ const EMPTY_LIVE = new Map<string, { toolName: string; text: string }>();
  */
 const KEEP_RECENT = 15;
 const COLLAPSE_MIN = 30;
-/** Grace window after a programmatic scroll during which onScroll ignores
- *  negative scrollTop jumps from our own snap() re-asserts.
- *
- *  PRIMARY discriminator for layout shifts vs user intent is now the
- *  scrollHeight delta: user wheel-up never changes content height, while a
- *  layout collapse (tool card finalize, message trim, placeholder swap)
- *  always does. The grace window remains as a backstop for
- *  jump-while-growing races (scrollToBottom snap() firing during appends),
- *  and is re-stamped by the layout-shift re-assert.
- *
- *  Effective protection window is ~850ms, not 250ms: each snap() re-stamps
- *  progUntilRef to fireTime+250ms, and snaps keep firing through the 600ms
- *  re-assert timer, so the grace runs until ~600+250 = ~850ms. */
-const PROGRAMMATIC_SCROLL_GRACE_MS = 250;
-
 /** 惰性窗口化缓冲带：视口上下各多保留 1200px 的真实内容再开始收起。 */
 const LAZY_MARGIN = 1200;
 /** 底部常驻区高度预算（px）：贴底滚动 / 流式输出区域零占位延迟，
@@ -154,6 +140,8 @@ function hasToolCall(m: UiMessage): boolean {
 }
 
 interface MessageListProps {
+	/** Chat views remain mounted while hidden; returning always follows the latest output. */
+	active?: boolean;
 	/** 消息工具条条目（message.actions 槽位：内置 + 插件的最终结果）。 */
 	uiMessageActions?: import("../ui-slots").UiSlotEntry[];
 	/** 消息右键菜单条目（contextmenu.message 槽位）。 */
@@ -191,6 +179,7 @@ interface MessageListProps {
 }
 
 export function MessageList({
+	active = true,
 	state,
 	liveOutputs,
 	toolStatuses,
@@ -212,17 +201,14 @@ export function MessageList({
 }: MessageListProps) {
 	const t = useT();
 	const exportImage = useExportImage();
-	const scrollRef = useRef<HTMLDivElement>(null);
-	const [stickBottom, setStickBottom] = useState(true);
-	const stickRef = useRef(true);
-	/** 上一帧 scrollTop —— 判定滚动方向（向上 = 用户要离开底部）。 */
-	const prevStRef = useRef(0);
-	/** 上一帧 scrollHeight —— 布局塌缩/增长的判据（用户滚轮不会改变内容高度）。 */
-	const prevScrollHeightRef = useRef(0);
-	/** 用户已主动离开底部：流式结束 / finalize 塌缩时不再自动吸回。 */
-	const escapedRef = useRef(false);
-	/** Timestamp until which scroll events are treated as programmatic. */
-	const progUntilRef = useRef(0);
+	const {
+		scrollRef,
+		stickBottom,
+		scrollToBottom,
+		onScroll: followOnScroll,
+		pause,
+		snap,
+	} = useMessageScroll({ active, resetKey: `${state.conversationId}:${state.sessionFile ?? ""}` });
 	/** Messages the user expanded from the collapsed view — stay expanded. */
 	const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
 	/** 会话内搜索栏（Ctrl+F / Cmd+F）。 */
@@ -322,7 +308,7 @@ export function MessageList({
 			items.push({ id, top: b.top, bottom: b.bottom });
 			// 显示中的元素顺手记录实测高度——pickAlways 的预算与占位高度都靠它；
 			// 只在隐藏时测量的话，「初始就显示」的消息会永远停留在估算值。
-			if (!hiddenRef.current.has(id)) recordMeasured(id, b.bottom - b.top, fpRef.current.get(id));
+			if (!hiddenRef.current.has(id)) recordMeasured(id, toUiZoomPixels(b.bottom - b.top), fpRef.current.get(id));
 		}
 		const plan = planWindow(items, viewport, alwaysRef.current, hiddenRef.current);
 		// 收起时用刚实测的高度做占位 ⇒ 流总高度不变 ⇒ 无需任何 scrollTop 补偿。
@@ -532,16 +518,15 @@ export function MessageList({
 					void el.offsetWidth; // restart the highlight animation
 					el.classList.add("msg-flash");
 					// 问题跳转 = 主动离开底部；流结束时不要被吸回去
-					if (el !== scrollRef.current?.lastElementChild) escapedRef.current = true;
+					if (el !== scrollRef.current?.lastElementChild) pause();
 				}
 			});
 		},
-		[state.messages, recentStart, expanded, expand],
+		[state.messages, recentStart, expanded, expand, pause],
 	);
 
-	// ---- 新压缩摘要到达：自动展开 + 滚动定位 ------------------------------
-	// 压缩动辄数十秒，用户很可能已上滚回看；完成 toast 出现时新摘要卡在下方
-	// 看不见。检测到同对话新增 compactionSummary → 展开该卡 + jumpTo 定位闪光。
+	// ---- 新压缩摘要到达：自动展开，保留当前跟随/历史阅读状态 --------------
+	// 检测到同对话新增 compactionSummary 时展开；只在本来跟随输出时贴底。
 	// 首载 / 切换对话时静默记住现有 id（历史摘要不跳转）。
 	const [freshCompactionId, setFreshCompactionId] = useState<string | null>(null);
 	const compactionSeenRef = useRef<{ convId: string; ids: Set<string> } | null>(null);
@@ -566,11 +551,11 @@ export function MessageList({
 		}
 	}, [state.messages, state.conversationId]);
 	useEffect(() => {
-		// jumpTo 身份随 messages 变化，守卫保证每个新摘要只跳一次
+		// 每个新摘要只自动展开一次，不打断正在回看历史的用户。
 		if (!freshCompactionId || jumpedCompactionRef.current === freshCompactionId) return;
 		jumpedCompactionRef.current = freshCompactionId;
-		jumpTo(freshCompactionId);
-	}, [freshCompactionId, jumpTo]);
+		expand(freshCompactionId);
+	}, [freshCompactionId, expand]);
 
 	// ---- 全局搜索「会话」结果跳转 ----------------------------------------
 	// 锚点 = role + timestamp；会话载入后从 UiMessage[] 解析出 message id。
@@ -595,170 +580,15 @@ export function MessageList({
 	}, [jumpMsgId, jumpTo, onJumpDone, jumpTarget, state.sessionFile, state.messages.length]);
 
 	const onScroll = useCallback(() => {
-		const el = scrollRef.current;
-		if (!el) return;
-		const dSt = el.scrollTop - prevStRef.current;
-		const dSh = el.scrollHeight - prevScrollHeightRef.current;
-		prevStRef.current = el.scrollTop;
-		prevScrollHeightRef.current = el.scrollHeight;
-		const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-		// Programmatic jumps (scrollToBottom re-asserts) land here too — never
-		// treat them as upward user intent, or the stick gets undone instantly.
-		const programmatic = Date.now() < progUntilRef.current;
-		const decision = classifyScroll({
-			dSt,
-			dSh,
-			escaped: escapedRef.current,
-			graceActive: programmatic,
-			stuck: stickRef.current,
-		});
-		if (decision.reassert) {
-			progUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_GRACE_MS;
-			el.scrollTop = el.scrollHeight;
-		}
-		if (decision.flipEscape) escapedRef.current = true;
-		if (nearBottom && dSt >= 0) {
-			escapedRef.current = false; // 滚回了底部
-		}
-		// A programmatic jump's echo scroll event can fire after the bottom moved
-		// slightly (height corrections between assignment and event dispatch),
-		// making nearBottom false at echo time — clearing stickRef here kills the
-		// RO / MutationObserver / effect re-pin gates and the bottom drifts away
-		// forever after (Back-to-bottom lands short, chip lingers). Within the
-		// grace window the jump owns the stick: never clear it from its own echo.
-		if (!programmatic) {
-			if (dSt < 0) {
-				// Upward intent: escape semantics exactly as before.
-				stickRef.current = nearBottom && !escapedRef.current;
-			} else if (nearBottom) {
-				// Reached the bottom going down: re-arm.
-				stickRef.current = true;
-			}
-			// dSt >= 0 && !nearBottom: NOT leaving intent — the user is moving
-			// TOWARD the bottom while coalesced growth opens a gap under the
-			// wheel (live dump: dSh=187 vs dSt=+93.6 → gap≈94 → disarmed stick,
-			// unreachable bottom). Keep the current stick state so the RO/MO
-			// re-pins can close the gap.
-		}
-		setStickBottom(stickRef.current);
+		followOnScroll();
 		updateActiveFromScroll();
 		scheduleSweep();
-	}, [updateActiveFromScroll, scheduleSweep]);
+	}, [followOnScroll, updateActiveFromScroll, scheduleSweep]);
 
-	// 流结束兜底：finalize 瞬间 streaming→persisted 切换可能让内容高度塌缩一帧，
-	// 浏览器把视口 clamp 到半路；若用户并未主动离开（!escaped），等布局稳定后吸回底部。
-	const wasStreamingRef = useRef(false);
-	useEffect(() => {
-		const was = wasStreamingRef.current;
-		wasStreamingRef.current = !!state.isStreaming;
-		if (was && !state.isStreaming && !escapedRef.current) {
-			const snap = () => {
-				const el = scrollRef.current;
-				if (el && !escapedRef.current) {
-					el.scrollTop = el.scrollHeight;
-					stickRef.current = true;
-					setStickBottom(true);
-				}
-			};
-			requestAnimationFrame(() => requestAnimationFrame(snap));
-			const t = setTimeout(snap, 180);
-			return () => clearTimeout(t);
-		}
-	}, [state.isStreaming]);
-
-	useEffect(() => {
-		const el = scrollRef.current;
-		if (el && stickRef.current) {
-			el.scrollTop = el.scrollHeight;
-		}
-	}, [messages, state.isStreaming, liveOutputs]);
-
-	// Queued prompts (插队/排队) render as pending bubbles at the list bottom —
-	// include them in the stick-to-bottom deps so a newly queued message is
-	// scrolled into view when the user hasn't left the bottom.
-	const queueSig = state.queue.steering.join("\u0000") + "\u0001" + state.queue.followUp.join("\u0000");
-	useEffect(() => {
-		const el = scrollRef.current;
-		if (el && stickRef.current) {
-			el.scrollTop = el.scrollHeight;
-		}
-	}, [queueSig]);
-
-	// The composer sits BELOW this scroll container in a flex column. Its
-	// growth shrinks this box from the bottom; ChatInput sets scrollTop =
-	// pre-transient position + net growth, so the anchor row stays stationary.
-	// Only box GROWTH (composer shrink) needs a nudge — clamp the stranded
-	// scrollTop back so no dead gap lingers at the bottom. Content-height
-	// growth (streaming appends, image loads) doesn't change the box and stays
-	// covered by the messages/liveOutputs snap effects.
-	useEffect(() => {
-		const el = scrollRef.current;
-		if (!el || typeof ResizeObserver === "undefined") return;
-		let prevH = el.clientHeight;
-		const ro = new ResizeObserver(() => {
-			const h = el.clientHeight;
-			const grew = h - prevH;
-			prevH = h;
-			if (grew > 0) el.scrollTop = Math.min(el.scrollTop, el.scrollHeight - el.clientHeight);
-		});
-		ro.observe(el);
-		return () => ro.disconnect();
-	}, []);
-	// Content-level growth watch: the RO above only sees the BOX of .messages.
-	// Content growing INSIDE the container without a React state change —
-	// extension / liveOutputs / tool cards mutating via DOM, post-jump height
-	// corrections in collapsed rows — is invisible to the RO AND to the
-	// messages/liveOutputs snap effects: the bottom drifts away silently with
-	// zero scroll events. A MutationObserver on the scroll content closes that
-	// gap: any content mutation while stuck && !escaped re-pins the bottom,
-	// coalesced to at most one snap per frame. No feedback loop: snap mutates
-	// scrollTop only — no DOM mutation, so the observer never re-triggers.
-	useEffect(() => {
-		const el = scrollRef.current;
-		if (!el || typeof MutationObserver === "undefined") return;
-		let queued = false;
-		const mo = new MutationObserver(() => {
-			if (queued) return;
-			queued = true;
-			requestAnimationFrame(() => {
-				queued = false;
-				const el2 = scrollRef.current;
-				if (el2 && stickRef.current && !escapedRef.current) {
-					el2.scrollTop = el2.scrollHeight;
-					// keep the chip's state source in sync (same as RO re-pin)
-					setStickBottom(true);
-				}
-			});
-		});
-		mo.observe(el, { childList: true, subtree: true, characterData: true });
-		return () => mo.disconnect();
-	}, []);
-
-	const scrollToBottom = useCallback(() => {
-		const el = scrollRef.current;
-		if (!el) return;
-		stickRef.current = true;
-		escapedRef.current = false;
-		setStickBottom(true);
-		// Mark programmatic scrolling so onScroll won't misread our own jumps
-		// (or stream re-render layout shifts in the same window) as upward
-		// user intent — that used to flip escapedRef and undo the stick.
-		progUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_GRACE_MS;
-		const snap = () => {
-			const el2 = scrollRef.current;
-			if (!el2 || !stickRef.current || escapedRef.current) return;
-			progUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_GRACE_MS;
-			el2.scrollTop = el2.scrollHeight;
-		};
+	// Snap before paint; observers cover late images, expanding rows and container changes.
+	useLayoutEffect(() => {
 		snap();
-		// Re-assert while live content keeps inflating the bottom: streaming
-		// deltas / attach trickle append after the jump, and a one-shot
-		// scrollTop=scrollHeight lands short of the moving bottom.
-		requestAnimationFrame(() => requestAnimationFrame(snap));
-		setTimeout(snap, 120);
-		setTimeout(snap, 300);
-		setTimeout(snap, 600);
-	}, []);
+	}, [messages, state.isStreaming, liveOutputs, state.queue, snap]);
 
 	// The rail is a pointer-event target so it can expand on hover; forward
 	// wheel over it (collapsed strip or expanded panel) to the message list.
@@ -777,11 +607,12 @@ export function MessageList({
 				list.scrollTop += e.deltaY;
 				return;
 			}
+			if (e.deltaY < 0) pause();
 			el.scrollTop += e.deltaY;
 		};
 		rail.addEventListener("wheel", onWheel, { passive: false });
 		return () => rail.removeEventListener("wheel", onWheel);
-	}, []);
+	}, [pause]);
 
 	// Visible height of the scroll area — drives the adaptive row gap so the
 	// centered tick cluster always fits (no top/bottom clipping).
@@ -812,6 +643,7 @@ export function MessageList({
 				// 边缘消息的占位⇄真身互换跳动；与钉底期的程序性再钉互斥（那时无此类）。
 				className={`messages${searchOpen ? "" : stickBottom ? "" : " anchor-live"}`}
 				ref={scrollRef}
+				tabIndex={0}
 				onScroll={onScroll}
 			>
 				{state.messages.length === 0 && !state.streamingMessage && (
@@ -951,12 +783,7 @@ export function MessageList({
 				collapsedIds={collapsedIds}
 				toolResults={toolResults}
 				onExpand={expand}
-				onProgrammaticScroll={() => {
-					// 搜索跳转让位贴底机制：之后再吸底部会覆盖搜索定位
-					escapedRef.current = true;
-					stickRef.current = false;
-					setStickBottom(false);
-				}}
+				onProgrammaticScroll={pause}
 				open={searchOpen}
 				onClose={() => setSearchOpen(false)}
 			/>

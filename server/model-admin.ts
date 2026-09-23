@@ -166,7 +166,7 @@ export function mergeProviderConfigEntry(
 	}
 	const mergedModels = models.map((model) => {
 		// 旧条目同 id 的字段（api/baseUrl/cost/compat/…）先铺底，表单字段覆盖。
-		const merged: Record<string, unknown> = { ...(prevModels.get(model.id) ?? {}), id: model.id };
+		const merged: Record<string, unknown> = { ...prevModels.get(model.id), id: model.id };
 		if (model.name?.trim()) merged.name = model.name.trim();
 		else delete merged.name;
 		if (model.reasoning) merged.reasoning = true;

@@ -224,7 +224,8 @@ export function syncMessageWidgets(plugins: UiPluginInfo[], epoch: number): void
 	}
 	// 清理清单里已消失的类型（插件被删/禁用）。原地增删、保持 widgetRegistry
 	// 的引用稳定（它是 export 给调用方直接读的）。
-	for (const type of [...widgetRegistry.keys()]) {
+	const registeredTypes = [...widgetRegistry.keys()];
+	for (const type of registeredTypes) {
 		if (!next.has(type)) widgetRegistry.delete(type);
 	}
 	for (const [type, pluginId] of next) widgetRegistry.set(type, pluginId);

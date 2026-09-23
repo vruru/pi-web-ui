@@ -1248,6 +1248,9 @@ export const zh = {
 	pluginCatalogSyncOk: "同步成功：列表共 {n} 条",
 	pluginCatalogSyncInstalled: "安装结果：{ok} 成功，{fail} 失败",
 	uiLayoutTitle: "界面布局",
+	uiZoomTitle: "界面缩放",
+	uiZoomHint: "缩放整个页面的文字和界面，对所有访问此服务的浏览器生效。",
+	uiZoomCurrent: "当前：{percent}%",
 	uiLayoutHint:
 		"插件可以调整这里的条目（包括宿主内置入口）；你随时能改回来：取消勾选＝隐藏，↑/↓ 调顺序，改过的条目会显示「恢复」。隐藏的条目仍能在顶栏溢出菜单里点到。",
 	pluginTopbarMore: "更多插件按钮",
@@ -2837,6 +2840,9 @@ const en: Record<keyof typeof zh, string> = {
 	pluginCatalogSyncOk: "Catalog synced: {n} entries in the list",
 	pluginCatalogSyncInstalled: "Install results: {ok} succeeded, {fail} failed",
 	uiLayoutTitle: "Interface layout",
+	uiZoomTitle: "Interface zoom",
+	uiZoomHint: "Scale all page text and interface elements for every browser connected to this server.",
+	uiZoomCurrent: "Current: {percent}%",
 	uiLayoutHint:
 		"Plugins can rearrange these entries (built-in ones included). You can always change them back: uncheck to hide, ↑/↓ to reorder; changed rows offer “Restore”. Hidden entries stay reachable from the top-bar overflow menu.",
 	pluginTopbarMore: "More plugin buttons",

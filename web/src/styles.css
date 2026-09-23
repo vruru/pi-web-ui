@@ -7,8 +7,8 @@
 	border: 1px solid var(--border);
 	border-radius: 12px;
 	padding: 24px;
-	width: min(520px, calc(100vw - 32px));
-	max-height: 85vh;
+	width: min(520px, calc(calc(100vw / var(--ui-zoom)) - 32px));
+	max-height: calc(85vh / var(--ui-zoom));
 	overflow: auto;
 }
 .file-transfer-dialog::backdrop {
@@ -184,6 +184,10 @@
 
 * {
 	box-sizing: border-box;
+}
+
+html {
+	--ui-zoom: 1;
 }
 
 html,
@@ -818,8 +822,8 @@ body.rp-resizing .rp-sash.dragging::after {
 	top: 50%;
 	left: 50%;
 	transform: translate(-50%, -50%);
-	width: min(90vw, 1100px);
-	max-height: min(80vh, calc(100vh - 80px));
+	width: min(calc(90vw / var(--ui-zoom)), 1100px);
+	max-height: min(calc(80vh / var(--ui-zoom)), calc(calc(100vh / var(--ui-zoom)) - 80px));
 	display: flex;
 	flex-direction: column;
 	background: var(--bg-elev2);
@@ -1344,7 +1348,7 @@ body.rp-resizing .rp-sash.dragging::after {
 	left: 0;
 	z-index: 60;
 	min-width: 220px;
-	max-width: min(420px, 70vw);
+	max-width: min(420px, calc(70vw / var(--ui-zoom)));
 	padding: 6px;
 	border: 1px solid var(--border-soft);
 	border-radius: 10px;
@@ -2359,7 +2363,7 @@ select.plugin-topbar-item.plugin-topbar-select {
 	   不设 min-width，行少字短时不留空。百分比宽度的行按自身内容参与
 	   intrinsic 计算，菜单宽度 = 最宽行的内容宽。 */
 	width: max-content;
-	max-width: min(320px, calc(100vw - 16px));
+	max-width: min(320px, calc(calc(100vw / var(--ui-zoom)) - 16px));
 	padding: 6px;
 	border: 1px solid var(--border-soft);
 	border-radius: 10px;
@@ -2456,7 +2460,7 @@ select.plugin-topbar-item.plugin-topbar-select {
 .plugin-topbar-menu.portal {
 	position: fixed;
 	z-index: 70;
-	max-height: min(60vh, 480px);
+	max-height: min(calc(60vh / var(--ui-zoom)), 480px);
 	overflow-y: auto;
 }
 /* issue #183：portal 自己是纵向滚动容器 —— 按 CSS Overflow 3 §3.1，只写
@@ -2489,8 +2493,8 @@ select.plugin-topbar-item.plugin-topbar-select {
 	gap: 4px;
 	width: max-content;
 	min-width: 240px;
-	max-width: min(360px, calc(100vw - 16px));
-	max-height: min(70vh, 560px);
+	max-width: min(360px, calc(calc(100vw / var(--ui-zoom)) - 16px));
+	max-height: min(calc(70vh / var(--ui-zoom)), 560px);
 	overflow: hidden;
 	padding: 6px;
 	border: 1px solid var(--border-soft);
@@ -3737,7 +3741,6 @@ body.panel-resizing .scm-divider::after {
 
 /* 实时生成速率 (tokens/sec) */
 .status-rate {
-	color: var(--accent);
 	font-variant-numeric: tabular-nums;
 }
 
@@ -3849,8 +3852,8 @@ body.panel-resizing .scm-divider::after {
 	position: fixed;
 	right: 16px;
 	bottom: 40px;
-	width: min(480px, calc(100vw - 32px));
-	height: min(340px, calc(100vh - 120px));
+	width: min(480px, calc(calc(100vw / var(--ui-zoom)) - 32px));
+	height: min(340px, calc(calc(100vh / var(--ui-zoom)) - 120px));
 	display: flex;
 	flex-direction: column;
 	gap: 6px;
@@ -3869,8 +3872,8 @@ body.panel-resizing .scm-divider::after {
 	top: 48px;
 	bottom: auto;
 	right: auto;
-	width: min(440px, calc(100vw - 32px));
-	height: min(380px, calc(100vh - 120px));
+	width: min(440px, calc(calc(100vw / var(--ui-zoom)) - 32px));
+	height: min(380px, calc(calc(100vh / var(--ui-zoom)) - 120px));
 	box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
 	animation: picker-enter 0.15s ease-out;
 }
@@ -4286,8 +4289,8 @@ body.panel-resizing .scm-divider::after {
 	top: 50%;
 	left: 50%;
 	transform: translate(-50%, -50%);
-	width: min(460px, calc(100vw - 32px));
-	max-height: min(560px, calc(100vh - 80px));
+	width: min(460px, calc(calc(100vw / var(--ui-zoom)) - 32px));
+	max-height: min(560px, calc(calc(100vh / var(--ui-zoom)) - 80px));
 	display: flex;
 	flex-direction: column;
 	background: var(--bg-elev2);
@@ -4304,9 +4307,9 @@ body.panel-resizing .scm-divider::after {
 	top: 50%;
 	left: 50%;
 	transform: translate(-50%, -50%);
-	width: min(460px, calc(100vw - 32px));
+	width: min(460px, calc(calc(100vw / var(--ui-zoom)) - 32px));
 	max-width: none;
-	max-height: min(560px, calc(100vh - 80px));
+	max-height: min(560px, calc(calc(100vh / var(--ui-zoom)) - 80px));
 	overflow-y: visible;
 	gap: 0;
 	padding: 0;
@@ -4743,13 +4746,13 @@ body.panel-resizing .scm-divider::after {
 /* ---- 全局搜索弹窗 (GlobalSearchModal)：搜对话 / 项目 / 文件 ---- */
 .gs-backdrop {
 	align-items: flex-start;
-	padding-top: 10vh;
+	padding-top: calc(10vh / var(--ui-zoom));
 }
 .gs-modal {
 	display: flex;
 	flex-direction: column;
-	width: min(640px, 92vw);
-	max-height: 70vh;
+	width: min(640px, calc(92vw / var(--ui-zoom)));
+	max-height: calc(70vh / var(--ui-zoom));
 	border: 1px solid var(--border);
 	border-radius: 12px;
 	background: var(--bg-elev2, var(--bg-elev));
@@ -5019,7 +5022,7 @@ body.panel-resizing .scm-divider::after {
 	.dropdown.dd-up .dd-menu {
 		top: auto;
 		bottom: calc(100% + 6px);
-		max-height: min(360px, calc(100vh - 240px));
+		max-height: min(360px, calc(calc(100vh / var(--ui-zoom)) - 240px));
 	}
 }
 
@@ -5048,7 +5051,7 @@ body.panel-resizing .scm-divider::after {
 /* Scrollable middle band of the model dropdown — the model list; the
    dd-header / dd-search-row on top and the dd-footer below stay fixed. */
 .dd-model-scroll {
-	max-height: min(300px, 42vh);
+	max-height: min(300px, calc(42vh / var(--ui-zoom)));
 	overflow-y: auto;
 }
 
@@ -5163,14 +5166,14 @@ body.panel-resizing .scm-divider::after {
 	/* 宽度：由 JS 打开时测量内容自然宽度并锁定（自适应最宽需要、不来回变化）；
 	   min/max 只是兜底。 */
 	min-width: 440px;
-	max-width: min(620px, calc(100vw - 16px));
+	max-width: min(620px, calc(calc(100vw / var(--ui-zoom)) - 16px));
 }
 /* 模型弹窗高度固定（按最高来）：不再随筛选/搜索内容变短而回缩。
    底部输入栏最高约 300px，预留 320px 保证任何输入框高度都不溢出视口。 */
 @media (min-width: 769px) {
 	.dropdown.dd-up .dd-menu.dd-menu-model {
 		max-height: none; /* 去掉 dd-up 的 360px 上限，改用固定高度 */
-		height: min(600px, calc(100vh - 320px));
+		height: min(600px, calc(calc(100vh / var(--ui-zoom)) - 320px));
 	}
 }
 .dd-menu.dd-menu-model .dd-model-scroll {
@@ -5519,7 +5522,7 @@ body.panel-resizing .scm-divider::after {
 	display: flex;
 	align-items: center;
 	gap: 10px;
-	max-width: min(760px, 92vw);
+	max-width: min(760px, calc(92vw / var(--ui-zoom)));
 	padding: 10px 12px 10px 14px;
 	border-radius: 10px;
 	border: 1px solid var(--border);
@@ -5618,7 +5621,7 @@ body.panel-resizing .scm-divider::after {
 	flex-direction: column;
 	gap: 10px;
 	max-width: 360px;
-	width: calc(100vw - 32px);
+	width: calc(calc(100vw / var(--ui-zoom)) - 32px);
 	pointer-events: none;
 }
 
@@ -6840,7 +6843,7 @@ span.msg-editor-hint svg {
 .tool-info-modal {
 	width: 100%;
 	max-width: 720px;
-	max-height: 82vh;
+	max-height: calc(82vh / var(--ui-zoom));
 	display: flex;
 	flex-direction: column;
 	overflow: hidden;
@@ -7283,7 +7286,7 @@ div.chead[role="button"]:focus-visible,
    不拆卡头布局（完整值在 title 悬浮提示里）。 */
 .toolcall-path {
 	flex-shrink: 0;
-	max-width: min(58ch, 42vw);
+	max-width: min(58ch, calc(42vw / var(--ui-zoom)));
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
@@ -7302,7 +7305,7 @@ div.chead[role="button"]:focus-visible,
 .toolcall-cmd {
 	flex: 0 1 auto;
 	min-width: 0;
-	max-width: min(60ch, 40vw);
+	max-width: min(60ch, calc(40vw / var(--ui-zoom)));
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
@@ -7313,7 +7316,7 @@ div.chead[role="button"]:focus-visible,
 /* 派单目标模板（delegate_task 卡头，状态图标右侧；折叠时也可见） */
 .toolcall-agent {
 	flex-shrink: 0;
-	max-width: min(30ch, 24vw);
+	max-width: min(30ch, calc(24vw / var(--ui-zoom)));
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
@@ -7429,8 +7432,8 @@ div.chead[role="button"]:focus-visible,
 	padding: 24px;
 }
 .img-lightbox img {
-	max-width: calc(100vw - 48px);
-	max-height: calc(100vh - 48px);
+	max-width: calc(calc(100vw / var(--ui-zoom)) - 48px);
+	max-height: calc(calc(100vh / var(--ui-zoom)) - 48px);
 	border-radius: 8px;
 }
 
@@ -7782,7 +7785,7 @@ div.chead[role="button"]:focus-visible,
 /* ---- 提示词模板（空态推荐卡片） ---- */
 .empty-templates {
 	margin-top: 0;
-	width: min(720px, 92vw);
+	width: min(720px, calc(92vw / var(--ui-zoom)));
 }
 
 .empty-templates-head {
@@ -9259,7 +9262,7 @@ div.chead[role="button"]:focus-visible,
 	/* 与输入框同宽：同一条列 token（包含块是 .inputbar，百分比基准与它一致）。 */
 	left: var(--chat-inset);
 	right: var(--chat-inset);
-	max-height: min(320px, 50vh);
+	max-height: min(320px, calc(50vh / var(--ui-zoom)));
 	overflow-y: auto;
 	background: var(--bg-elev2);
 	border: 1px solid var(--border);
@@ -9361,7 +9364,7 @@ div.chead[role="button"]:focus-visible,
 	/* Same width as the input box (860px), capped by the backdrop padding. */
 	max-width: 860px;
 	width: 100%;
-	max-height: min(560px, 80vh);
+	max-height: min(560px, calc(80vh / var(--ui-zoom)));
 	display: flex;
 	flex-direction: column;
 	background: var(--bg-elev2);
@@ -9455,7 +9458,7 @@ div.chead[role="button"]:focus-visible,
 	/* 与消息列/输入框同宽：同一条列 token（见 .main） */
 	width: auto;
 	margin: 0 var(--chat-inset) 8px;
-	max-height: 45vh;
+	max-height: calc(45vh / var(--ui-zoom));
 	overflow-y: auto;
 	/* 不自带底色：与聊天背景一致（见 .main）；靠强调色边框 + 投影区分层次。 */
 	border: 1px solid var(--accent);
@@ -9984,7 +9987,7 @@ div.chead[role="button"]:focus-visible,
 	filter: brightness(1.15);
 }
 .browser-control-modal {
-	width: min(560px, 92vw);
+	width: min(560px, calc(92vw / var(--ui-zoom)));
 }
 .browser-control-modal .bc-note {
 	margin: 10px 0;
@@ -10098,7 +10101,7 @@ div.chead[role="button"]:focus-visible,
 	gap: 14px;
 	width: 100%;
 	max-width: 460px;
-	max-height: 84vh;
+	max-height: calc(84vh / var(--ui-zoom));
 	overflow-y: auto;
 	overscroll-behavior: contain;
 	background: var(--bg-elev2);
@@ -10111,8 +10114,8 @@ div.chead[role="button"]:focus-visible,
 
 .model-modal {
 	max-width: 640px;
-	height: min(82vh, 760px);
-	max-height: 86vh;
+	height: min(calc(82vh / var(--ui-zoom)), 760px);
+	max-height: calc(86vh / var(--ui-zoom));
 	overflow: hidden;
 	display: flex;
 	flex-direction: column;
@@ -10130,8 +10133,8 @@ div.chead[role="button"]:focus-visible,
 }
 .tpl-modal {
 	max-width: 640px;
-	height: min(82vh, 720px);
-	max-height: 86vh;
+	height: min(calc(82vh / var(--ui-zoom)), 720px);
+	max-height: calc(86vh / var(--ui-zoom));
 	overflow: hidden;
 	gap: 0;
 	padding: 0;
@@ -10178,8 +10181,8 @@ div.chead[role="button"]:focus-visible,
 /* 插件弹窗（modal.dialog 槽位）：比普通 modal 宽，内容区交给插件视图。 */
 .modal.plugin-modal {
 	max-width: 720px;
-	height: min(80vh, 700px);
-	max-height: 86vh;
+	height: min(calc(80vh / var(--ui-zoom)), 700px);
+	max-height: calc(86vh / var(--ui-zoom));
 	overflow: hidden;
 	gap: 0;
 	padding: 0;
@@ -10243,7 +10246,7 @@ div.chead[role="button"]:focus-visible,
 .settings-modal {
 	max-width: 940px;
 	/* 固定高度：内容不足时不塌缩成矮条，内容超高时仅内容区（modal-body）滚动 */
-	height: min(82vh, 800px);
+	height: min(calc(82vh / var(--ui-zoom)), 800px);
 	/* 头部（modal-head）与底部（modal-actions）固定，仅内容区滚动 */
 	overflow-y: hidden;
 }
@@ -10516,8 +10519,8 @@ div.chead[role="button"]:focus-visible,
 @media (max-width: 640px) {
 	.settings-modal {
 		/* 底部弹层里尽量撑高，减少内容区滚动 */
-		height: 92vh;
-		max-height: 94vh;
+		height: calc(92vh / var(--ui-zoom));
+		max-height: calc(94vh / var(--ui-zoom));
 	}
 	.settings-layout {
 		flex-direction: column;
@@ -11146,7 +11149,7 @@ button.source-default-toggle {
 	left: -8px;
 	top: calc(100% + 8px);
 	width: max-content;
-	max-width: min(320px, 72vw);
+	max-width: min(320px, calc(72vw / var(--ui-zoom)));
 	padding: 8px 11px;
 	background: var(--bg-elev2);
 	border: 1px solid var(--border);
@@ -11175,8 +11178,8 @@ button.source-default-toggle {
  * .dialog-inline{max-height:45vh; overflow-y:auto} 的裁剪；高度上限按视口给，超出时
  * 浮层内部滚动（指针可移入浮层，不会因为离开选项行就收起）。 */
 .set-tip-bubble.question-desc-tip {
-	max-width: min(340px, 78vw);
-	max-height: min(60vh, 340px);
+	max-width: min(340px, calc(78vw / var(--ui-zoom)));
+	max-height: min(calc(60vh / var(--ui-zoom)), 340px);
 	overflow-y: auto;
 	background: var(--tooltip-bg, var(--bg-elev2));
 	/* 覆盖 .set-tip-bubble 的 pointer-events:none —— 允许滚动 / 选中文本。 */
@@ -12530,7 +12533,7 @@ button.source-default-toggle {
 	flex-direction: column;
 	width: 100%;
 	max-width: 1120px;
-	height: min(88vh, 880px);
+	height: min(calc(88vh / var(--ui-zoom)), 880px);
 	background: var(--bg-elev2);
 	border: 1px solid var(--border);
 	border-radius: 12px;
@@ -12541,8 +12544,8 @@ button.source-default-toggle {
 }
 
 .fp.fullscreen {
-	width: 100vw;
-	height: 100vh;
+	width: calc(100vw / var(--ui-zoom));
+	height: calc(100vh / var(--ui-zoom));
 	max-width: none;
 	max-height: none;
 	border-radius: 0;
@@ -12769,7 +12772,7 @@ button.source-default-toggle {
 	min-width: 0;
 	min-height: 0;
 	overflow: auto;
-	padding: 22px clamp(18px, 4vw, 48px) 34px;
+	padding: 22px clamp(18px, calc(4vw / var(--ui-zoom)), 48px) 34px;
 	background: radial-gradient(circle at 10% 0%, rgba(139, 92, 246, 0.08), transparent 34%), rgba(0, 0, 0, 0.22);
 	color: var(--text);
 	font-size: 14px;
@@ -12868,13 +12871,13 @@ button.source-default-toggle {
 	margin-top: 0;
 	padding-bottom: 0.42em;
 	border-bottom: 1px solid var(--border);
-	font-size: clamp(24px, 3vw, 34px);
+	font-size: clamp(24px, calc(3vw / var(--ui-zoom)), 34px);
 	letter-spacing: -0.03em;
 }
 .fp-markdown h2 {
 	padding-bottom: 0.28em;
 	border-bottom: 1px solid var(--border-soft);
-	font-size: clamp(19px, 2.2vw, 25px);
+	font-size: clamp(19px, calc(2.2vw / var(--ui-zoom)), 25px);
 }
 .fp-markdown h3 {
 	color: var(--link-hover);
@@ -13023,7 +13026,7 @@ button.source-default-toggle {
 	width: auto;
 	max-width: 100%;
 	height: auto;
-	max-height: min(62vh, 680px);
+	max-height: min(calc(62vh / var(--ui-zoom)), 680px);
 	margin: 1.15em auto;
 	border: 1px solid var(--border);
 	border-radius: 10px;
@@ -13324,7 +13327,7 @@ button.source-default-toggle {
 		top: auto;
 		bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
 		max-width: none;
-		max-height: 55vh;
+		max-height: calc(55vh / var(--ui-zoom));
 		z-index: 90;
 	}
 	.dropdown.left .dd-menu {
@@ -13386,7 +13389,7 @@ button.source-default-toggle {
 		top: 0;
 		bottom: 0;
 		z-index: 60;
-		width: min(300px, 86vw);
+		width: min(300px, calc(86vw / var(--ui-zoom)));
 		background: var(--bg-elev);
 		transition: transform 0.25s ease;
 	}
@@ -13423,7 +13426,7 @@ button.source-default-toggle {
 		top: 0;
 		bottom: 0;
 		z-index: 60;
-		width: min(300px, 86vw);
+		width: min(300px, calc(86vw / var(--ui-zoom)));
 		transform: translateX(-105%);
 		transition: transform 0.25s ease;
 		box-shadow: 8px 0 30px rgba(0, 0, 0, 0.35);
@@ -13490,7 +13493,7 @@ button.source-default-toggle {
 		width: 40px;
 	}
 	.attach-chip {
-		max-width: 78vw;
+		max-width: calc(78vw / var(--ui-zoom));
 	}
 
 	/* ---- overlays: near-fullscreen bottom sheets ---- */
@@ -13501,7 +13504,7 @@ button.source-default-toggle {
 	}
 	/* 问卷内联面板：宽度跟着列 token（= 输入框同宽），这里只限高 */
 	.dialog-inline {
-		max-height: 55vh;
+		max-height: calc(55vh / var(--ui-zoom));
 	}
 	.question-conv-title {
 		max-width: 140px;
@@ -13510,18 +13513,18 @@ button.source-default-toggle {
 	.fp {
 		width: 100%;
 		max-width: 100%;
-		max-height: 94vh;
+		max-height: calc(94vh / var(--ui-zoom));
 		border-radius: 14px;
 	}
 	.fp {
-		height: 92vh;
+		height: calc(92vh / var(--ui-zoom));
 	}
 	.fp-markdown {
 		padding: 16px 14px 24px;
 		font-size: 13.5px;
 	}
 	.fp-markdown img {
-		max-height: 50vh;
+		max-height: calc(50vh / var(--ui-zoom));
 	}
 
 	.project-picker {
@@ -13529,7 +13532,7 @@ button.source-default-toggle {
 		right: 8px;
 		top: 44px;
 		width: auto;
-		height: min(420px, calc(100vh - 80px));
+		height: min(420px, calc(calc(100vh / var(--ui-zoom)) - 80px));
 	}
 
 	/* ---- footer: phones show connection dot / context / cache-hit / rate / cwd on one line ----
@@ -13970,8 +13973,8 @@ button.source-default-toggle {
 	display: flex;
 	flex-direction: column;
 	overflow: hidden;
-	width: min(760px, 92vw);
-	max-height: 88vh;
+	width: min(760px, calc(92vw / var(--ui-zoom)));
+	max-height: calc(88vh / var(--ui-zoom));
 	background: var(--bg-elev2);
 	border: 1px solid var(--border);
 	border-radius: 12px;
@@ -14105,20 +14108,20 @@ button.source-default-toggle {
 	.saveimg-dialog {
 		width: 100%;
 		max-width: 100%;
-		max-height: 94vh;
+		max-height: calc(94vh / var(--ui-zoom));
 	}
 	.saveimg-dock {
 		top: auto;
 		left: 0;
 		width: 100%;
 		max-width: 100%;
-		height: 48vh;
+		height: calc(48vh / var(--ui-zoom));
 		border-left: none;
 		border-top: 1px solid var(--border);
 	}
 	.messages-wrap.messages-exporting .messages {
 		padding-inline-end: max(0px, calc(var(--chat-inset) - var(--msgs-gutter, 0px)));
-		padding-bottom: 48vh;
+		padding-bottom: calc(48vh / var(--ui-zoom));
 	}
 	.saveimg-input {
 		width: 140px;
@@ -14126,4 +14129,39 @@ button.source-default-toggle {
 	.saveimg-copy {
 		margin-left: auto;
 	}
+}
+
+/* Whole-interface scale, shared by every browser connected to this server. */
+.set-ui-zoom {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 12px 16px;
+	padding: 12px 0;
+	border-bottom: 1px solid var(--border);
+	margin-bottom: 12px;
+}
+.set-ui-zoom-controls {
+	min-width: 0;
+	max-width: 100%;
+}
+.set-ui-zoom-options {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+}
+.set-ui-zoom-options button {
+	background: var(--bg-elev);
+	color: var(--text);
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	padding: 5px 8px;
+	font: inherit;
+	cursor: pointer;
+}
+.set-ui-zoom-options button[aria-pressed="true"] {
+	border-color: var(--accent);
+	color: var(--accent);
+	background: var(--accent-soft);
 }

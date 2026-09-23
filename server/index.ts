@@ -64,6 +64,7 @@ import type { ServerLang } from "./i18n.js";
 import { McpBridge } from "./mcp-bridge.js";
 import { createMcpHotReload } from "./mcp-hot-reload.js";
 import { createHostMetricsSampler } from "./host-metrics.js";
+import { UiSettingsStore } from "./ui-settings.js";
 import { SchedulerStore } from "./scheduler-tasks.js";
 import { initHttpProxy } from "./http-proxy.js";
 import { buildPiWebTokenCookie, decodeCookieToken, isTlsRequest } from "./auth-cookie.js";
@@ -111,6 +112,7 @@ function cliFlag(name: string): string | undefined {
 const PORT = Number(cliFlag("--port") ?? process.env.PI_WEB_PORT ?? 8787);
 const CWD = resolve(cliFlag("--cwd") ?? process.env.PI_WEB_CWD ?? process.cwd());
 const DATA_DIR = resolve(cliFlag("--data-dir") ?? process.env.PI_WEB_DATA_DIR ?? join(homedir(), ".pi-web"));
+const uiSettings = new UiSettingsStore(DATA_DIR);
 // The data dir is where the control socket, client state, plugins, themes and
 // uploads live, but nothing guarantees it exists on a first run (a fresh
 // `server install` never creates it). The control socket binds at startup —
@@ -1786,6 +1788,10 @@ wss.on("connection", (ws) => {
 
 	const send = (msg: ServerMessage): void => {
 		if (closed || ws.readyState !== WebSocket.OPEN) return;
+		// Instance preferences are independent of per-client/engine settings.
+		if (msg.type === "settings_state") {
+			msg = { ...msg, settings: { ...msg.settings, uiZoomPercent: uiSettings.uiZoomPercent } };
+		}
 		// 发送背压（issue #11）：socket 消费不过来时（前端慢/网络差），堆里会堆积
 		// 每份可达 ~10MB 的全量 snapshot 字符串，低内存主机直接 OOM。snapshot 是全量
 		// 幂等的且稍后必有更新的一份，可以安全丢弃——在序列化之前丢，连
@@ -2248,6 +2254,24 @@ wss.on("connection", (ws) => {
 				cs.pushSettings();
 				break;
 			case "set_settings":
+				if (msg.uiZoomPercent !== undefined) {
+					try {
+						uiSettings.setZoom(msg.uiZoomPercent);
+						const update: ServerMessage = { type: "ui_settings", uiZoomPercent: uiSettings.uiZoomPercent };
+						for (const client of wss.clients) {
+							if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify(update));
+						}
+					} catch (err) {
+						send({
+							type: "notice",
+							level: "error",
+							text: `界面缩放保存失败：${(err as Error).message}`,
+							textEn: `Could not save UI scale: ${(err as Error).message}`,
+						});
+						cs.pushSettings();
+						break;
+					}
+				}
 				// SAFETY: Both dispatch engines validate the explicitly enumerated settings fields below.
 				void (cs as unknown as { setSettings: (p: Record<string, unknown>) => Promise<void> }).setSettings({
 					promptMode: msg.promptMode,
@@ -2461,7 +2485,7 @@ wss.on("connection", (ws) => {
 						customCatalogPath: pluginMgr.customCatalogPath,
 						pluginsDir: join(DATA_DIR, "plugins"),
 						installer: pluginInstaller,
-						afterWrite: () => reloadPluginsAndPush(syncLang),
+						afterWrite: (pluginsChanged) => (pluginsChanged ? reloadPluginsAndPush(syncLang) : pluginMgr.pushCatalog()),
 						lang: syncLang,
 					},
 				).then((r) => {
@@ -2618,6 +2642,7 @@ wss.on("connection", (ws) => {
 					if (closed) return;
 					send({
 						type: "ready",
+						uiZoomPercent: uiSettings.uiZoomPercent,
 						clientId: cid,
 						serverVersion: VERSION,
 						protocolVersion: PROTOCOL_VERSION,
@@ -2787,7 +2812,8 @@ if (!bootCatalogDisabled) {
 			customCatalogPath: pluginMgr.customCatalogPath,
 			pluginsDir: join(DATA_DIR, "plugins"),
 			installer: pluginInstaller,
-			afterWrite: () => reloadPluginsAndPush(),
+			// Market metadata must not tear down running plugin instances.
+			afterWrite: (pluginsChanged) => (pluginsChanged ? reloadPluginsAndPush() : pluginMgr.pushCatalog()),
 		},
 	).then((r) => {
 		if (!r.ok) {

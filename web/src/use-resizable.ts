@@ -1,3 +1,4 @@
+import { toUiZoomPixels } from "./ui-zoom";
 import {
 	useCallback,
 	useEffect,
@@ -126,7 +127,7 @@ export function useResizable(options: UseResizableOptions): UseResizableResult {
 			const onPointerMove = (moveEvent: PointerEvent) => {
 				if (!dragStartRef.current) return;
 				const currentCoord = axis === "x" ? moveEvent.clientX : moveEvent.clientY;
-				const delta = currentCoord - dragStartRef.current.startCoord;
+				const delta = toUiZoomPixels(currentCoord - dragStartRef.current.startCoord);
 				const effectiveDelta = reverse ? -delta : delta;
 				const nextSize = dragStartRef.current.startSize + effectiveDelta;
 				setSize(nextSize);

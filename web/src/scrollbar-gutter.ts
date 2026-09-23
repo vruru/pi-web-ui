@@ -1,3 +1,4 @@
+import { toUiZoomPixels } from "./ui-zoom";
 /**
  * 维护 CSS 变量 `--msgs-gutter`：`.messages` 滚动容器**每侧**的 gutter 宽度
  * （= 滚动条占位宽度）。`.messages` 带 `scrollbar-gutter: stable both-edges`，
@@ -56,7 +57,7 @@ function realGutter(el: HTMLElement): number {
 	const markerBox = marker.getBoundingClientRect();
 	const border = Number.parseFloat(cs.borderLeftWidth) || 0;
 	const padding = Number.parseFloat(cs.paddingLeft) || 0;
-	const gutter = markerBox.left - (elBox.left + border + padding);
+	const gutter = toUiZoomPixels(markerBox.left - elBox.left) - border - padding;
 	marker.remove();
 	return gutter;
 }

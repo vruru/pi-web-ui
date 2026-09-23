@@ -1,3 +1,4 @@
+// Prerequisite: npm run build once before running this test or the smoke suite.
 /**
  * Issue #74 regression: listing a directory that was deleted/renamed must
  * degrade to an empty listing + a "目录不存在" notice, NOT crash the whole
@@ -8,16 +9,19 @@
  * process). CI runs this on ubuntu so the regression is caught there; on
  * win32 it still asserts the common graceful-degradation contract.
  */
-import { portUp, freePort } from "./lib/port-utils.mjs";
+import { portUp } from "./lib/port-utils.mjs";
+import { isolatedTestEnv } from "./lib/isolated-env.mjs";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
-import { execSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 
+const isolated = isolatedTestEnv("list-files-missing-dir-test");
+process.once("exit", isolated.cleanup);
 const REPO_ROOT = fileURLToPath(new globalThis.URL("../", import.meta.url));
 const PORT = 8902;
 const WS = mkdtempSync(join(tmpdir(), "pi-missingdir-"));
@@ -32,19 +36,11 @@ const check = (name, ok, extra = "") => {
 	if (!ok) failures++;
 };
 
-try {
-	execSync("npm run build", { cwd: REPO_ROOT, stdio: "ignore" });
-} catch {
-	console.error("build failed");
-	process.exit(1);
-}
-try {
-	await freePort(PORT);
-} catch {}
+if (await portUp(PORT)) throw new Error(`Port ${PORT} is already occupied`);
 await sleep(400);
 let server = spawn("node", ["dist/server/index.js"], {
 	cwd: REPO_ROOT,
-	env: { ...process.env, PI_WEB_PORT: String(PORT), PI_WEB_CWD: WS },
+	env: { ...isolated.env, PI_WEB_PORT: String(PORT), PI_WEB_CWD: WS },
 	stdio: ["ignore", "ignore", "pipe"],
 });
 let serverErr = "";
@@ -56,12 +52,10 @@ for (let attempt = 0; attempt < 2 && !(await portUp(PORT)); attempt++) {
 	if (await portUp(PORT)) break;
 	server.kill("SIGKILL");
 	await sleep(300);
-	try {
-		await freePort(PORT);
-	} catch {}
+	if (await portUp(PORT)) throw new Error(`Port ${PORT} is already occupied`);
 	server = spawn("node", ["dist/server/index.js"], {
 		cwd: REPO_ROOT,
-		env: { ...process.env, PI_WEB_PORT: String(PORT), PI_WEB_CWD: WS },
+		env: { ...isolated.env, PI_WEB_PORT: String(PORT), PI_WEB_CWD: WS },
 		stdio: ["ignore", "ignore", "pipe"],
 	});
 	attachErr();

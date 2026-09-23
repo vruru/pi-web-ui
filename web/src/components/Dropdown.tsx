@@ -1,3 +1,4 @@
+import { toUiZoomPixels } from "../ui-zoom";
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type Ref } from "react";
 import { FiChevronDown } from "react-icons/fi";
 import { useClickOutside } from "../use-click-outside";
@@ -156,8 +157,8 @@ export function Dropdown({
 							? {
 									...menuStyle,
 									transform: menuStyle?.transform
-										? `${menuStyle.transform} translateX(${shift}px)`
-										: `translateX(${shift}px)`,
+										? `${menuStyle.transform} translateX(${toUiZoomPixels(shift)}px)`
+										: `translateX(${toUiZoomPixels(shift)}px)`,
 								}
 							: menuStyle
 					}

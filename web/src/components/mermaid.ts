@@ -77,6 +77,6 @@ export function fenceLanguage(children: unknown): string | null {
 	const code = singleCodeChild(children);
 	const className = code?.props?.className;
 	if (typeof className !== "string") return null;
-	const m = className.match(/(?:^|\s)language-([A-Za-z0-9_+\-]+)(?:\s|$)/);
+	const m = className.match(/(?:^|\s)language-([A-Za-z0-9_+-]+)(?:\s|$)/);
 	return m ? m[1] : null;
 }

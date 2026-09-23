@@ -1121,7 +1121,9 @@ export function onModelChange(handler: (modelId: string | null) => void): () => 
 
 /** 触发模型变更订阅（供 App 在模型切换后调用）。 */
 export function emitPluginHostModel(modelId: string | null): void {
-	for (const h of [...modelListeners]) {
+	// Snapshot subscriptions: handlers may subscribe or unsubscribe during dispatch.
+	const handlers = [...modelListeners];
+	for (const h of handlers) {
 		try {
 			h(modelId);
 		} catch (err) {
@@ -1160,7 +1162,9 @@ export function subscribePluginHostView(handler: PluginHostViewHandler): () => v
 /** 触发主题订阅（供 App 在主题切换后调用；单个 handler 抛错不影响其余）。 */
 export function emitPluginHostTheme(name: string): void {
 	const n = String(name ?? "");
-	for (const h of [...themeListeners]) {
+	// Snapshot subscriptions: handlers may subscribe or unsubscribe during dispatch.
+	const handlers = [...themeListeners];
+	for (const h of handlers) {
 		try {
 			h(n);
 		} catch (err) {
@@ -1172,7 +1176,9 @@ export function emitPluginHostTheme(name: string): void {
 /** 触发语言订阅（供 App 在语言切换后调用）。 */
 export function emitPluginHostLocale(locale: string): void {
 	const l = String(locale ?? "");
-	for (const h of [...localeListeners]) {
+	// Snapshot subscriptions: handlers may subscribe or unsubscribe during dispatch.
+	const handlers = [...localeListeners];
+	for (const h of handlers) {
 		try {
 			h(l);
 		} catch (err) {
@@ -1184,7 +1190,9 @@ export function emitPluginHostLocale(locale: string): void {
 /** 触发视图订阅（供 App 在切视图后调用）。 */
 export function emitPluginHostView(view: string): void {
 	const v = String(view ?? "");
-	for (const h of [...viewListeners]) {
+	// Snapshot subscriptions: handlers may subscribe or unsubscribe during dispatch.
+	const handlers = [...viewListeners];
+	for (const h of handlers) {
 		try {
 			h(v);
 		} catch (err) {

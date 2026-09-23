@@ -278,6 +278,10 @@ _Git source control panel_
 
 The footer keeps a `tok/s` indicator visible, showing `— tok/s` when timing is unavailable. Pi streams display a `~` token estimate; message completion replaces it with provider-reported output tokens and keeps the result visible. The rate is output tokens divided by seconds from first output to message completion, excluding time to first token and tool execution. This is client-observed generation throughput, not the provider's internal inference timing. Conversations track rates independently, and historical sessions without timing do not invent a rate. The indicator is a separate configurable bottom-bar item.
 
+Settings → Interface layout offers whole-page zoom at 90%, 100%, 110%, 125%, 150% and 175% (default 100%). This is a server-wide setting: connected browsers update immediately, and new visits and server restarts retain the value. It is stored in `<dataDir>/ui-settings.json` (normally `~/.pi-web/ui-settings.json`), with no browser-local preference or added keyboard shortcuts.
+
+Messages follow the latest output instantly, without smooth scrolling. Scrolling upward to read history or explicitly jumping to a search result pauses following and shows Back to bottom. Switching conversations, returning to chat, or making the browser page visible again resumes following.
+
 ## Install
 
 ```bash

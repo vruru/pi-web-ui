@@ -1,3 +1,4 @@
+import { toUiZoomPixels } from "../ui-zoom";
 import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { FiList, FiSquare, FiPaperclip, FiArrowUp, FiGrid, FiMic, FiCamera } from "react-icons/fi";
 import type { FileSearchResult, ModelInfo, ProviderKeyInfo, SlashCommandInfo, UiMessage, UiState } from "../types";
@@ -815,7 +816,7 @@ export const ChatInput = memo(function ChatInput({
 			// Pre-transient position plus net growth: the row above the composer
 			// stays stationary, pinned or reading history. grew=0 still
 			// restores (undoes the transient clamp).
-			list.scrollTop = stBefore + grew;
+			list.scrollTop = stBefore + toUiZoomPixels(grew);
 		}
 	}, [text, composerH]);
 
@@ -875,7 +876,7 @@ export const ChatInput = memo(function ChatInput({
 			// Match the modal width to the input box (the backdrop spans the full
 			// viewport, so the CSS max-width would be wider than the chat column).
 			const box = taRef.current?.closest(".inputbox")?.getBoundingClientRect();
-			setHelpWidth(box?.width);
+			setHelpWidth(box ? toUiZoomPixels(box.width) : undefined);
 			setShowHelp(true);
 			setText("");
 			taRef.current?.focus();
@@ -1450,7 +1451,8 @@ export const ChatInput = memo(function ChatInput({
 						const cur = taRef.current?.getBoundingClientRect().height;
 						dragResizeRef.current = {
 							startY: e.clientY,
-							startH: typeof cur === "number" && Number.isFinite(cur) ? cur : (composerH ?? COMPOSER_AUTO_H),
+							startH:
+								typeof cur === "number" && Number.isFinite(cur) ? toUiZoomPixels(cur) : (composerH ?? COMPOSER_AUTO_H),
 							next: null,
 						};
 					}}
@@ -1459,7 +1461,10 @@ export const ChatInput = memo(function ChatInput({
 						if (!d) return;
 						// 往上拖（clientY 变小）= 抬保底，往下拖 = 压保底，所见即所得
 						//（内容少时输入框跟着变高/变矮；内容很多时撑着内容，往下压暂不可见）。
-						const next = Math.min(COMPOSER_MAX_H, Math.max(COMPOSER_MIN_H, d.startH + (d.startY - e.clientY)));
+						const next = Math.min(
+							COMPOSER_MAX_H,
+							Math.max(COMPOSER_MIN_H, d.startH + toUiZoomPixels(d.startY - e.clientY)),
+						);
 						d.next = next;
 						setComposerH(next);
 					}}

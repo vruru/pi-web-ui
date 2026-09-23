@@ -36,6 +36,7 @@ pi-web-ui/
 │   ├── index.ts                # 入口：express 静态 + /ws 端点、消息分发、心跳、优雅停机
 │   ├── protocol.ts             # ★ 唯一事实源：wire 协议类型（client↔server 消息）
 │   ├── agent-service.ts        # 核心：ClientSession（每客户端一个会话组，可并行多个对话）+ AgentService
+│   ├── ui-settings.ts          # 全局界面缩放：ui-settings.json 持久化，跨浏览器同步
 │   ├── generation-stats.ts     # Pi 每条 assistant 消息的生成计时：首输出起算，usage 定稿，供常驻底栏 tok/s
 │   ├── serialize.ts            # SDK 消息 → UiMessage 序列化
 │   ├── text-sniff.ts           # 文件预览纯函数（previewKind/looksLikeText/decodeText/sniffImageMime/hexDump/countLines）
@@ -64,7 +65,7 @@ pi-web-ui/
 │   ├── plugin-grants.ts        # 插件目录授权表（<dataDir>/plugin-grants.json）：工作区外目录的「记住」授权（父目录覆盖子目录），设置面板可撤销
 │   ├── plugin-project.ts       # ★ 插件项目组装执行层（host.project.create：clone/写文件/git init；路径越界三道校验，授权由上层判，本模块不动授权）
 │   ├── plugin-installer.ts     # ★ 插件后台作业：安装/更新/卸载跑 CLI 子进程（不占用户终端、不打断设置面板），输出按行回传 + 单作业锁 + 看门狗（issue #152）
-│   ├── plugin-catalog-sync.ts  # 市场目录同步编排（拉取/校验/原子写/可选安装/重载+重推，issue #148）
+│   ├── plugin-catalog-sync.ts  # 市场目录同步编排（拉取/校验/原子写/重推目录；可选安装后才重载插件，issue #148）
 │   ├── vision-bridge.ts        # 视觉桥：纯文本主模型看图转写
 │   ├── files-service.ts        # 文件服务（readDirForUI/readFile/searchFiles/watcher）
 │   ├── scm.ts                  # SCM 只读 git 查询（execFile git status/branches/history/filediff/commit）
@@ -106,6 +107,8 @@ pi-web-ui/
 │   │   ├── image-paste.ts      # 粘贴图片等比缩放 ≤1568px + PNG/JPEG 转码
 │   │   ├── uuid.ts             # randomUuid（crypto 兜底），有单测
 │   │   ├── protocol-version.ts # 协议版本常量
+│   │   ├── ui-zoom.ts          # 服务端全局缩放应用及视觉/CSS坐标换算，无本地持久化
+│   │   ├── use-message-scroll.ts # 用户输入驱动的贴底跟随；切会话/返回聊天恢复
 │   │   ├── main.tsx            # 入口：首帧前应用主题防闪烁 + initAuthToken
 │   │   └── components/         # 见下
 │   └── dist/                   # 构建产物（gitignore，但打进 npm 包）

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { randomUuid } from "./uuid";
+import { applyUiZoom } from "./ui-zoom";
 import { withToken } from "./auth-token";
 import { appUrl } from "./base-url";
 import type {
@@ -523,6 +524,7 @@ type Action =
 	| { type: "terminal_active"; id: string }
 	| { type: "goal_status"; status: GoalStatus }
 	| { type: "settings"; settings: UiSettingsState }
+	| { type: "ui_settings"; uiZoomPercent: number }
 	| { type: "bg_servers"; servers: BgServer[] }
 	| { type: "scheduler_tasks"; tasks: SchedulerTaskView[] }
 	| { type: "plugins"; plugins: UiPluginInfo[]; epoch: number }
@@ -897,6 +899,11 @@ function reducer(state: ChatState, action: Action): ChatState {
 			return { ...state, slashCommands: action.commands };
 		case "goal_status":
 			return { ...state, goal: action.status };
+		case "ui_settings":
+			return {
+				...state,
+				settings: state.settings ? { ...state.settings, uiZoomPercent: action.uiZoomPercent } : null,
+			};
 		case "settings":
 			return { ...state, settings: action.settings };
 		case "bg_servers":
@@ -1287,6 +1294,8 @@ export function useChat() {
 			}
 			switch (msg.type) {
 				case "ready": {
+					applyUiZoom(msg.uiZoomPercent ?? 100);
+					dispatch({ type: "ui_settings", uiZoomPercent: msg.uiZoomPercent ?? 100 });
 					// Stale-build self-reload: the server reports the on-disk bundle
 					// hash. Ours is baked in at build time. Mismatch = rebuilt since
 					// this page loaded → reload once for the fresh bundle.
@@ -1708,7 +1717,12 @@ export function useChat() {
 				case "goal_status":
 					dispatch({ type: "goal_status", status: msg.status });
 					break;
+				case "ui_settings":
+					applyUiZoom(msg.uiZoomPercent);
+					dispatch({ type: "ui_settings", uiZoomPercent: msg.uiZoomPercent });
+					break;
 				case "settings_state":
+					if (msg.settings.uiZoomPercent !== undefined) applyUiZoom(msg.settings.uiZoomPercent);
 					dispatch({ type: "settings", settings: msg.settings });
 					break;
 				case "bg_servers":

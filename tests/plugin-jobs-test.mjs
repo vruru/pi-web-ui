@@ -16,7 +16,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
-import { freePort } from "./lib/port-utils.mjs";
 
 const PORT = 20000 + Math.floor(Math.random() * 10000);
 const workdir = mkdtempSync(join(tmpdir(), "piweb-pjob-"));
@@ -24,6 +23,8 @@ const dataDir = mkdtempSync(join(tmpdir(), "piweb-pjob-data-"));
 process.env.PI_WEB_PORT = String(PORT);
 process.env.PI_WEB_CWD = workdir;
 process.env.PI_WEB_DATA_DIR = dataDir;
+// 自包含协议测试不应拉取不断变化的官方网络目录。
+process.env.PI_WEB_PLUGIN_CATALOG_URL = "off";
 
 const NODE = process.execPath;
 const REPO = fileURLToPath(new URL("../", import.meta.url));
@@ -164,7 +165,12 @@ async function main() {
 
 	// -- 4) 目录同步：本地 JSON → 原子写盘 + 条目推送 ----------------------------
 	const src = join(workdir, "catalog.json");
-	writeFileSync(src, JSON.stringify({ entries: [{ id: "third-party", source: "someone/repo", name: "第三方" }] }));
+	writeFileSync(
+		src,
+		JSON.stringify({
+			entries: [{ id: "third-party", source: "someone/repo", name: "第三方", unexpected: "drop-me", builtin: true }],
+		}),
+	);
 	send({ type: "plugin_catalog_sync", requestId: "sync-1", source: src });
 	await waitFor(() => syncResults.has("sync-1"), 10000, 50);
 	const r1 = syncResults.get("sync-1");
@@ -175,7 +181,7 @@ async function main() {
 	const written = JSON.parse(readFileSync(customFile, "utf8"));
 	check(
 		"写盘内容为白名单字段",
-		written.entries?.[0]?.id === "third-party" && written.entries[0].source === "someone/repo",
+		JSON.stringify(written.entries) === JSON.stringify([{ id: "third-party", source: "someone/repo", name: "第三方" }]),
 	);
 	await waitFor(() => (catalogEntries ?? []).some((e) => e.id === "third-party"), 5000, 50);
 	check(

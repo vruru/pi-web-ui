@@ -1,3 +1,4 @@
+import { toUiZoomPixels } from "./ui-zoom";
 import {
 	lazy,
 	Suspense,
@@ -164,7 +165,7 @@ function ResizeHandle({ side, width, onResize }: { side: PanelSide; width: numbe
 			let last = startW;
 			const move = (ev: PointerEvent) => {
 				// 左侧手柄向右拖变宽，右侧相反
-				const delta = side === "left" ? ev.clientX - startX : startX - ev.clientX;
+				const delta = toUiZoomPixels(side === "left" ? ev.clientX - startX : startX - ev.clientX);
 				last = Math.min(PANEL_MAX, Math.max(PANEL_MIN, Math.round(startW + delta)));
 				onResize(last);
 			};
@@ -1412,6 +1413,7 @@ export function App() {
 							)}
 							{chat.state ? (
 								<MessageList
+									active={view === "chat"}
 									uiMessageActions={uiSlots["message.actions"]}
 									uiContextMessage={uiSlots["contextmenu.message"]}
 									/* 工具调用卡片的工具名右键菜单（contextmenu.toolcall）：条目已合并好，

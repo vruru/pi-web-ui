@@ -1843,7 +1843,9 @@ export class PluginManager {
 
 	/** 会话统计扇出（异常隔离；订阅者崩了只记日志）。发送方（如定期推送快照统计处）负责节流。 */
 	emitStats(s: PluginStats): void {
-		for (const h of [...this.statsHandlers]) {
+		// Snapshot subscriptions because callbacks may change the live set.
+		const handlers = [...this.statsHandlers];
+		for (const h of handlers) {
 			try {
 				h(s);
 			} catch (err) {
@@ -1854,7 +1856,9 @@ export class PluginManager {
 
 	/** 流式增量透传（异常隔离；宿主不做节流，由发送方保证频率）。 */
 	emitStreaming(ev: { conversationId?: string; delta: string }): void {
-		for (const h of [...this.streamingHandlers]) {
+		// Snapshot subscriptions because callbacks may change the live set.
+		const handlers = [...this.streamingHandlers];
+		for (const h of handlers) {
 			try {
 				h(ev);
 			} catch (err) {
@@ -1950,7 +1954,8 @@ export class PluginManager {
 	 *  run_end 顺带唤醒 host.chatWait 的等待者（按 conversationId 匹配）。 */
 	emitRunEvent(ev: PluginRunEvent): void {
 		if (ev.type === "run_end" && ev.conversationId) {
-			for (const w of [...this.chatWaiters]) {
+			const waiters = [...this.chatWaiters];
+			for (const w of waiters) {
 				if (w.conversationId !== ev.conversationId) continue;
 				try {
 					w.done(true);
@@ -3538,7 +3543,9 @@ export class PluginManager {
 					const ev: PluginBusEvent = { topic: t, from: info.id, payload: p };
 					const handlers = self.busHandlers.get(t);
 					if (!handlers) return;
-					for (const h of [...handlers]) {
+					// Preserve dispatch membership if a callback changes subscriptions.
+					const pendingHandlers = [...handlers];
+					for (const h of pendingHandlers) {
 						try {
 							h(ev);
 						} catch (err) {

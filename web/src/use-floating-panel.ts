@@ -1,3 +1,4 @@
+import { toUiZoomPixels, toUiZoomRect } from "./ui-zoom";
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { useEscapeKey } from "./shortcut-stack";
 
@@ -184,9 +185,9 @@ export function useFloatingPanel(options: UseFloatingPanelOptions): UseFloatingP
 		if (!anchorRect) return;
 
 		const nextPos = computeFloatingPosition(
-			anchorRect,
-			{ width: panelRect.width, height: panelRect.height },
-			{ width: window.innerWidth, height: window.innerHeight },
+			toUiZoomRect(anchorRect),
+			{ width: toUiZoomPixels(panelRect.width), height: toUiZoomPixels(panelRect.height) },
+			{ width: toUiZoomPixels(window.innerWidth), height: toUiZoomPixels(window.innerHeight) },
 			{ align, side, gap, margin },
 		);
 

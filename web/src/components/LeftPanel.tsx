@@ -1,3 +1,4 @@
+import { toUiZoomPixels } from "../ui-zoom";
 import { memo, useEffect, useState, useCallback, useRef } from "react";
 import {
 	FiCheck,
@@ -582,7 +583,7 @@ export const LeftPanel = memo(function LeftPanel({
 			const onMove = (ev: PointerEvent) => {
 				const { above, below } = applySashDrag({
 					start: { above: start[aboveKey] ?? 1, below: start[belowKey] ?? 1 },
-					deltaPx: ev.clientY - startY,
+					deltaPx: toUiZoomPixels(ev.clientY - startY),
 					availablePx: available,
 					totalWeight,
 					minAbovePx: LP_MIN_SECTION_PX,

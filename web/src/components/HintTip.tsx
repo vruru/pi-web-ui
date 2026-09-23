@@ -1,3 +1,4 @@
+import { toUiZoomPixels } from "../ui-zoom";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { computeTipPosition } from "../tip-position";
@@ -89,7 +90,7 @@ export function HintTip({ text }: { text: string }) {
 						ref={bubbleRef}
 						className="set-tip-bubble open"
 						role="tooltip"
-						style={{ position: "fixed", left: pos.left, top: pos.top }}
+						style={{ position: "fixed", left: toUiZoomPixels(pos.left), top: toUiZoomPixels(pos.top) }}
 					>
 						{text}
 					</span>,

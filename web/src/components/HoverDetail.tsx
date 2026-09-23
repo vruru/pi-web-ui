@@ -1,3 +1,4 @@
+import { toUiZoomPixels } from "../ui-zoom";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { TIP_MARGIN, computeTipPosition } from "../tip-position";
@@ -120,7 +121,7 @@ export function HoverDetail({
 			ref={bubbleRef}
 			className={`set-tip-bubble open${className ? ` ${className}` : ""}`}
 			role="tooltip"
-			style={{ position: "fixed", left: pos.left, top: pos.top }}
+			style={{ position: "fixed", left: toUiZoomPixels(pos.left), top: toUiZoomPixels(pos.top) }}
 			// 指针进到气泡里（滚动 / 选中文本）时不要收起。
 			onMouseEnter={cancelClose}
 			onMouseLeave={scheduleClose}

@@ -11,6 +11,7 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer } from "node:http";
 import { join, resolve } from "node:path";
 import WebSocket from "ws";
 
@@ -19,6 +20,17 @@ const BASE = `http://127.0.0.1:${PORT}`;
 
 const serverPath = realpathSync(process.execPath);
 let proc = null;
+let sock;
+// Hold boot sync until the plugin is active, reproducing the former reload race.
+let releaseBootCatalog;
+const bootCatalogReady = new Promise((resolve) => {
+	releaseBootCatalog = resolve;
+});
+const catalogServer = createServer(async (_req, res) => {
+	await bootCatalogReady;
+	res.setHeader("Content-Type", "application/json");
+	res.end(JSON.stringify([{ id: "boot-fixture", source: "owner/repo/plugins/boot-fixture" }]));
+});
 const dataDir = mkdtempSync(join(tmpdir(), "pi-web-cwd-plugin-"));
 // 两个真实存在的项目目录：启动工作区 + 切换目标
 const dirA = mkdtempSync(join(tmpdir(), "cwd-proj-a-"));
@@ -50,10 +62,12 @@ function fail(msg) {
 
 // 从第一个消息起持续收集 workspace 广播——初始广播在 ready/plugins 之间到达，
 // 不能按消息类型分段等待（会漏掉早到的）。
+const messages = [];
 const workspaces = []; // resolve() 过的根路径，按到达顺序
 
 function handleMessage(raw) {
 	const msg = JSON.parse(raw.toString());
+	messages.push(msg);
 	if (msg.type === "plugin_data" && msg.pluginId === "probe" && msg.payload?.kind === "workspace") {
 		workspaces.push(resolve(String(msg.payload.root)));
 	}
@@ -91,13 +105,30 @@ function nextWorkspace(i, label, timeoutMs = 10_000) {
 	});
 }
 
+async function waitMessage(predicate, label) {
+	const deadline = Date.now() + 10_000;
+	while (Date.now() < deadline) {
+		const message = messages.find(predicate);
+		if (message) return message;
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
+	throw new Error(`timeout waiting for ${label}`);
+}
+
 try {
+	await new Promise((resolve, reject) => {
+		catalogServer.once("error", reject);
+		catalogServer.listen(0, "127.0.0.1", resolve);
+	});
 	proc = spawn(serverPath, [join(import.meta.dirname, "..", "dist", "server", "index.js")], {
 		env: {
 			...process.env,
 			PI_WEB_PORT: String(PORT),
 			PI_WEB_DATA_DIR: dataDir,
 			PI_WEB_CWD: dirA,
+			PI_WEB_PLUGIN_CATALOG_URL: `http://127.0.0.1:${catalogServer.address().port}/catalog.json`,
+			PI_WEB_PLUGIN_CATALOG_INSTALL: "0",
+			PI_CODING_AGENT_DIR: join(dataDir, "agent"),
 		},
 		stdio: ["ignore", "pipe", "pipe"],
 	});
@@ -117,13 +148,34 @@ try {
 	});
 
 	// -- attach：插件激活时广播服务端启动目录 ----------------------------------
-	const sock = await connect("cwd-test");
+	sock = await connect("cwd-test");
 	const first = await nextWorkspace(0, "initial workspace broadcast");
 	if (first !== resolve(dirA)) {
 		fail(`激活广播的根错误：${first} ≠ ${resolve(dirA)}`);
 	} else {
 		console.log(`✓ attach 时插件拿到服务端工作区 ${first}`);
 	}
+
+	// Boot and explicit metadata sync must preserve the active plugin instance.
+	// The old implementation reactivated the probe and broadcast dirA a second time.
+	releaseBootCatalog();
+	await waitMessage(
+		(m) => m.type === "plugin_catalog" && m.entries.some((e) => e.id === "boot-fixture"),
+		"boot catalog sync",
+	);
+	if (workspaces.length !== 1) fail("启动市场清单同步不应重新激活插件");
+	else console.log("✓ 启动市场清单同步保留插件实例（无重复初始化广播）");
+
+	const catalogPath = join(dataDir, "manual-catalog.json");
+	writeFileSync(catalogPath, JSON.stringify([{ id: "manual-fixture", source: "owner/repo/plugins/manual-fixture" }]));
+	sock.send(JSON.stringify({ type: "plugin_catalog_sync", requestId: "metadata-only", source: catalogPath }));
+	const synced = await waitMessage(
+		(m) => m.type === "plugin_catalog_sync_result" && m.requestId === "metadata-only",
+		"manual catalog sync",
+	);
+	if (!synced.ok || !synced.entries.some((e) => e.id === "manual-fixture")) fail("手动市场清单同步失败");
+	else if (workspaces.length !== 1) fail("手动市场清单同步不应重新激活插件");
+	else console.log("✓ 手动市场清单同步保留插件实例（无重复初始化广播）");
 
 	// -- set_cwd → workspace 广播跟随 -----------------------------------------
 	sock.send(JSON.stringify({ type: "set_cwd", path: dirB }));
@@ -149,6 +201,10 @@ try {
 } catch (err) {
 	fail(err?.stack ?? String(err));
 } finally {
+	sock?.terminate();
+	releaseBootCatalog();
+	catalogServer.closeAllConnections();
+	await new Promise((resolve) => catalogServer.close(resolve));
 	if (proc?.pid) {
 		try {
 			process.kill(proc.pid, "SIGTERM");

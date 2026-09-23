@@ -122,7 +122,9 @@ export function sanitizeIconSvg(raw: unknown): string | null {
 	const root = doc.documentElement;
 	if (root.tagName.toLowerCase() !== "svg") return null;
 	const clean = (el: Element): void => {
-		for (const child of [...el.children]) {
+		// Snapshot live DOM collections before removing or replacing their members.
+		const children = [...el.children];
+		for (const child of children) {
 			const tag = child.tagName.toLowerCase();
 			if (!isAllowedIconTag(tag)) {
 				// 元标签整棵丢；未知图形标签展平（子节点上移，保留合法内容）。
@@ -134,7 +136,8 @@ export function sanitizeIconSvg(raw: unknown): string | null {
 				}
 				continue;
 			}
-			for (const attr of [...child.attributes]) {
+			const attributes = [...child.attributes];
+			for (const attr of attributes) {
 				const name = attr.name.toLowerCase();
 				if (!isAllowedIconAttr(name) || /^on/i.test(name) || /^(javascript|data|vbscript):/i.test(attr.value.trim())) {
 					child.removeAttribute(attr.name);
@@ -143,7 +146,8 @@ export function sanitizeIconSvg(raw: unknown): string | null {
 			clean(child);
 		}
 	};
-	for (const attr of [...root.attributes]) {
+	const rootAttributes = [...root.attributes];
+	for (const attr of rootAttributes) {
 		const name = attr.name.toLowerCase();
 		if (!isAllowedIconAttr(name) || /^on/i.test(name)) root.removeAttribute(attr.name);
 	}

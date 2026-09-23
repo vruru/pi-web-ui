@@ -64,6 +64,7 @@ import { usePresentAutoOpen, savePresentAutoOpen } from "../present-settings";
 import { useProjectTitle, saveTitleSettings } from "../title-settings";
 import { sanitizeWallpaperUrl, fileToWallpaperUrl, saveWallpaperSettings, useWallpaperSettings } from "../wallpaper";
 import { useT, useI18n } from "../i18n";
+import { UI_ZOOM_LEVELS, normalizeUiZoomPercent } from "../ui-zoom";
 import {
 	buildUiSlots,
 	REQUIRED_TOPBAR_ITEM_IDS,
@@ -738,6 +739,7 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 		disabledPlugins?: string[];
 		/** 宿主 UI 布局偏好（插件 UI 贡献 + 内置条目的隐藏/排序/分组；纯 UI，per-client）。 */
 		uiLayout?: UiLayoutPrefs;
+		uiZoomPercent?: number;
 		/** 统一工具禁用名单（工具 tab 逐工具开关；遗留单开关仍可用，会折回此名单）。 */
 		disabledAgentTools?: string[];
 		/** 插件 AI 工具禁用名单（工具名；live 生效无需 reload）。 */
@@ -2391,6 +2393,29 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 									aria-label={t("uiLayoutSearch")}
 									onChange={(e) => setUiLayoutFilter(e.target.value)}
 								/>
+								<div className="set-ui-zoom">
+									<div>
+										<div id="ui-zoom-label">{t("uiZoomTitle")}</div>
+										<div className="set-note">{t("uiZoomHint")}</div>
+									</div>
+									<div className="set-ui-zoom-controls">
+										<div className="set-ui-zoom-options" role="group" aria-labelledby="ui-zoom-label">
+											{UI_ZOOM_LEVELS.map((percent) => (
+												<button
+													type="button"
+													key={percent}
+													aria-pressed={normalizeUiZoomPercent(settings.uiZoomPercent) === percent}
+													onClick={() => setPartial({ uiZoomPercent: percent })}
+												>
+													{percent}%
+												</button>
+											))}
+										</div>
+										<div className="set-note" aria-live="polite">
+											{t("uiZoomCurrent", { percent: String(normalizeUiZoomPercent(settings.uiZoomPercent)) })}
+										</div>
+									</div>
+								</div>
 								{uiLayoutSections.map(({ slot, labelKey }) => {
 									const entries = (uiSlots[slot] ?? []).filter(
 										(e) => isDsh || (e.id !== "host:composer-dsh-perm" && e.id !== "host:composer-dsh-preset"),

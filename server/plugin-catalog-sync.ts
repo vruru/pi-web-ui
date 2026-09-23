@@ -36,8 +36,8 @@ export interface CatalogSyncDeps {
 	/** <dataDir>/plugins —— 判断条目是否已装（决定 install 还是 update）。 */
 	pluginsDir: string;
 	installer: PluginInstaller;
-	/** 写盘/安装之后：重载插件 + 重推 plugins 与 plugin_catalog 给所有客户端。 */
-	afterWrite: () => Promise<void>;
+	/** 写盘后只重推目录（false）；安装后才重载插件并重推列表（true）。 */
+	afterWrite: (pluginsChanged: boolean) => Promise<void>;
 	lang?: () => ServerLang;
 	/** 抓取超时（默认 30s）。 */
 	fetchTimeoutMs?: number;
@@ -180,7 +180,7 @@ export async function syncPluginCatalog(
 	if ("error" in payload) return { ok: false, error: payload.error };
 	// 到这里才动磁盘：校验失败的文档绝不覆盖一份有效目录。
 	writeCustomCatalog(deps.customCatalogPath, payload.entries, opts.replace === true);
-	await deps.afterWrite();
+	await deps.afterWrite(false);
 
 	let installed: { id: string; ok: boolean; error?: string }[] | undefined;
 	if (opts.install === true && payload.entries.length) {
@@ -194,7 +194,7 @@ export async function syncPluginCatalog(
 			installed.push({ id: e.id, ok: res.ok, ...(res.error ? { error: res.error } : {}) });
 		}
 		// 安装改变了 <dataDir>/plugins —— 再重载/重推一次，让新插件与前端清单对齐。
-		await deps.afterWrite();
+		await deps.afterWrite(true);
 	}
 	return { ok: true, installed };
 }

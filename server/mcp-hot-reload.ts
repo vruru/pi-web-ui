@@ -34,7 +34,7 @@ export interface McpHotReloadDeps {
 	log?: (...a: unknown[]) => void;
 	/** 事件防抖（编辑器保存常触发多次）。 */
 	debounceMs?: number;
-	/** `fs.watch` 不可用时（目录不存在 / 网络盘 / 容器）的轮询间隔。 */
+	/** 内容指纹定期核对间隔；补偿 fs.watch 静默漏报或目录替换。 */
 	pollIntervalMs?: number;
 }
 
@@ -62,6 +62,8 @@ export function createMcpHotReload(deps: McpHotReloadDeps): McpHotReload {
 	let debounce: NodeJS.Timeout | null = null;
 	let poller: NodeJS.Timeout | null = null;
 	let watcher: FSWatcher | null = null;
+	let disposed = false;
+	let pending: Promise<McpReloadOutcome> = Promise.resolve("unchanged");
 
 	/** 读一次磁盘：指纹 + 清单（`servers` 为 null = 坏配置）。文件不在按「没有服务器」算。 */
 	function readOnce(): { fp: string; servers: Record<string, McpServerSpec> | null } {
@@ -77,7 +79,8 @@ export function createMcpHotReload(deps: McpHotReloadDeps): McpHotReload {
 		return { fp: `ok:${fingerprint(parsed.servers)}`, servers: parsed.servers };
 	}
 
-	async function apply(): Promise<McpReloadOutcome> {
+	async function applyOnce(): Promise<McpReloadOutcome> {
+		if (disposed) return "unchanged";
 		const { fp, servers } = readOnce();
 		if (fp === applied) return "unchanged";
 		// 先记账再动手：同一个坏文件不反复刷屏，配置没再变也不重试。
@@ -92,6 +95,7 @@ export function createMcpHotReload(deps: McpHotReloadDeps): McpHotReload {
 			return "invalid";
 		}
 		const summary = await deps.reload();
+		if (disposed) return "unchanged";
 		deps.onToolsChanged?.();
 		log(
 			`[mcp] 配置已热加载：${summary.servers} 个服务器 / ${summary.tools} 个工具` +
@@ -103,6 +107,13 @@ export function createMcpHotReload(deps: McpHotReloadDeps): McpHotReload {
 			`mcp.json reloaded: ${summary.servers} server(s) / ${summary.tools} tool(s)`,
 		);
 		return "reloaded";
+	}
+
+	/** watch、轮询和手动调用共用队列，避免慢启动时两轮 reload 交叉换入实例。 */
+	function apply(): Promise<McpReloadOutcome> {
+		const next = pending.then(applyOnce);
+		pending = next.catch(() => "unchanged");
+		return next;
 	}
 
 	function run(): void {
@@ -117,18 +128,24 @@ export function createMcpHotReload(deps: McpHotReloadDeps): McpHotReload {
 		}, debounceMs);
 	}
 
-	/** fs.watch 用不了（目录还不存在、网络盘、容器）→ 回落到轮询：单文件不值得上更重的机制。 */
-	function fallBackToPolling(): void {
-		watcher?.close();
-		watcher = null;
+	/** 单文件低频核对：fs.watch 成功注册也可能漏事件，不能只靠 error 才启用。 */
+	function ensurePolling(): void {
 		if (poller) return;
-		log(`[mcp] 目录监视不可用，mcp.json 热加载回落到 ${pollIntervalMs}ms 轮询`);
 		poller = setInterval(run, pollIntervalMs);
 		poller.unref();
 	}
 
+	/** fs.watch 用不了（目录还不存在、网络盘、容器）→ 保留轮询。 */
+	function fallBackToPolling(): void {
+		watcher?.close();
+		watcher = null;
+		log(`[mcp] 目录监视不可用，mcp.json 热加载回落到 ${pollIntervalMs}ms 轮询`);
+		ensurePolling();
+	}
+
 	function start(): void {
 		if (watcher || poller) return;
+		disposed = false;
 		// 播种：启动时 load() 已按同一份文件启动过服务器，别在第一个事件里白重载一次。
 		applied = readOnce().fp;
 		try {
@@ -141,9 +158,11 @@ export function createMcpHotReload(deps: McpHotReloadDeps): McpHotReload {
 		} catch {
 			fallBackToPolling();
 		}
+		ensurePolling();
 	}
 
 	function dispose(): void {
+		disposed = true;
 		if (debounce) clearTimeout(debounce);
 		debounce = null;
 		if (poller) clearInterval(poller);

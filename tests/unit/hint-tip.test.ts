@@ -10,6 +10,8 @@ import { HintTip } from "../../web/src/components/HintTip.js";
  * 真 jsdom + 真 React 渲染；rAF 打成同步桩（jsdom 的帧回调不可靠）。
  */
 
+import { applyUiZoom } from "../../web/src/ui-zoom.js";
+
 let root: Root | null = null;
 
 afterEach(() => {
@@ -17,6 +19,7 @@ afterEach(() => {
 	if (root) act(() => root!.unmount());
 	root = null;
 	document.body.innerHTML = "";
+	applyUiZoom(100);
 });
 
 /** rAF 同步执行（滚动跟随的节流回调立刻跑完，可断言）。 */
@@ -87,5 +90,16 @@ describe("HintTip 滚动跟随", () => {
 			anchor.dispatchEvent(new MouseEvent("mouseout", { bubbles: true }));
 		});
 		expect(bubble()).toBeNull();
+	});
+	it("150% 缩放时 portal 提示框 CSS 坐标换算后仍贴住锚点", () => {
+		applyUiZoom(150);
+		const anchor = openTip();
+		anchor.getBoundingClientRect = () =>
+			({ left: 150, right: 180, top: 100, bottom: 130, width: 30, height: 30 }) as DOMRect;
+		const tip = bubble() as HTMLElement;
+		tip.getBoundingClientRect = () => ({ left: 0, right: 150, top: 0, bottom: 60, width: 150, height: 60 }) as DOMRect;
+		act(() => window.dispatchEvent(new Event("resize")));
+		expect(parseFloat(tip.style.left) * 1.5).toBeCloseTo(142);
+		expect(parseFloat(tip.style.top) * 1.5).toBeCloseTo(138);
 	});
 });
