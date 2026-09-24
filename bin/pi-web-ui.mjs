@@ -964,6 +964,12 @@ function stopWinInstance(name) {
 
 /** Build the launchd plist XML. */
 function buildPlist(label, cwd, env) {
+	const serviceArgs = [
+		NODE,
+		...(env.PI_WEB_HERDR_SESSION ? [join(BIN_DIR, "herdr-service.mjs"), NODE] : []),
+		...(HAS_SDK_HOOK ? ["--import", SDK_HOOK] : []),
+		SERVER_ENTRY,
+	];
 	const entries = Object.entries(env)
 		.map(([k, v]) => `    <key>${esc(k)}</key>\n    <string>${esc(v)}</string>`)
 		.join("\n");
@@ -977,10 +983,7 @@ function buildPlist(label, cwd, env) {
 
   <key>ProgramArguments</key>
   <array>
-    <string>${esc(NODE)}</string>
-${
-	HAS_SDK_HOOK ? `    <string>--import</string>\n    <string>${esc(SDK_HOOK)}</string>\n` : ""
-}    <string>${esc(SERVER_ENTRY)}</string>
+${serviceArgs.map((arg) => `    <string>${esc(arg)}</string>`).join("\n")}
   </array>
 
   <key>RunAtLoad</key>
@@ -1118,6 +1121,11 @@ function serviceEnv(port, cwd, dataDir, engine, host, agentDir, service = {}) {
 	if (engine === "dsh") env.PI_WEB_ENGINE = "dsh"; // 仅非默认引擎才烘焙，保持服务单元简洁
 	if (host) env.PI_WEB_HOST = host;
 	if (agentDir) env.PI_CODING_AGENT_DIR = agentDir;
+	if (isMac && process.env.PI_WEB_HERDR_SESSION) {
+		env.PI_WEB_HERDR_SESSION = process.env.PI_WEB_HERDR_SESSION;
+		env.PI_WEB_HERDR_STDOUT = "/tmp/pi-web-ui.log";
+		env.PI_WEB_HERDR_STDERR = "/tmp/pi-web-ui.err";
+	}
 	return env;
 }
 
