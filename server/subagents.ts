@@ -122,6 +122,8 @@ export interface SubagentToolHost {
 		model?: string;
 		thinkingLevel?: string;
 	}[];
+	/** Confirm terminal results delivered to this caller, suppressing redundant completion wake-ups. */
+	acknowledgeSubagentResults?(runIds: string[]): void;
 	/** 获取当前生效的工具看门狗超时（毫秒），用于计算 wait_all 的最大等待上限。 */
 	getWatchdogTimeoutMs?(): number;
 	/** 检查某个模板名是否可用于派生子代理（存在且 enabled）。 */
@@ -167,7 +169,7 @@ export function withSubagentOwner(host: SubagentToolHost, ownerId: string): Suba
 export function makeSubagentTools(
 	host: SubagentToolHost,
 	lang?: () => ServerLang,
-	selfConvId?: string,
+	selfConvId?: string | (() => string | undefined),
 ): ToolDefinition[] {
 	const getLang: () => ServerLang = lang ?? host.lang ?? (() => "en");
 	const text = (t: string, details: unknown = {}): { content: { type: "text"; text: string }[]; details: unknown } => ({
@@ -182,7 +184,8 @@ export function makeSubagentTools(
 				"Spawn an independent background subagent conversation for a self-contained deliverable task " +
 					'(research/implement/review, etc.). Subagents appear in the left "Running conversations" list with a ' +
 					"subagent badge; the user can open, supplement, or stop them. The main agent may spawn several in parallel: " +
-					"use subagent_wait_all to wait for all at once (no polling), subagent_list for live status, " +
+					"Completed results automatically wake the idle dispatching conversation so it can continue. " +
+					"Use subagent_wait_all to wait for all at once (no polling), subagent_list for live status, " +
 					"subagent_get_result for results, subagent_steer to redirect mid-run, subagent_stop to stop. " +
 					"Good for: long-running exploration, parallel research, delegating independent subtasks. Optional template " +
 					"param: use a subagent template configured in the settings panel " +
@@ -192,7 +195,8 @@ export function makeSubagentTools(
 					"task type, or a template's model field.",
 				"在后台启动一个独立的子代理对话，用一个明确的指令去完成一项可独立交付的工作（调研/实现/审查等）。" +
 					"子代理会出现在左栏「运行的对话」列表（带子代理标识），用户可点开查看、补充、中止。主 agent 可并行派发多个：" +
-					"用 subagent_wait_all 一次性等全部完成（不用轮询）、subagent_list 查看运行态、subagent_get_result 取结果、" +
+					"完成结果会自动唤醒空闲的派发会话，继续后续工作。" +
+					"仍可用 subagent_wait_all 一次性等全部完成（不用轮询）、subagent_list 查看运行态、subagent_get_result 取结果、" +
 					"subagent_steer 中途改向、subagent_stop 停止。" +
 					"适合：长耗时探索、并行调研、独立子任务委派。可选 template 参数：使用设置面板配置的子代理模板" +
 					"（角色系统提示词 + 技能/扩展白名单 + 可选思考强度）。子代理默认继承派发者当前模型，未设置时用全局默认。" +
@@ -337,7 +341,7 @@ export function makeSubagentTools(
 					),
 				}),
 			}),
-			execute: async (_id, p) => {
+			execute: async (_id, p, signal) => {
 				const r = host.getSubagent(p.runId);
 				const missingId = shortId(p.runId);
 				if (!r)
@@ -369,6 +373,7 @@ export function makeSubagentTools(
 						r,
 					);
 				}
+				if (!signal?.aborted && isSubagentTerminal(r)) host.acknowledgeSubagentResults?.([r.convId]);
 				return text(
 					pick(
 						getLang(),
@@ -514,13 +519,13 @@ export function makeSubagentTools(
 					"(a subagent calling this without runIds won't deadlock on itself or its parent). " +
 					"Descendants spawned during the wait are picked up automatically. " +
 					"On timeout or abort of this round, returns the remaining unfinished list; call again to continue waiting. " +
-					"Good for: collecting parallel subagents.",
+					"Completed results also automatically wake the idle dispatching conversation; this tool remains available to collect results without polling.",
 				"一次性等待多个子代理全部完成（阻塞本回合直到它们都到达终态或超时），然后汇总返回每个的结果/错误——" +
 					"不用反复调 subagent_get_result 轮询。传 runIds 指定要等的子代理（subagent_spawn 返回的 convId）；" +
 					"不传 = 子代理调用时只等自己的后代，主对话调用时等当前全部运行中的子代理。调用者自身与祖先永不计入等待" +
 					"（子代理不传 runIds 时不会等自己或父级，避免父子互等到超时）。等待期间新派生的后代会自动纳入。" +
 					"超时或本轮被中止时返回剩余未完成名单，可再次调用继续等。" +
-					"适合：并行派发多个子代理后收口。",
+					"完成结果也会自动唤醒空闲的派发会话；仍可用本工具一次收集结果，无需轮询。",
 			),
 			promptSnippet: "wait for multiple subagents to finish (no polling) and get all results",
 			parameters: Type.Object({
@@ -546,6 +551,7 @@ export function makeSubagentTools(
 				),
 			}),
 			execute: async (_id, p, signal) => {
+				const callerId = typeof selfConvId === "function" ? selfConvId() : selfConvId;
 				// 祖先链：调用者往上经 parentId 能走到的子代理集合。父级正在执行中的
 				// wait_all 卡着（streaming=true），等它 = 父子互等、必到超时才返回。
 				// parentId 可能指向普通主对话（不在子代理列表里），走到空即停；环按 visited 截断。
@@ -597,9 +603,9 @@ export function makeSubagentTools(
 				// 先算好排除集，显式 runIds 里的祖先直接剔除（不再展开它的子树，
 				// 否则等父会顺带把整棵子树含兄弟分支都圈进来）。
 				const excluded = new Set<string>();
-				if (selfConvId) {
-					excluded.add(selfConvId);
-					for (const a of ancestorIdsOf(selfConvId)) excluded.add(a);
+				if (callerId) {
+					excluded.add(callerId);
+					for (const a of ancestorIdsOf(callerId)) excluded.add(a);
 				}
 				if (explicit) {
 					for (const id of p.runIds!) {
@@ -609,10 +615,10 @@ export function makeSubagentTools(
 					for (const id of expandDescendants(roots)) {
 						if (!excluded.has(id)) wanted.add(id);
 					}
-				} else if (selfConvId && host.getSubagent(selfConvId)) {
+				} else if (callerId && host.getSubagent(callerId)) {
 					// 子代理无参：只等自己的后代（不含自己）。全局等会把父级/无关兄弟
 					// 也圈进来：父级卡在 wait 里 streaming=true，子等父 = 父子互等到超时。
-					roots.add(selfConvId);
+					roots.add(callerId);
 					for (const id of expandDescendants(roots)) {
 						if (!excluded.has(id)) wanted.add(id);
 					}
@@ -669,6 +675,7 @@ export function makeSubagentTools(
 				}
 				const tLang = getLang();
 				const remaining = pending();
+				const deliveredTerminalIds: string[] = [];
 				const lines = [...wanted]
 					.map((id) => {
 						const r = host.getSubagent(id);
@@ -676,6 +683,7 @@ export function makeSubagentTools(
 							return tLang === "zh"
 								? `- ${shortId(id)}：未找到（可能已移出）`
 								: `- ${shortId(id)}: not found (may have been dismissed)`;
+						if (isSubagentTerminal(r)) deliveredTerminalIds.push(r.convId);
 						const body = verdictText(r, tLang);
 						return (
 							(tLang === "zh"
@@ -712,6 +720,9 @@ export function makeSubagentTools(
 									"subagents.wait.timeout",
 									{ timeoutSecs: timeoutSecs, waitedSecs: waitedSecs, "remaining.length": remaining.length },
 								);
+				if (!signal?.aborted && deliveredTerminalIds.length > 0) {
+					host.acknowledgeSubagentResults?.(deliveredTerminalIds);
+				}
 				return text(`${head}\n${lines}\n` + promptRemaining(remaining, tLang));
 			},
 		}),

@@ -5,6 +5,7 @@ import {
 	subagentTitle,
 	withSubagentOwner,
 	type SubagentToolHost,
+	type SubagentSnapshot,
 } from "../../server/subagents.js";
 
 /** 一个假的 host，工具调用不会真正执行会话（只验证走通与参数透传）。 */
@@ -12,6 +13,7 @@ function makeHostSpies() {
 	const host: SubagentToolHost = {
 		spawnSubagent: vi.fn(async (_prompt, type, _cwd) => `sa-${type}-abc`),
 		getSubagent: vi.fn(() => undefined),
+		acknowledgeSubagentResults: vi.fn(),
 		listSubagents: vi.fn(() => []),
 		steerSubagent: vi.fn(async () => {}),
 		stopSubagent: vi.fn(async () => {}),
@@ -834,5 +836,96 @@ describe("subagent parent retention", () => {
 		expect(hasLiveChild("c1")).toBe(true);
 		convs.delete("sa-1");
 		expect(hasLiveChild("c1")).toBe(false);
+	});
+});
+
+describe("subagent completion acknowledgement", () => {
+	function snapshot(id: string, streaming: boolean): SubagentSnapshot {
+		return {
+			convId: id,
+			type: "general",
+			title: id,
+			prompt: "",
+			state: streaming ? "running" : "done",
+			streaming,
+			messageCount: 2,
+			output: `output ${id}`,
+		};
+	}
+
+	it("acknowledges only terminal get_result responses", async () => {
+		const host = makeHostSpies();
+		const child = snapshot("child", true);
+		vi.mocked(host.getSubagent).mockReturnValue(child);
+		const tool = makeSubagentTools(host).find((t) => t.name === "subagent_get_result")!;
+		await tool.execute!("partial", { runId: "child" }, undefined, undefined, {} as never);
+		expect(host.acknowledgeSubagentResults).not.toHaveBeenCalled();
+		child.streaming = false;
+		child.state = "done";
+		await tool.execute!("complete", { runId: "child" }, undefined, undefined, {} as never);
+		expect(host.acknowledgeSubagentResults).toHaveBeenCalledExactlyOnceWith(["child"]);
+	});
+
+	it("a timed-out wait acknowledges completed results including descendants, not partial or missing results", async () => {
+		vi.useFakeTimers();
+		try {
+			const host = makeHostSpies();
+			const children = [
+				snapshot("done", false),
+				snapshot("pending", true),
+				{ ...snapshot("descendant", false), parentId: "done" },
+			];
+			vi.mocked(host.listSubagents).mockReturnValue(children);
+			vi.mocked(host.getSubagent).mockImplementation((id) => children.find((c) => c.convId === id));
+			const tool = makeSubagentTools(host).find((t) => t.name === "subagent_wait_all")!;
+			const result = tool.execute!(
+				"wait",
+				{ runIds: ["done", "pending", "missing"], timeoutSeconds: 1 },
+				undefined,
+				undefined,
+				{} as never,
+			);
+			await vi.advanceTimersByTimeAsync(1500);
+			await result;
+			expect(host.acknowledgeSubagentResults).toHaveBeenCalledExactlyOnceWith(["done", "descendant"]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("does not acknowledge results when wait or get_result is aborted", async () => {
+		const host = makeHostSpies();
+		const children = [snapshot("done", false), snapshot("pending", true)];
+		vi.mocked(host.listSubagents).mockReturnValue(children);
+		vi.mocked(host.getSubagent).mockImplementation((id) => children.find((c) => c.convId === id));
+		const tools = makeSubagentTools(host);
+		const signal = AbortSignal.abort();
+		await tools.find((t) => t.name === "subagent_wait_all")!.execute!(
+			"wait",
+			{ runIds: ["done", "pending"] },
+			signal,
+			undefined,
+			{} as never,
+		);
+		await tools.find((t) => t.name === "subagent_get_result")!.execute!(
+			"get",
+			{ runId: "done" },
+			signal,
+			undefined,
+			{} as never,
+		);
+		expect(host.acknowledgeSubagentResults).not.toHaveBeenCalled();
+	});
+
+	it("resolves the caller at execution after a transferred conversation receives a new ID", async () => {
+		const host = makeHostSpies();
+		let callerId = "old-parent";
+		const children = [snapshot("new-parent", true), { ...snapshot("child", false), parentId: "new-parent" }];
+		vi.mocked(host.listSubagents).mockReturnValue(children);
+		vi.mocked(host.getSubagent).mockImplementation((id) => children.find((c) => c.convId === id));
+		const tool = makeSubagentTools(host, undefined, () => callerId).find((t) => t.name === "subagent_wait_all")!;
+		callerId = "new-parent";
+		await tool.execute!("wait", {}, undefined, undefined, {} as never);
+		expect(host.acknowledgeSubagentResults).toHaveBeenCalledExactlyOnceWith(["child"]);
 	});
 });

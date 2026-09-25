@@ -2561,56 +2561,13 @@ export class DshClientSession {
 
 	async pushProjects(): Promise<void> {
 		const saved = this.stateStore.get(this.clientId);
-		const projects = new Map<string, number>();
-		for (const p of saved.projects ?? []) {
-			if (!(saved.removedProjects ?? []).includes(p.path)) {
-				projects.set(p.path, p.lastUsed);
-			}
-		}
-		// 合并当前会话目录发现的项目。
-		const cwdProjects = new Set<string>();
-		try {
-			const { readdirSync } = await import("node:fs");
-			const entries = readdirSync(this.sessionRoot, { withFileTypes: true });
-			for (const e of entries) {
-				if (e.isDirectory()) {
-					const cwd = this.decodeProjectKey(e.name);
-					if (cwd && !projects.has(cwd)) cwdProjects.add(cwd);
-				}
-			}
-		} catch {
-			/* best effort */
-		}
-		for (const cwd of cwdProjects) projects.set(cwd, Date.now());
-		projects.set(this.cwd, Date.now());
-		const list: ProjectSummary[] = [...projects.entries()]
-			.map(([path, lastUsed]) => ({ path, lastUsed }))
+		const removed = new Set(this.stateStore.getRemovedProjects(this.clientId));
+		// Session directories include background work and must never seed projects.
+		const projects: ProjectSummary[] = saved.projects
+			.filter((p) => !removed.has(p.path) && existsSync(p.path))
 			.sort((a, b) => b.lastUsed - a.lastUsed)
 			.slice(0, 30);
-		this.emit({ type: "projects", projects: list });
-	}
-
-	private decodeProjectKey(key: string): string | null {
-		// --<cwd>-- → 反解（尽力）。
-		if (!key.startsWith("--") || !key.endsWith("--")) return null;
-		const inner = key.slice(2, -2);
-		let out = "";
-		for (let i = 0; i < inner.length; i++) {
-			if (inner[i] === "-") {
-				out += "/";
-			} else if (inner[i] === "~" && i + 4 < inner.length) {
-				const hex = inner.slice(i + 1, i + 5);
-				if (/^[0-9A-Fa-f]{4}$/.test(hex)) {
-					out += String.fromCharCode(parseInt(hex, 16));
-					i += 4;
-				} else {
-					out += "~";
-				}
-			} else {
-				out += inner[i];
-			}
-		}
-		return out || null;
+		this.emit({ type: "projects", projects });
 	}
 
 	async removeProject(path: string): Promise<void> {
