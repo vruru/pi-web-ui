@@ -6,8 +6,10 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
-const httpMode = process.argv.includes("--http");
-const live = process.argv.includes("--live");
+const remote = process.argv.includes("--remote");
+const authToken = remote ? process.env.REMOTE_MCP_TOKEN : "test-token-".repeat(4);
+const httpMode = remote || process.argv.includes("--http");
+const live = remote || process.argv.includes("--live");
 const temp = await mkdtemp(join(tmpdir(), "flash-mcp-"));
 function chunk(type, data) {
 	const b = Buffer.concat([Buffer.from(type), data]);
@@ -60,19 +62,21 @@ const server = createServer(async (req, res) => {
 	);
 });
 if (!live) await new Promise((r) => server.listen(0, "127.0.0.1", r));
-const child = spawn(process.execPath, ["bin/local-model-mcp.mjs", ...(httpMode ? ["--http"] : [])], {
-	env: {
-		...process.env,
-		LOCAL_MCP_PORT: "0",
-		LOCAL_MCP_HOST: "127.0.0.1",
-		LOCAL_MCP_TOKEN: "test-token-".repeat(4),
-		LOCAL_MODEL_BASE_URL: live ? process.env.LOCAL_MODEL_BASE_URL : `http://127.0.0.1:${server.address().port}/v1`,
-		LOCAL_MODEL_ID: live ? process.env.LOCAL_MODEL_ID : "test-model",
-	},
-	stdio: ["pipe", "pipe", httpMode ? "pipe" : "inherit"],
-});
-let httpUrl;
-if (httpMode) {
+const child = remote
+	? null
+	: spawn(process.execPath, ["bin/local-model-mcp.mjs", ...(httpMode ? ["--http"] : [])], {
+			env: {
+				...process.env,
+				LOCAL_MCP_PORT: "0",
+				LOCAL_MCP_HOST: "127.0.0.1",
+				LOCAL_MCP_TOKEN: "test-token-".repeat(4),
+				LOCAL_MODEL_BASE_URL: live ? process.env.LOCAL_MODEL_BASE_URL : `http://127.0.0.1:${server.address().port}/v1`,
+				LOCAL_MODEL_ID: live ? process.env.LOCAL_MODEL_ID : "test-model",
+			},
+			stdio: ["pipe", "pipe", httpMode ? "pipe" : "inherit"],
+		});
+let httpUrl = remote ? process.env.REMOTE_MCP_URL : undefined;
+if (httpMode && !remote) {
 	const address = await new Promise((resolve, reject) => {
 		child.once("exit", () => reject(new Error("HTTP server exited")));
 		createInterface({ input: child.stderr }).once("line", (l) => resolve(JSON.parse(l).listening));
@@ -82,16 +86,17 @@ if (httpMode) {
 }
 let id = 0;
 const pending = new Map();
-createInterface({ input: child.stdout }).on("line", (l) => {
-	const m = JSON.parse(l);
-	pending.get(m.id)?.(m.result);
-	pending.delete(m.id);
-});
+if (child)
+	createInterface({ input: child.stdout }).on("line", (l) => {
+		const m = JSON.parse(l);
+		pending.get(m.id)?.(m.result);
+		pending.delete(m.id);
+	});
 function rpc(method, params = {}) {
 	if (httpMode)
 		return fetch(httpUrl, {
 			method: "POST",
-			headers: { "Content-Type": "application/json", Authorization: `Bearer ${"test-token-".repeat(4)}` },
+			headers: { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` },
 			body: JSON.stringify({ jsonrpc: "2.0", id: ++id, method, params }),
 		})
 			.then((r) => r.json())
@@ -166,7 +171,7 @@ try {
 			: "PASS MCP protocol, images, fixed model, slots, cancellation and failures",
 	);
 } finally {
-	child.kill();
+	child?.kill();
 	server.closeAllConnections();
 	server.close();
 	await rm(temp, { recursive: true, force: true });

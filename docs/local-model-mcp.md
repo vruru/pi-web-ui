@@ -46,3 +46,13 @@ Use a process supervisor on that host for startup/restart. Credentials belong in
 For a remote MCP, `image_paths` refers to files on the **MCP host**, not the Codex host. Send `image_data` instead for Mac screenshots: an array of `data:image/png;base64,...` (also JPEG/WebP). A task accepts at most four images across both fields. No file-path remapping is implicit.
 
 Add `--http` to either test command to exercise HTTP authentication, discovery, task lifecycle and inline image transport. The live HTTP test still launches the adapter locally while using the real model endpoint; it does not prove deployment on the remote host.
+
+Remote deployment acceptance can target an already-running server without starting a local adapter:
+
+```sh
+REMOTE_MCP_URL=http://YOUR_HOST:8089/mcp REMOTE_MCP_TOKEN=YOUR_TOKEN node tests/local-model-mcp-test.mjs --remote
+```
+
+Keep the token out of shell history (load it from a private file or environment manager). A local Codex `http_headers` entry can also carry the bearer header when desktop environment propagation is unavailable; protect that config and never commit it.
+
+For a container deployment, mount only the server file read-only, pass environment from a private file, run an unprivileged Node 22+ image, and set Docker's `unless-stopped` restart policy. With host networking, the adapter can reach the inference API over loopback. Set `LOCAL_MCP_HOST` to the desired LAN interface address. This requires no changes to the inference container.
