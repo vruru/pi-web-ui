@@ -63,6 +63,7 @@ import {
 	findDanglingToolCalls,
 	healDanglingToolCallFile,
 } from "./dangling-tools.js";
+import { syncQueuedImages, type QueuedImagePayload } from "./queued-attachments.js";
 import { removeQueuedByIndexOrText } from "./queue-utils.js";
 import type {
 	PluginAgentTool,
@@ -994,6 +995,7 @@ export interface Conversation {
 	 *  renders them as pending bubbles in the real message list. */
 	queueSteering: string[];
 	queueFollowUp: string[];
+	queueImages?: { steer: QueuedImagePayload[]; followUp: QueuedImagePayload[] };
 	/** tool_execution_start timestamps keyed by toolCallId — lets tool_status
 	 *  report how long a tool actually ran (vs. waiting on the model). */
 	toolStartTimes: Map<string, number>;
@@ -3637,6 +3639,10 @@ export class ClientSession {
 				break;
 			}
 			case "queue_update":
+				conv.queueImages = {
+					steer: syncQueuedImages(conv.queueImages?.steer ?? [], event.steering),
+					followUp: syncQueuedImages(conv.queueImages?.followUp ?? [], event.followUp),
+				};
 				conv.queueSteering = [...event.steering];
 				conv.queueFollowUp = [...event.followUp];
 				break;
@@ -5984,25 +5990,29 @@ ${DANGLING_TOOL_RESULT_TEXT_EN}`,
 				},
 				attachments,
 			);
-			for (const aside of asides) {
-				await s.sendCustomMessage(aside.message, { deliverAs: "nextTurn" });
-			}
-			if (s.isStreaming) {
-				// queue=true (补充 button) → followUp: the message is delivered only
-				// after the whole run finishes — the agent finishes what it started,
-				// then responds to the queued message. queue=false/undefined
-				// (plain Enter) → steer: interrupts the current run — the message
-				// is delivered right after the current assistant turn settles
-				// (remaining planned tool calls are skipped) and the agent
-				// immediately responds to it. This is the pi CLI
-				// Enter-during-streaming semantic (docs/usage: Enter queues a
-				// steering message); followUp would wait for the whole run
-				// to finish, which users perceive as ordinary queueing.
-				await s.prompt(text, {
-					streamingBehavior: queue ? "followUp" : "steer",
-				});
+			if (s.isStreaming && asides.length > 0) {
+				// nextTurn custom messages are not drained with steer/followUp. Enqueue ONE
+				// user message containing its text, file content/references and image blocks.
+				const content = asides.flatMap((a) =>
+					typeof a.message.content === "string"
+						? [{ type: "text" as const, text: a.message.content }]
+						: a.message.content,
+				);
+				const queuedText = [text, ...content.filter((p) => p.type === "text").map((p) => p.text)].join("\n");
+				const images = content.filter((p) => p.type === "image");
+				const kind = queue ? "followUp" : "steer";
+				conv.queueImages ??= { steer: [], followUp: [] };
+				const payload = { text: queuedText, images };
+				conv.queueImages[kind].push(payload);
+				try {
+					await s.prompt(queuedText, { images, streamingBehavior: kind, expandPromptTemplates: false });
+				} catch (error) {
+					conv.queueImages[kind] = conv.queueImages[kind].filter((p) => p !== payload);
+					throw error;
+				}
 			} else {
-				await s.prompt(text);
+				for (const aside of asides) await s.sendCustomMessage(aside.message, { deliverAs: "nextTurn" });
+				await s.prompt(text, s.isStreaming ? { streamingBehavior: queue ? "followUp" : "steer" } : undefined);
 			}
 		} catch (err) {
 			this.emit({
@@ -6170,17 +6180,27 @@ ${DANGLING_TOOL_RESULT_TEXT_EN}`,
 			this.flushSnapshot();
 			return;
 		}
+		const imagePayloads = conv.queueImages ?? { steer: [], followUp: [] };
 		const { steering, followUp } = s.clearQueue();
 		// 气泡 ✕ 对应的是「第几个气泡」（index），不是「哪段文本」：同一文本排队两次时
 		// 按文本只会删掉第一条，点第二个气泡却删掉第一个。用 index 定位，位置对不上
 		// （队列在点击与执行之间变化）或旧客户端没发 index 时回落到第一处文本匹配。
-		const keptSteering = kind === "steer" ? removeQueuedByIndexOrText(steering, text, index) : steering;
-		const keptFollowUp = kind === "followUp" ? removeQueuedByIndexOrText(followUp, text, index) : followUp;
+		const selected = kind === "steer" ? steering : followUp;
+		const removeIndex =
+			index !== undefined && Number.isInteger(index) && selected[index] === text ? index : selected.indexOf(text);
+		const keptSteering = syncQueuedImages(imagePayloads.steer, steering).filter(
+			(_, i) => kind !== "steer" || i !== removeIndex,
+		);
+		const keptFollowUp = syncQueuedImages(imagePayloads.followUp, followUp).filter(
+			(_, i) => kind !== "followUp" || i !== removeIndex,
+		);
 		// Re-queue the survivors in original order. Guard each call so a single
 		// failure can't leave the queue half-drained silently.
 		for (const t of keptSteering) {
 			try {
-				await s.steer(t);
+				conv.queueImages ??= { steer: [], followUp: [] };
+				conv.queueImages.steer.push(t);
+				await s.steer(t.text, t.images);
 			} catch (err) {
 				this.emit({
 					type: "notice",
@@ -6192,7 +6212,9 @@ ${DANGLING_TOOL_RESULT_TEXT_EN}`,
 		}
 		for (const t of keptFollowUp) {
 			try {
-				await s.followUp(t);
+				conv.queueImages ??= { steer: [], followUp: [] };
+				conv.queueImages.followUp.push(t);
+				await s.followUp(t.text, t.images);
 			} catch (err) {
 				this.emit({
 					type: "notice",

@@ -331,3 +331,7 @@ _结构/流程变更时同步更新本文件及相关 `docs/` 文档。修改后
 ## Fork 子代理策略
 
 子代理 16 个名额只统计初始化与执行中的任务，完成/失败/中止后的记录保留供取结果，不占执行名额。初始化必须在首次 await 前预占，所有失败路径归还。默认模型继承实际派发会话（不是界面当前 active），无模型时用全局默认；旧模板模型及 subagentDefaultModel 不再隐式覆盖。工具说明要求只有用户明确指定时才传 model，不可用时拒绝派发而非静默改模型。回归见 tests/unit/subagent-capacity.test.ts。
+
+### 排队附件
+
+运行中发送的图片/文件必须和文字一起进入 SDK 的同一条 steer/followUp 用户消息，不能使用 nextTurn 附件缓冲（它不会随运行中的队列一起排空）。SDK clearQueue 只返回文本；删除条目重建队列时，使用每个 conversation 的 queueImages 保留图片，重复文本按队列位置处理。回归：tests/queued-attachments-test.mjs（本地多模态模拟服务，包含插队、排队及删除其他条目）、tests/unit/queued-attachments.test.ts。
