@@ -2069,22 +2069,24 @@ export class ClientSession {
 	/** schedule_* 工具的数据宿主：全局调度存储＋创建时刻 live 的 cwd/活动对话。
 	 *  issue #231：同时快照 owner 对话的落盘会话文件（压缩/重启后稳定），触发时
 	 *  先按 sessionFile 认同一会话（内存对话 id 重启即失效，不可单独做持久键）。 */
-	private scheduleToolHost(): ScheduleToolHost {
+	private scheduleToolHost(anchor: { session?: AgentSession }, ownerId?: string): ScheduleToolHost {
+		const home = () => {
+			const found = anchor.session ? this.findConversationHome?.(anchor.session) : undefined;
+			return found ?? { session: this, convId: ownerId ?? this.activeId };
+		};
 		return {
-			store: () => this.schedulerStore,
-			cwd: () => this.cwd,
-			activeConversationId: () => this.activeId,
-			conversationInfo: (id?: string) => {
+			store: () => home().session.schedulerStore,
+			cwd: () => {
+				const h = home();
+				return h.session.convs.get(h.convId)?.cwd ?? h.session.cwd;
+			},
+			activeConversationId: () => home().convId,
+			conversationInfo: () => {
 				try {
-					const target = (id ?? "").trim() ? this.convs.get((id ?? "").trim()) : this.convs.get(this.activeId);
+					const h = home();
+					const target = h.session.convs.get(h.convId);
 					if (!target) return undefined;
-					let sessionFile = "";
-					try {
-						sessionFile = String(target.session.sessionFile ?? "");
-					} catch {
-						sessionFile = "";
-					}
-					return { cwd: target.cwd ?? this.cwd, sessionFile };
+					return { cwd: target.cwd, sessionFile: String(target.session.sessionFile ?? "") };
 				} catch {
 					return undefined;
 				}
@@ -2849,7 +2851,7 @@ export class ClientSession {
 					// 发起对话（ownerId，无则活动对话），到期 steer 语义唤醒它；子代理
 					// 会话同样注册（owner 即真正派发的父对话）。开关走统一工具 tab。
 					// DSH 引擎无 customTool 注册面，不接。
-					...makeScheduleTools(this.scheduleToolHost(), ownerId, () => this.getLang()),
+					...makeScheduleTools(this.scheduleToolHost(bridgeAnchor, ownerId), undefined, () => this.getLang()),
 				],
 			});
 			// 桥接工具归属锚点：SDK 会话对象在本 runtime 生命周期内稳定，过户只搬对话
@@ -3212,11 +3214,13 @@ export class ClientSession {
 
 	/** 插件用：本客户端最近活跃对话的快照（轨迹视图直接显示打开对话的时间线）。
 	 *  messages/streamingMessage 为引用稳定的只读缓存对象——调用方只读、不得修改。 */
-	readConversationForPlugins(): PluginConversationSnapshot | null {
+	readConversationForPlugins(pinned?: Conversation): PluginConversationSnapshot | null {
 		try {
-			let target: Conversation | null = null;
-			for (const c of this.convs.values()) {
-				if (!target || c.lastActiveAt > target.lastActiveAt) target = c;
+			let target: Conversation | null = pinned ?? null;
+			if (!pinned) {
+				for (const c of this.convs.values()) {
+					if (!target || c.lastActiveAt > target.lastActiveAt) target = c;
+				}
 			}
 			if (!target) return null;
 			const state = target.session.agent.state;
@@ -9672,16 +9676,28 @@ export class AgentService {
 					return { ok: false, error: `切换思考强度失败（${thinking}）：${(err as Error).message}` };
 				}
 			}
-			const conversationId = cs.readConversationForPlugins()?.conversationId ?? "";
-			void cs.prompt(`[定时任务] ${text}`);
+			// Keep the actual runtime, not the source client's active selection: taking
+			// over the run installs a blank conversation in the scheduler client.
+			const run = cs.resolveSchedulerTarget({ sessionFile: cs.activeSessionFileResolved() });
+			if (!run) return { ok: false, error: "无法定位定时任务会话" };
+			let dispatchPending = true;
+			let dispatchError: string | undefined;
+			void cs
+				.prompt(`[定时任务] ${text}`)
+				.catch((err) => {
+					dispatchError = (err as Error).message;
+				})
+				.finally(() => {
+					dispatchPending = false;
+				});
 			// 等待运行结束：每 2s 轮询，最长 10 分钟。超时按失败记录（运行继续）。
 			const deadline = Date.now() + 10 * 60 * 1000;
 			for (;;) {
 				await new Promise((r) => setTimeout(r, 2000));
 				let streaming = false;
-				let lastError: string | undefined;
+				let lastError: string | undefined = dispatchError;
 				try {
-					const snap = cs.readConversationForPlugins();
+					const snap = cs.readConversationForPlugins(run);
 					streaming = snap?.isStreaming === true;
 					const msgs = snap?.messages ?? [];
 					for (let i = msgs.length - 1; i >= 0; i--) {
@@ -9695,12 +9711,12 @@ export class AgentService {
 				} catch {
 					streaming = false;
 				}
-				if (!streaming) {
-					if (lastError) return { ok: false, conversationId: conversationId || undefined, error: lastError };
-					return { ok: true, conversationId: conversationId || undefined };
+				if (!dispatchPending && !streaming) {
+					if (lastError) return { ok: false, conversationId: run.id || undefined, error: lastError };
+					return { ok: true, conversationId: run.id || undefined };
 				}
 				if (Date.now() >= deadline)
-					return { ok: false, conversationId: conversationId || undefined, error: "运行超时（10 分钟），仍在后台继续" };
+					return { ok: false, conversationId: run.id || undefined, error: "运行超时（10 分钟），仍在后台继续" };
 			}
 		} catch (err) {
 			return { ok: false, error: (err as Error).message };
@@ -9902,8 +9918,8 @@ export class AgentService {
 			}
 			return;
 		}
-		if (AgentService.isPseudoClientId(ownerId)) {
-			fail("定时任务/插件会话不支持过户", "Scheduler/plugin sessions cannot be taken over.");
+		if (ownerId.startsWith("plugin:")) {
+			fail("插件会话不支持过户", "Plugin sessions cannot be taken over.");
 			return;
 		}
 		const source = this.clients.get(ownerId);
@@ -9976,6 +9992,14 @@ export class AgentService {
 				return;
 			}
 			const newMainId = target.insertTakeoverConvs(detached.payload);
+			if (ownerId.startsWith("scheduler:")) {
+				// Future ticks follow the same persisted session after the user takes
+				// control, including ID collisions and later browser-to-browser moves.
+				this.schedulerStore?.rebind(ownerId.slice("scheduler:".length), {
+					conversationId: newMainId,
+					sessionFile: main.sessionFile ?? "",
+				});
+			}
 			// 源会话修好 active（detach 内部已处理）→ 推全量刷新 + 告知去向；
 			// 无 sink 时 emit 即丢，无需判断。
 			if (!automatic) {
