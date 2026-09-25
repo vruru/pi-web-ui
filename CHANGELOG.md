@@ -52,7 +52,7 @@
 <!-- auto-i18n:start -->
 ### i18n
 
-- 前端新增 key（25）：`coreUpdateTitle`、`coreUpdateRunningVersion`、`coreUpdateLatestVersion`、`coreUpdateUpdating`、`coreUpdateStarting`、`coreUpdateInstalling`、`coreUpdateRestarting`、`coreUpdateSucceeded`、`coreUpdateReconnecting`、`coreUpdateFailed`、`coreUpdateChecking`、`coreUpdateAvailable`、`coreUpdateCurrent`、`coreUpdateNotChecked`、`coreUpdateCheckFailed`、`coreUpdateHint`、`coreUpdateCheckedAt`、`coreUpdateCheck`、`coreUpdateInstall`、`generationRate`、`generationRateTip`、`elsewhereActions`、`uiZoomTitle`、`uiZoomHint`、`uiZoomCurrent`
+- 前端新增 key（26）：`coreUpdateTitle`、`coreUpdateRunningVersion`、`coreUpdateLatestVersion`、`coreUpdateUpdating`、`coreUpdateStarting`、`coreUpdateInstalling`、`coreUpdateRestarting`、`coreUpdateSucceeded`、`coreUpdateReconnecting`、`coreUpdateFailed`、`coreUpdateChecking`、`coreUpdateAvailable`、`coreUpdateCurrent`、`coreUpdateNotChecked`、`coreUpdateCheckFailed`、`coreUpdateHint`、`coreUpdateCheckedAt`、`coreUpdateCheck`、`coreUpdateInstall`、`generationRate`、`generationRateTip`、`elsewhereActions`、`finishedSubagents`、`uiZoomTitle`、`uiZoomHint`、`uiZoomCurrent`
 - 前端中文变更（2）：`tps`、`subagentDefaultModelHint`
 - 前端英文变更（2）：`tps`、`subagentDefaultModelHint`
 <!-- auto-i18n:end -->

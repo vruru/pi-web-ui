@@ -19,6 +19,7 @@ import { useT } from "../i18n";
 import { useAppField } from "../app-globals";
 import { applySashDrag, parseWeights } from "../panel-sash";
 import { groupConversations } from "../conv-groups";
+import { finishedSubagentIds } from "../subagent-visibility";
 import { ProjectPicker } from "./ProjectPicker.js";
 // 宿主 UI 扩展点（issue #146）：会话行的右键菜单走「slot 条目」这一条通道。
 import { LP_SECTION_ENTRY_IDS, type UiSlotEntry } from "../ui-slots";
@@ -183,6 +184,7 @@ export const LeftPanel = memo(function LeftPanel({
 	const workspaceRoots = useAppField("workspaceRoots");
 	const currentCwd = cwd;
 	const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+	const [expandedFinishedProjects, setExpandedFinishedProjects] = useState<Set<string>>(new Set());
 	const [confirmDel, setConfirmDel] = useState<string | null>(null);
 	const [renaming, setRenaming] = useState<string | null>(null);
 	const [renameDraft, setRenameDraft] = useState("");
@@ -767,7 +769,12 @@ export const LeftPanel = memo(function LeftPanel({
 					style={!collapseConvs ? { flex: `${effFlex("convs")} 1 0px` } : undefined}
 					onContextMenu={(e) => openSessionMenu(e, { id: "", kind: "section", label: t("runningConversations") })}
 				>
-					{sectionHeader(t("runningConversations"), collapseConvs, toggleConvs, runningAll.length)}
+					{sectionHeader(
+						t("runningConversations"),
+						collapseConvs,
+						toggleConvs,
+						runningAll.length - finishedSubagentIds(runningAll, activeConversationId).size,
+					)}
 					{!collapseConvs && (
 						<div className="lp-section-body convs-scroll">
 							{groupConversations(runningAll, cwd, activeConversationId).map((g) => (
@@ -798,7 +805,8 @@ export const LeftPanel = memo(function LeftPanel({
 										};
 										for (const root of roots) append(root, 0);
 										for (const orphan of g.convs) append(orphan, 0);
-										return rows.map(({ c, depth }) => {
+										const finished = finishedSubagentIds(g.convs, activeConversationId);
+										const renderRow = ({ c, depth }: (typeof rows)[number]) => {
 											if ((c as RowConv).elsewhere) {
 												const openPath = (c as RowConv).openSessionPath;
 												if (openPath)
@@ -1063,7 +1071,35 @@ export const LeftPanel = memo(function LeftPanel({
 													)}
 												</div>
 											);
-										});
+										};
+										return (
+											<>
+												{rows.filter(({ c }) => !finished.has(c.id)).map(renderRow)}
+												{finished.size > 0 && (
+													<button
+														type="button"
+														className="finished-subagents-toggle"
+														aria-expanded={expandedFinishedProjects.has(g.cwd)}
+														onClick={() =>
+															setExpandedFinishedProjects((prev) => {
+																const next = new Set(prev);
+																if (next.has(g.cwd)) next.delete(g.cwd);
+																else next.add(g.cwd);
+																return next;
+															})
+														}
+													>
+														{expandedFinishedProjects.has(g.cwd) ? <FiChevronUp /> : <FiChevronDown />}
+														{t("finishedSubagents", { n: finished.size })}
+													</button>
+												)}
+												{expandedFinishedProjects.has(g.cwd) &&
+													rows
+														.filter(({ c }) => finished.has(c.id))
+														.reverse()
+														.map(renderRow)}
+											</>
+										);
 									})()}
 								</div>
 							))}
