@@ -335,3 +335,7 @@ _结构/流程变更时同步更新本文件及相关 `docs/` 文档。修改后
 ### 排队附件
 
 运行中发送的图片/文件必须和文字一起进入 SDK 的同一条 steer/followUp 用户消息，不能使用 nextTurn 附件缓冲（它不会随运行中的队列一起排空）。SDK clearQueue 只返回文本；删除条目重建队列时，使用每个 conversation 的 queueImages 保留图片，重复文本按队列位置处理。回归：tests/queued-attachments-test.mjs（本地多模态模拟服务，包含插队、排队及删除其他条目）、tests/unit/queued-attachments.test.ts。
+
+### 本地模型 MCP
+
+`bin/local-model-mcp.mjs` 是独立 stdio 桥接进程，供 Codex 派发固定模型的文字/图片任务；不依赖网页服务，不执行模型生成的命令。配置、生命周期、显式等待与验收见 `docs/local-model-mcp.md`；回归 `tests/local-model-mcp-test.mjs`。网络地址和凭据只放本机配置。
