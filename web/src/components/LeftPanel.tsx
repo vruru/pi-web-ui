@@ -852,7 +852,31 @@ export const LeftPanel = memo(function LeftPanel({
 															})
 														}
 													>
-														<div className="session-item elsewhere-item" title={`${t("elsewhereTip")}\n${c.cwd}`}>
+														<div
+															className="session-item elsewhere-item"
+															title={`${t("elsewhereTip")}\n${c.cwd}`}
+															role={sessionMenuAvailable ? "button" : undefined}
+															tabIndex={sessionMenuAvailable ? 0 : undefined}
+															aria-haspopup={sessionMenuAvailable ? "menu" : undefined}
+															onClick={(e) => {
+																if (!sessionMenuAvailable) return;
+																e.stopPropagation();
+																forceArmedRef.current = null;
+																const r = e.currentTarget.getBoundingClientRect();
+																showSessionMenu(r.left, r.bottom + 4, {
+																	id: (c as RowConv).convId ?? c.id,
+																	kind: "elsewhere",
+																	label: c.title,
+																	...((c as RowConv).owner ? { owner: (c as RowConv).owner } : {}),
+																});
+															}}
+															onKeyDown={(e) => {
+																if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+																	e.preventDefault();
+																	e.currentTarget.click();
+																}
+															}}
+														>
 															<FiMessageSquare className="session-icon" />
 															<span className="session-info">
 																<span className="session-title">

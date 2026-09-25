@@ -904,13 +904,12 @@ body.rp-resizing .rp-sash.dragging::after {
 	border: 1px solid rgba(139, 92, 246, 0.3);
 	padding: 7px 9px;
 }
-/* issue #145：另一处运行行为只读行 —— 不可点，去掉 hover 高亮与手形光标 */
-.session-item.elsewhere-item {
-	cursor: default;
+.session-item.elsewhere-item[role="button"] {
+	cursor: pointer;
 }
-.session-item.elsewhere-item:hover {
-	background: transparent;
-	color: var(--text-dim);
+.session-item.elsewhere-item[role="button"]:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: -2px;
 }
 /* issue #145：“另一处”标签（运行的对话里的跨客户端只读行） */
 .elsewhere-badge {
@@ -1218,9 +1217,16 @@ body.rp-resizing .rp-sash.dragging::after {
 }
 /* 触屏没有 hover，也没有可靠的右键：elsewhere 行的操作钮在无悬停设备上常驻可见
    （其余行的 ✎/✕ 仍按 hover 显隐，避免一次性改动既有行的视觉）。 */
-@media (hover: none) {
+@media (hover: none), (pointer: coarse), (max-width: 768px) {
 	.lp-row .lp-elsewhere-act {
 		display: inline-flex;
+		width: 44px;
+		height: 44px;
+		right: 2px;
+	}
+	.session-item.elsewhere-item {
+		padding-right: 48px;
+		min-height: 44px;
 	}
 }
 /* hover 时隐藏时间标签，给删除按钮腾位置 */
