@@ -35,9 +35,9 @@ const tools = [
 				reasoning: {
 					type: "string",
 					enum: ["off", "on"],
-					default: "off",
+					default: "on",
 					description:
-						"Default off reserves the output budget for deliverable text. Enable only for tasks needing internal reasoning; it shares max_tokens and can leave no final answer.",
+						"Default on preserves model reasoning. Thinking and final text share max_tokens; use off explicitly for simple tasks.",
 				},
 				parent_task_id: { type: "string", minLength: 1, maxLength: 100 },
 				context: { type: "string", maxLength: 800000 },
@@ -55,7 +55,7 @@ const tools = [
 					description:
 						"Absolute paths to up to four explicitly selected PNG/JPEG/WebP screenshots or images, at most 10 MiB each; uploaded to the configured model only.",
 				},
-				max_tokens: { type: "integer", minimum: 64, maximum: 16384, default: 8192 },
+				max_tokens: { type: "integer", minimum: 64, maximum: 65536, default: 32768 },
 			},
 			["task"],
 		),
@@ -272,7 +272,7 @@ async function call(name, args) {
 			id: randomUUID(),
 			created: Date.now(),
 			state: "running",
-			reasoning: args.reasoning ?? "off",
+			reasoning: args.reasoning ?? "on",
 			controller: new AbortController(),
 		};
 		if (work.role === "generate") job.root.id = job.id;
@@ -322,7 +322,7 @@ async function call(name, args) {
 						model,
 						stream: false,
 						chat_template_kwargs: { enable_thinking: job.reasoning === "on" },
-						max_tokens: args.max_tokens ?? 8192,
+						max_tokens: args.max_tokens ?? 32768,
 						messages: [
 							{
 								role: "system",
