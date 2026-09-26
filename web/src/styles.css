@@ -4444,6 +4444,42 @@ body.panel-resizing .scm-divider::after {
 .bg-task-status {
 	color: var(--amber, #fbbf24);
 }
+.bg-task-hint {
+	margin: 0;
+	padding: 10px 16px;
+	font-size: 11px;
+	color: var(--text-dim);
+}
+.bg-task-scheduled {
+	align-items: flex-start;
+}
+.bg-task-scheduled .bg-task-line1,
+.bg-task-scheduled .bg-task-line2,
+.bg-task-controls {
+	flex-wrap: wrap;
+	overflow-wrap: anywhere;
+}
+.bg-task-schedule-name {
+	font-size: 13px;
+}
+.bg-task-schedule-icon {
+	flex: none;
+	margin-top: 3px;
+	color: var(--accent);
+}
+.bg-task-scheduled.off .bg-task-schedule-icon {
+	color: var(--text-dim);
+}
+.bg-task-controls {
+	display: flex;
+	gap: 6px;
+	margin-top: 8px;
+}
+.bg-task-modal .bg-task-head,
+.bg-task-modal .bg-task-hint,
+.bg-task-modal .bg-task-foot {
+	flex-shrink: 0;
+}
 /* 插件声明式设置表单（manifest settings schema）——单列行式布局：
  * 标签固定左列（flex:0 0 auto，永不被压缩）+ 控件撑满右列，行间细分隔线。
  * 旧版是 auto-fit 网格 + space-between：列宽不够时长标签被逐字挤成竖排（一列一个字），

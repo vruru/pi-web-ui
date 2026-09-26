@@ -1963,7 +1963,9 @@ export function App() {
 					onClose={() => setSettingsOpen(false)}
 				/>
 			)}
-			{bgTasksOpen && <BgTasksModal servers={chat.bgServers} onClose={() => setBgTasksOpen(false)} />}
+			{bgTasksOpen && (
+				<BgTasksModal servers={chat.bgServers} tasks={chat.schedulerTasks} onClose={() => setBgTasksOpen(false)} />
+			)}
 			{/* 工具定义说明弹窗（工具卡右键菜单 host:tool-info）：自己订阅 store，无 props。 */}
 			<ToolInfoDialog />
 			{/* 插件弹窗（modal.dialog 槽位）：action 点即分发 + 关弹窗，view 挂插件视图。 */}

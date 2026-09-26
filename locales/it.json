@@ -152,6 +152,8 @@
 		"bgTaskSince": "Avviato",
 		"bgTaskStop": "Ferma",
 		"bgTaskStopAll": "Ferma tutti",
+		"bgScheduledHint": "Disattivare o eliminare modifica solo le esecuzioni future. Apri la conversazione per fermare quella in corso.",
+		"bgTaskStopProcesses": "Ferma processi e attività dei plugin",
 		"bgTaskRefresh": "Aggiorna",
 		"bgTaskJustNow": "proprio ora",
 		"bgTaskMinutes": "{n} min fa",

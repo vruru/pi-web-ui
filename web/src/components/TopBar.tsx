@@ -897,7 +897,9 @@ export function TopBar({
 			<button type="button" className="chip bg-task-chip" data-tip={t("bgTasksTip")} onClick={onOpenBgTasks}>
 				<FiLayers />
 				<span className="chip-sub">{t("bgTasks")}</span>
-				{chat.bgServers.length > 0 && <span className="bg-task-badge">{chat.bgServers.length}</span>}
+				{chat.bgServers.length + chat.schedulerTasks.length > 0 && (
+					<span className="bg-task-badge">{chat.bgServers.length + chat.schedulerTasks.length}</span>
+				)}
 			</button>
 		),
 		"host:settings": (
