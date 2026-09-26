@@ -27,6 +27,12 @@ source "$SCRIPT_DIR/request-capacity.sh"
 # The map path stays fixed; hashes identify cache representations, not an allow-list.
 TOKEN_MAP="$SCRIPT_DIR/frspec/flash-next-64k.pt"
 
+case "${MTP_ENABLED:-true}" in
+  true) SPECULATIVE_ALGORITHM=NEXTN ;;
+  false) SPECULATIVE_ALGORITHM=none ;;
+  *) echo "MTP_ENABLED must be true or false" >&2; exit 1 ;;
+esac
+
 CONTEXT_LENGTH=524288
 PAGE_SIZE=64
 TP_SIZE=1
@@ -106,7 +112,7 @@ NIXL_STORAGE="$("$NAMESPACE_HELPER" \
   --field "page_size=$PAGE_SIZE" \
   --field "compute_dtype=$COMPUTE_DTYPE" \
   --field "target_kv_dtype=$KV_DTYPE" \
-  --field "speculative_algorithm=NEXTN" \
+  --field "speculative_algorithm=$SPECULATIVE_ALGORITHM" \
   --field "speculative_num_steps=3" \
   --field "speculative_eagle_topk=1" \
   --field "speculative_num_draft_tokens=4" \
@@ -146,6 +152,13 @@ case "${HICACHE_ENABLED:-true}" in
   *) echo "HICACHE_ENABLED must be true or false" >&2; exit 1 ;;
 esac
 
+MTP_ARGS=()
+if [[ "$SPECULATIVE_ALGORITHM" == NEXTN ]]; then
+  MTP_ARGS=(--speculative-algorithm NEXTN --speculative-num-steps 3
+    --speculative-eagle-topk 1 --speculative-num-draft-tokens 4
+    --speculative-draft-model-quantization unquant --speculative-token-map "$TOKEN_MAP")
+fi
+
 launch_args=(serve \
   --model-path "$TARGET_MODEL" \
   --load-format safetensors \
@@ -168,10 +181,7 @@ launch_args=(serve \
   --reasoning-parser qwen3 --tool-call-parser qwen3_coder \
   --enable-request-time-stats-logging --enable-metrics --enable-cache-report \
   --default-chat-template-kwargs '{"enable_thinking":true,"preserve_thinking":true,"reasoning_effort":"medium"}' \
-  --speculative-algorithm NEXTN --speculative-num-steps 3 \
-  --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 \
-  --speculative-draft-model-quantization unquant \
-  --speculative-token-map "$TOKEN_MAP" --watchdog-timeout 1800)
+  "${MTP_ARGS[@]}" --watchdog-timeout 1800)
 source "$SCRIPT_DIR/startup-summary.sh"
 pennyroyal_startup_summary "${launch_args[@]}"
 exec "$SGLANG_EXE" "${launch_args[@]}"

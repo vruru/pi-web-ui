@@ -1,0 +1,38 @@
+--- a/python/sglang/srt/constrained/xgrammar_backend.py
++++ b/python/sglang/srt/constrained/xgrammar_backend.py
+@@ -16,11 +16,13 @@
+ import dataclasses
+ import json
+ import logging
++import os
+ from typing import Dict, List, Optional, Tuple, Union
+
+ import torch
+ from xgrammar import (
+     CompiledGrammar,
++    Grammar,
+     GrammarCompiler,
+     GrammarMatcher,
+     StructuralTag,
+@@ -340,9 +342,18 @@
+                 # Note: This builtin JSON grammar includes *all* valid JSON (including, for example, arrays at the root)
+                 ctx = self.grammar_compiler.compile_builtin_json_grammar()
+             else:
+-                ctx = self.grammar_compiler.compile_json_schema(
+-                    schema=key_string, any_whitespace=self.any_whitespace
+-                )
++                if self.any_whitespace and os.environ.get("SGLANG_JSON_ROOT_WHITESPACE", "1") == "1":
++                    # Preserve the model's natural whitespace after </think>.
++                    # The schema grammar still validates the complete JSON value.
++                    grammar = Grammar.concat(
++                        Grammar.from_regex(r"[ \t\r\n]{0,8}"),
++                        Grammar.from_json_schema(key_string, any_whitespace=True),
++                    )
++                    ctx = self.grammar_compiler.compile_grammar(grammar)
++                else:
++                    ctx = self.grammar_compiler.compile_json_schema(
++                        schema=key_string, any_whitespace=self.any_whitespace
++                    )
+
+         except (RuntimeError, json.decoder.JSONDecodeError, UnicodeDecodeError) as e:
+             logger.error(f"Hit invalid json_schema: {key_string=}, {e=}")

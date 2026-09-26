@@ -341,3 +341,5 @@ _结构/流程变更时同步更新本文件及相关 `docs/` 文档。修改后
 `bin/local-model-mcp.mjs` 是独立 stdio 桥接进程，供 Codex 派发固定模型的文字/图片任务；不依赖网页服务，不执行模型生成的命令。配置、生命周期、显式等待与验收见 `docs/local-model-mcp.md`；回归 `tests/local-model-mcp-test.mjs`。网络地址和凭据只放本机配置。
 
 普通 `submit_task` 每次独立接收必要材料，不自动复核或返工；主控收齐结果后执行必要验收。旧 `role` / `parent_task_id` 参数已移除，客户端应刷新工具目录。
+
+模型运行时覆盖、PLE 离线 FP8 转换、MTP 对照及 JSON 约束修复见 `deploy/pennyroyal/README.md`；实测结论见 `docs/swift-fp8-ple-results-2026-09-26.md`。源模型、转换产物、凭据和原始性能记录不入 Git。运行服务由 systemd 管理，停容器不能代替停服务单元。
