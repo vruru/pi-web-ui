@@ -1,6 +1,6 @@
 # Local model MCP worker
 
-`bin/local-model-mcp.mjs` is a standalone Node 22+ stdio MCP server. Codex owns orchestration and review; a fixed OpenAI-compatible model supplies analysis, code, patches and image interpretation. No Pi/web service restart or Python/npm dependencies are needed.
+`bin/local-model-mcp.mjs` is a standalone Node 22+ stdio MCP server. Codex coordinates tasks and validates results; a fixed OpenAI-compatible model supplies analysis, code, patches and image interpretation. No Pi/web service restart or Python/npm dependencies are needed.
 
 Configure `LOCAL_MODEL_BASE_URL` (including `/v1`), `LOCAL_MODEL_ID`, and optionally `LOCAL_MODEL_API_KEY` in the local environment. Never commit endpoint credentials. The tool cannot select another model or silently fall back.
 
@@ -13,12 +13,12 @@ codex mcp add flash-next --env LOCAL_MODEL_BASE_URL=http://YOUR_HOST:8000/v1 --e
 Tools:
 
 - `model_status`: check the configured model is listed by the endpoint.
-- `submit_task`: supply `task`, optional source text in `context`, optional `image_paths` (up to four absolute PNG/JPEG/WebP files, each at most 10 MiB), and optional per-call `max_tokens` (64–65536, default 32768). Immediately returns a task ID. Only explicitly attached files are read and uploaded. The model has no independent filesystem or execution tools. Optional `role` selects `generate` (default), `review`, or `revise`; the latter two require `parent_task_id` and inherit original context/images.
+- `submit_task`: supply `task`, optional source text in `context`, optional `image_paths` (up to four absolute PNG/JPEG/WebP files, each at most 10 MiB), and optional per-call `max_tokens` (64–65536, default 32768). Immediately returns a task ID. Only explicitly attached files are read and uploaded. The model has no independent filesystem or execution tools. Every call is independent and must include its necessary context/images. The removed `role` and `parent_task_id` arguments are rejected; there is no automatic review or retry workflow.
 - `wait_task`: supply `task_id`, optional `wait_seconds` (0–50) and `offset`. Repeat until completed/incomplete/failed/cancelled. Output is returned in 24000-character pages; follow `next_offset`. `finish_reason: length` means the response is truncated and may need a follow-up task.
 - `cancel_task`: abort the HTTP request; backend cancellation latency depends on the inference server.
-- `release_task`: after collecting the results and finishing the workflow, pass any related `task_id` to delete all its retained records. Refuses if a related task is running. This does not undo any applied code.
+- `release_task`: after collecting a result, pass its `task_id` to delete that one retained record. Refuses if that task is running. Other task records remain available. This does not undo any applied code.
 
-Each MCP process allows four running jobs, with a 15-minute deadline per job. Completed jobs do not occupy running slots. Output is retained in memory for up to an hour after each job terminates (pruned on new submissions). At 256 retained records (configurable with `LOCAL_MCP_MAX_RECORDS`), new submissions are rejected with instructions to collect results and `release_task` a finished workflow; unexpired results are never silently evicted. Restarting/disconnecting the MCP process cancels jobs and loses results. There is no automatic wakeup of a finished Codex turn: the coordinator must explicitly wait and collect required results before ending. This adapter does not automatically edit files or execute model-generated commands. Codex must review and apply returned suggestions.
+Each MCP process allows four running jobs, with a 15-minute deadline per job. Completed jobs do not occupy running slots. Output is retained in memory for up to an hour after each job terminates (pruned on new submissions). At 256 retained records (configurable with `LOCAL_MCP_MAX_RECORDS`), new submissions are rejected with instructions to collect results and `release_task` a finished task; unexpired results are never silently evicted. Restarting/disconnecting the MCP process cancels jobs and loses results. There is no automatic wakeup of a finished Codex turn: the coordinator must explicitly wait and collect required results before ending. This adapter does not automatically edit files or execute model-generated commands. Codex must review and apply returned suggestions.
 
 After registration, new Codex tasks load the server. An already-running task may need MCP reconnection or a fresh task to expose the new tools; configuration success alone does not prove the current tool catalog refreshed.
 
@@ -31,27 +31,17 @@ LOCAL_MODEL_BASE_URL=http://YOUR_HOST:8000/v1 LOCAL_MODEL_ID=YOUR_MODEL node tes
 
 The fixture verifies protocol initialization/discovery, model locking, image payloads, capacity release, cancellation and failures. The live check sends a generated red image plus arithmetic task through a real MCP subprocess and checks the returned answer. No personal screenshots are used.
 
-## Fresh-context review workflow
+## Independent tasks
 
-Version 1.1 keeps the original single-call path. For nontrivial code, the coordinator can use this bounded chain:
+Version 1.2 removes the former generate/review/revise orchestration and the `flash-next-reviewed` skill. Each `submit_task` receives only the task, context and images explicitly supplied in that call. It does not inherit another task's output or reserve repair attempts. Existing clients that cached the old schema should reconnect; old role/parent arguments fail clearly instead of silently changing meaning.
 
-1. `submit_task({ task, context, role: "generate" })`, then collect all `wait_task` pages.
-2. `submit_task({ task: "Review correctness and regressions", role: "review", parent_task_id: candidateId })`, then collect the report.
-3. Independently check findings and execute appropriate real tests. If needed, use `submit_task({ task: confirmedDefectsAndTestEvidence, role: "revise", parent_task_id: reviewId })`, then review that replacement candidate in a new call.
-
-Review receives original requirements, original material/images and the candidate's final text. It does not receive the model's private reasoning or previous review reports. Revision also receives the parent review, but is instructed to address only coordinator-confirmed findings. Do not pass `context`, `image_paths`, or `image_data` to review/revise, even empty ones: the original inputs are inherited. Necessary new evidence belongs in `task`.
-
-The server rejects wrong parent roles, non-completed/truncated parents, and more than two revision attempts per root. Attempts are reserved synchronously before model work; failures and cancellations do not refund them. Four concurrent jobs are shared across callers. Completed parents release their execution slots. The 15-minute deadline is per call; there is no automatic loop. The coordinator stops on acceptance, no progress, cancellation, truncation, or the repair limit, and must not create new roots to evade it.
-
-Snapshots include `role`, `root_task_id`, `parent_task_id`, `repair_attempt`, and `verification: "not_run"`. `completed` means model text is available, not that a patch was applied or tests passed. Non-stop completions have terminal state `incomplete` with partial output retained; empty final text without truncation has state `failed` and retains finish reason/usage for diagnosis. Each record is immutable after completion, output remains paginated, and records are process-local. Call `release_task` only after collecting every required result and finishing the workflow.
-
-The reusable [flash-next-reviewed skill](../skills/flash-next-reviewed/SKILL.md) supplies this workflow to either coordinator. Copy its folder into `~/.codex/skills/` and/or `~/.pi/agent/skills/`. This is a lightweight GVS5H-inspired workflow, not the original competitive-programming harness or a new model provider; no benchmark gains are assumed.
+Snapshots include `verification: "not_run"`. `completed` means final model text is available, not that a patch was applied or tests passed. Non-stop completions have terminal state `incomplete` with partial output retained; empty final text without truncation has state `failed`. Results remain paginated and process-local. The coordinator performs actual file actions and relevant tests, without a mandatory second model pass.
 
 ### Pi usage
 
 Register the HTTP server under `flash-next` in `~/.pi/agent/mcp.json`, with `url`, private `headers.Authorization`, `directTools: true`, and `requestTimeoutMs: 65000` (wait calls may last 50 seconds). Keep credentials out of this repository. Existing direct `pennyroyal` model configuration can remain unchanged.
 
-Start a new Pi session or run `/reload` when the current task is idle, then invoke `/skill:flash-next-reviewed` with the task. The main Pi model remains coordinator; the skill dispatches worker stages to the fixed Flash Next MCP. If necessary, `/mcp reconnect flash-next` refreshes schemas. This does not transparently wrap every ordinary model response. Use ordinary Flash Next and this skill on equivalent tasks for a comparison.
+Start a new Pi session or run `/reload` when the current task is idle to refresh skill discovery after removing the old skill. `/mcp reconnect flash-next` refreshes MCP schemas. The main Pi model can call ordinary `submit_task` and collect the result with `wait_task`; its direct model configuration remains unchanged.
 
 ## Remote HTTP deployment
 
@@ -82,8 +72,8 @@ For a container deployment, mount only the server file read-only, pass environme
 
 ## Reliable final output
 
-MCP calls explicitly default to `reasoning: "on"`, sending `chat_template_kwargs.enable_thinking: true`. The default output budget is 32768 tokens and callers may request up to 65536. Thinking and final text share that budget; this is an upper limit, not a target output length. Omit `max_tokens` to use the larger default instead of carrying forward a small old limit. Set `reasoning: "off"` explicitly for simple tasks if desired; each stage has its own setting. This does not change direct Pi/model clients, context size, or inference server defaults. More output allowance reduces budget pressure but does not guarantee completion or eliminate context limits.
+MCP calls explicitly default to `reasoning: "on"`, sending `chat_template_kwargs.enable_thinking: true`. The default output budget is 32768 tokens and callers may request up to 65536. Thinking and final text share that budget; this is an upper limit, not a target output length. Omit `max_tokens` to use the larger default instead of carrying forward a small old limit. Set `reasoning: "off"` explicitly for simple tasks if desired; each call has its own setting. This does not change direct Pi/model clients, context size, or inference server defaults. More output allowance reduces budget pressure but does not guarantee completion or eliminate context limits.
 
 Snapshots report `reasoning`, `elapsed_ms`, `reasoning_characters` (count only), `finish_reason`, `usage`, and `error_code`. Length-limited answers, including empty ones, are `incomplete` with `output_limit`; empty non-truncated answers are `failed` with `empty_final`. Private reasoning is never returned as the deliverable. There are no automatic retries. Split oversized tasks or retry deliberately with a sufficient budget. Completed tasks do not occupy running slots; released results are unavailable for later review.
 
-For the real four-request concurrency and generate/review/revise smoke test, add `--workflow` to the `--remote` acceptance command. It uses a deliberately seeded defect and executes four real JavaScript assertions after repair; this validates plumbing, not comparative model quality.
+For a real four-request concurrency smoke test, add `--concurrency` to the `--remote` acceptance command. It sends four independent arithmetic tasks, collects and checks each result, then releases their records. This validates transport and concurrent admission, not comparative model quality.

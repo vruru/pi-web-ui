@@ -1,8 +1,12 @@
 # Flash Next public-bug comparison
 
-This is a local, descriptive paired experiment of the deployed lightweight review workflow. It is not a reproduction of GVS5H's harness or published scores, and is not a full autonomous repository-agent benchmark.
+This is a historical, descriptive paired experiment of the then-deployed lightweight review workflow. It is not a reproduction of GVS5H's harness or published scores, and is not a full autonomous repository-agent benchmark.
 
-## Reproduce
+## Archived experiment
+
+The reviewed workflow was removed on 2026-09-26. The current MCP accepts independent tasks only, so the former benchmark runner has also been removed from the active tree. The results remain as evidence; they are not instructions to re-enable the workflow. To reproduce the historical experiment, use the runner and MCP implementation from commit `d41eafc67b783d7a7042add7f6efe0a09a1bb8f7` in an isolated checkout and separate MCP instance. Do not run that old runner against the current server or restore its skill to normal sessions.
+
+## Historical reproduction
 
 Source datasets:
 

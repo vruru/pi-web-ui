@@ -6,7 +6,6 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
-import { runInNewContext } from "node:vm";
 const remote = process.argv.includes("--remote");
 const authToken = remote ? process.env.REMOTE_MCP_TOKEN : "test-token-".repeat(4);
 const httpMode = remote || process.argv.includes("--http");
@@ -52,7 +51,7 @@ const server = createServer(async (req, res) => {
 	assert.equal(body.model, "test-model");
 	const content = body.messages[1].content;
 	const text = content[0].text;
-	if (text.startsWith("hold") || text.includes("HOLD_STAGE")) return;
+	if (text.startsWith("hold")) return;
 	if (content[0].text.startsWith("fail")) {
 		res.statusCode = 503;
 		return res.end("{}");
@@ -149,7 +148,11 @@ try {
 		clientInfo: { name: "test", version: "1" },
 	});
 	assert.equal(init.serverInfo.name, "flash-next");
-	assert.equal((await rpc("tools/list")).tools.length, 5);
+	const catalog = (await rpc("tools/list")).tools;
+	assert.equal(catalog.length, 5);
+	const properties = catalog.find((t) => t.name === "submit_task").inputSchema.properties;
+	assert.equal(Object.hasOwn(properties, "role"), false);
+	assert.equal(Object.hasOwn(properties, "parent_task_id"), false);
 	assert.equal((await tool("model_status")).available, true);
 	const r = await finish(
 		await tool("submit_task", {
@@ -165,102 +168,29 @@ try {
 	assert.match(r.output, /42/);
 	console.log("Real MCP result:", JSON.stringify(r));
 	if (live) await tool("release_task", { task_id: r.task_id });
-	if (live && process.argv.includes("--workflow")) {
-		const started = Date.now();
-		const roots = [];
+	if (live && process.argv.includes("--concurrency")) {
+		const tasks = [];
 		try {
-			const four = await Promise.all(
+			const submissions = await Promise.allSettled(
 				Array.from({ length: 4 }, (_, i) =>
 					tool("submit_task", {
 						task: `Concurrency probe ${i + 1}: compute 6 * 7. Reply only with the number.`,
 						max_tokens: 1024,
-					}).then((t) => {
-						roots.push(t.task_id);
-						return t;
-					}),
+					}).then((task) => tasks.push(task)),
 				),
 			);
-			const status = await tool("model_status");
-			assert.equal(status.max_concurrent, 4);
-			console.log("Live concurrent admission:", JSON.stringify(status));
-			for (const t of four) {
-				const result = await finish(t);
+			for (const submission of submissions) if (submission.status === "rejected") throw submission.reason;
+			assert.equal((await tool("model_status")).max_concurrent, 4);
+			for (const task of tasks) {
+				const result = await finish(task);
 				assert.equal(result.state, "completed", result.error);
 				assert.match(result.output, /42/);
 			}
-			const candidate = await finish(
-				await tool("submit_task", {
-					task: "For this workflow transport test, the initial generation stage must reproduce the supplied baseline JavaScript function unchanged in one code block, with no explanation. A later review stage must judge it against the supplied contract and revisions may fix it.",
-					context:
-						"Contract: uniqueKeepLast(items) removes duplicate numbers, keeping the LAST occurrence and preserving those last occurrences' order. Example [1,2,1,3,2] => [1,3,2]. Baseline: function uniqueKeepLast(items) { return [...new Set(items)]; }",
-					max_tokens: 4096,
-				}).then((t) => {
-					roots.push(t.task_id);
-					return t;
-				}),
-			);
-			assert.equal(candidate.state, "completed", candidate.error);
-			const review = await finish(
-				await tool("submit_task", {
-					role: "review",
-					parent_task_id: candidate.task_id,
-					task: "Review the function against the original behavioral contract. Give a concrete counterexample if incorrect. Do not claim you executed tests. Be concise.",
-					max_tokens: 4096,
-				}),
-			);
-			assert.equal(review.state, "completed", review.error);
-			const repaired = await finish(
-				await tool("submit_task", {
-					role: "revise",
-					parent_task_id: review.task_id,
-					task: "Confirmed defect: Set retains first occurrences; [1,2,1,3,2] yields [1,2,3], expected [1,3,2]. Fix uniqueKeepLast to keep last occurrences. Return only the complete JavaScript function in one code block. No exports, imports, or example calls. The initial baseline-copy instruction applied only to the generation stage.",
-					max_tokens: 4096,
-				}),
-			);
-			assert.equal(repaired.state, "completed", repaired.error);
-			const code = repaired.output.match(/```(?:javascript|js)?\s*\n([\s\S]*?)```/)?.[1];
-			assert.ok(code, "Expected a complete JavaScript function");
-			for (const [input, expected] of [
-				[
-					[1, 2, 1, 3, 2],
-					[1, 3, 2],
-				],
-				[[], []],
-				[[4, 4, 4], [4]],
-				[
-					[3, 2, 1],
-					[3, 2, 1],
-				],
-			]) {
-				const actual = runInNewContext(
-					`${code}\nJSON.stringify(uniqueKeepLast(${JSON.stringify(input)}))`,
-					Object.create(null),
-					{ timeout: 500 },
-				);
-				assert.deepEqual(JSON.parse(actual), expected);
-			}
-			const finalReview = await finish(
-				await tool("submit_task", {
-					role: "review",
-					parent_task_id: repaired.task_id,
-					task: "Review this replacement against the keep-last contract. Coordinator actually ran four cases (duplicates, empty, all same, distinct) and all passed. Report only remaining concrete defects; no findings is acceptable.",
-					max_tokens: 4096,
-				}),
-			);
-			assert.equal(finalReview.state, "completed", finalReview.error);
-			console.log(
-				"PASS live reviewed workflow and 4 coordinator-executed cases",
-				JSON.stringify({
-					elapsed_ms: Date.now() - started,
-					repair_attempt: repaired.repair_attempt,
-					review: review.output,
-					final_review: finalReview.output,
-				}),
-			);
+			console.log("PASS four independent live tasks");
 		} finally {
-			for (const task_id of roots) {
-				await tool("cancel_task", { task_id });
-				await tool("release_task", { task_id });
+			for (const task of tasks) {
+				await tool("cancel_task", { task_id: task.task_id });
+				await tool("release_task", { task_id: task.task_id });
 			}
 		}
 	}
@@ -283,58 +213,33 @@ try {
 		);
 		assert.equal(invalid.state, "failed");
 		const submit = async (args) => finish(await tool("submit_task", args));
-		const rejected = async (args) =>
-			assert.equal((await rpc("tools/call", { name: "submit_task", arguments: args })).isError, true);
+		const rejected = async (args, message) => {
+			const result = await rpc("tools/call", { name: "submit_task", arguments: args });
+			assert.equal(result.isError, true);
+			if (message) assert.match(result.content[0].text, message);
+		};
 		const candidate = await submit({
 			task: "Implement exact requirements",
 			context: "ORIGINAL_CONTRACT",
 			image_data: [`data:image/png;base64,${image.toString("base64")}`],
 		});
-		assert.equal(candidate.role, "generate");
-		assert.equal(candidate.root_task_id, candidate.task_id);
-		let review = await submit({ task: "Check edge cases", role: "review", parent_task_id: candidate.task_id });
-		assert.equal(review.root_task_id, candidate.task_id);
-		assert.equal(review.parent_task_id, candidate.task_id);
-		assert.equal(review.verification, "not_run");
-		let req = requests.at(-1);
+		for (const key of ["role", "root_task_id", "parent_task_id", "repair_attempt"])
+			assert.equal(Object.hasOwn(candidate, key), false);
+		assert.equal(candidate.verification, "not_run");
+		const req = requests.at(-1);
 		assert.equal(req.messages.length, 2);
-		assert.match(req.messages[0].content, /WORKFLOW_ROLE: review/);
 		assert.match(req.messages[1].content[0].text, /ORIGINAL_CONTRACT/);
-		assert.match(req.messages[1].content[0].text, /red 42/);
-		assert.ok(!JSON.stringify(req).includes("PRIVATE_REASONING_MUST_NOT_BE_FORWARDED"));
 		assert.equal(req.messages[1].content[1].image_url.url, `data:image/png;base64,${image.toString("base64")}`);
-		await rejected({ task: "x", role: "bogus" });
-		await rejected({ task: "x", role: "review" });
-		await rejected({ task: "x", role: "review", parent_task_id: "absent" });
-		await rejected({ task: "x", parent_task_id: candidate.task_id });
-		await rejected({ task: "x", role: "review", parent_task_id: review.task_id });
-		await rejected({ task: "x", role: "revise", parent_task_id: candidate.task_id });
-		for (const extra of [{ context: "" }, { image_paths: [] }, { image_data: [] }])
-			await rejected({ task: "x", role: "review", parent_task_id: candidate.task_id, ...extra });
-		for (let n = 1; n <= 2; n++) {
-			const repaired = await submit({ task: "CONFIRMED_TEST_FAILURE", role: "revise", parent_task_id: review.task_id });
-			assert.equal(repaired.repair_attempt, n);
-			assert.equal(repaired.root_task_id, candidate.task_id);
-			req = requests.at(-1);
-			assert.match(req.messages[0].content, /WORKFLOW_ROLE: revise/);
-			assert.match(req.messages[1].content[0].text, /CONFIRMED_TEST_FAILURE/);
-			assert.match(req.messages[1].content[0].text, /Review Feedback/);
-			review = await submit({ task: "Review replacement", role: "review", parent_task_id: repaired.task_id });
-			assert.ok(!requests.at(-1).messages[1].content[0].text.includes("Review Feedback"));
-		}
-		await rejected({ task: "third repair", role: "revise", parent_task_id: review.task_id });
-		// Cancelling a child is terminal, prevents descendants and releases its slot.
-		const holding = await tool("submit_task", {
-			task: "HOLD_STAGE",
-			role: "review",
-			parent_task_id: candidate.task_id,
-		});
-		await tool("cancel_task", { task_id: holding.task_id });
-		await rejected({ task: "x", role: "revise", parent_task_id: holding.task_id });
-		assert.equal((await submit({ task: "after review cancellation" })).state, "completed");
+		for (const role of ["generate", "review", "revise"]) await rejected({ task: "x", role }, /Unknown argument role/);
+		await rejected({ task: "x", parent_task_id: candidate.task_id }, /Unknown argument parent_task_id/);
+		await submit({ task: "independent next task" });
+		const independent = JSON.stringify(requests.at(-1));
+		assert.ok(!independent.includes("ORIGINAL_CONTRACT"));
+		assert.ok(!independent.includes("image_url"));
+		assert.ok(!independent.includes("PRIVATE_REASONING_MUST_NOT_BE_FORWARDED"));
+		assert.ok(!independent.includes("WORKFLOW_ROLE"));
 		const truncated = await submit({ task: "TRUNCATED_OUTPUT" });
 		assert.equal(truncated.state, "incomplete");
-		await rejected({ task: "x", role: "review", parent_task_id: truncated.task_id });
 		const empty = await submit({ task: "EMPTY_FINAL" });
 		assert.equal(empty.state, "incomplete");
 		assert.equal(empty.error_code, "output_limit");
@@ -359,20 +264,23 @@ try {
 		const tail = await tool("wait_task", { task_id: paged.task_id, offset: paged.next_offset, wait_seconds: 0 });
 		assert.equal(tail.output.length, 6000);
 		assert.equal(tail.next_offset, null);
-		// Repair reservations count even on cancellation, and racing third attempts fail.
-		const g = await submit({ task: "root for racing repairs" });
-		const v = await submit({ task: "review", role: "review", parent_task_id: g.task_id });
-		const repairs = await Promise.all(
-			[1, 2].map(() => tool("submit_task", { task: "HOLD_STAGE", role: "revise", parent_task_id: v.task_id })),
+		// Only the selected terminal record is released; other results remain readable.
+		const holding = await tool("submit_task", { task: "hold release probe" });
+		assert.equal(
+			(await rpc("tools/call", { name: "release_task", arguments: { task_id: holding.task_id } })).isError,
+			true,
 		);
-		await rejected({ task: "third", role: "revise", parent_task_id: v.task_id });
-		assert.equal((await rpc("tools/call", { name: "release_task", arguments: { task_id: v.task_id } })).isError, true);
-		for (const repair of repairs) await tool("cancel_task", { task_id: repair.task_id });
-		await rejected({ task: "third after cancellation", role: "revise", parent_task_id: v.task_id });
-		const released = await tool("release_task", { task_id: v.task_id });
-		assert.equal(released.released_records, 4);
-		assert.equal((await tool("release_task", { task_id: v.task_id })).released_records, 0);
-		await rejected({ task: "review deleted root", role: "review", parent_task_id: g.task_id });
+		await tool("cancel_task", { task_id: holding.task_id });
+		const released = await tool("release_task", { task_id: holding.task_id });
+		assert.equal(released.released_records, 1);
+		assert.equal(released.task_id, holding.task_id);
+		assert.equal((await tool("release_task", { task_id: holding.task_id })).released_records, 0);
+		assert.equal(
+			(await rpc("tools/call", { name: "wait_task", arguments: { task_id: holding.task_id, wait_seconds: 0 } }))
+				.isError,
+			true,
+		);
+		assert.equal((await tool("wait_task", { task_id: candidate.task_id, wait_seconds: 0 })).output, "red 42");
 		let reachedRetentionLimit = false;
 		for (let i = 0; i < 32; i++) {
 			const result = await rpc("tools/call", { name: "submit_task", arguments: { task: "retained record" } });
@@ -384,6 +292,8 @@ try {
 			await finish(JSON.parse(result.content[0].text));
 		}
 		assert.ok(reachedRetentionLimit);
+		// A failed task made exactly one backend request; no retry/review calls followed it.
+		assert.equal(requests.filter((req) => req.messages[1].content[0].text.startsWith("fail")).length, 1);
 		// Existing results survive capacity pressure until explicitly released.
 		assert.equal((await tool("wait_task", { task_id: candidate.task_id, wait_seconds: 0 })).output, "red 42");
 		await tool("release_task", { task_id: candidate.task_id });
@@ -392,7 +302,7 @@ try {
 	console.log(
 		live
 			? "PASS live text + vision through MCP"
-			: "PASS MCP protocol, images, fixed model, four slots, role lineage, repair budget, cancellation, truncation and pagination",
+			: "PASS MCP protocol, images, fixed model, four slots, independent tasks, legacy-argument rejection, cancellation, retention, truncation and pagination",
 	);
 } finally {
 	child?.kill();

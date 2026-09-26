@@ -340,4 +340,4 @@ _结构/流程变更时同步更新本文件及相关 `docs/` 文档。修改后
 
 `bin/local-model-mcp.mjs` 是独立 stdio 桥接进程，供 Codex 派发固定模型的文字/图片任务；不依赖网页服务，不执行模型生成的命令。配置、生命周期、显式等待与验收见 `docs/local-model-mcp.md`；回归 `tests/local-model-mcp-test.mjs`。网络地址和凭据只放本机配置。
 
-需要复核的非简单代码任务可使用 `skills/flash-next-reviewed/SKILL.md`：`submit_task` 的 generate → review → revise 通过 parent_task_id 关联，服务端每个根任务最多两次返工。每次调用使用新上下文，主控执行真实测试并裁定缺陷；completed 仅表示文本生成结束。Pi 可通过同一 MCP 和 skill 使用，不替换直接模型配置。
+普通 `submit_task` 每次独立接收必要材料，不自动复核或返工；主控收齐结果后执行必要验收。旧 `role` / `parent_task_id` 参数已移除，客户端应刷新工具目录。
