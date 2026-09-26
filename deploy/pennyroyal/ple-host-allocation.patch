@@ -1,0 +1,41 @@
+--- a/qwen4_exp.py
++++ b/qwen4_exp.py
+@@ -488,18 +488,26 @@
+             and get_attention_dp_size() > 1
+             and not self.use_attn_tp_ngram
+         )
+-        self.ngram_embedding = VocabParallelEmbedding(
+-            padded_vocab_size,
+-            self.head_dim_per_ngram,
+-            params_dtype=(
+-                torch.float8_e4m3fn
+-                if (quant_config is not None and quant_config.get_name() == "fp8")
+-                or getattr(config, "ple_embedding_dtype", None) == "float8_e4m3fn"
+-                else torch.bfloat16
+-            ),
+-            output_dtype=torch.bfloat16,
+-            use_attn_tp_group=self.use_attn_tp_ngram,
+-        )
++        # Offloaded weights are loaded into pinned host storage below. Avoid
++        # allocating a full temporary table on CUDA before that replacement.
++        allocation_context = (
++            torch.device("meta")
++            if getattr(config, "ple_offload_embedding", False)
++            else nullcontext()
++        )
++        with allocation_context:
++            self.ngram_embedding = VocabParallelEmbedding(
++                padded_vocab_size,
++                self.head_dim_per_ngram,
++                params_dtype=(
++                    torch.float8_e4m3fn
++                    if (quant_config is not None and quant_config.get_name() == "fp8")
++                    or getattr(config, "ple_embedding_dtype", None) == "float8_e4m3fn"
++                    else torch.bfloat16
++                ),
++                output_dtype=torch.bfloat16,
++                use_attn_tp_group=self.use_attn_tp_ngram,
++            )
+         self.ngram_embedding.register_buffer(
+             "weight_scale", torch.ones(1, dtype=torch.bfloat16), persistent=True
+         )
