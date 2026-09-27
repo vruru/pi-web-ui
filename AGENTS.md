@@ -4,6 +4,10 @@
 > 详细文档按主题分拆在 `docs/` 目录下。
 > 修改本文件后，在 pi 中运行 `/reload` 生效。
 
+## 本机项目归属与同步范围
+
+本机维护的用户仓库是 `vruru/pi-web-ui`，同步前核对远端 URL；当前用户远端名为 `fork`，`origin` 指向上游 `xing-shuyin/pi-web-ui`，不能把用户日常同步授权用于上游推送或发布。只有本 Web 应用的源码、测试和必要文档属于本项目。独立模型后端、个人 MCP、通用模型实验及本机或服务器独立运维默认保存在仓库外，不因会话目录在此就纳入项目。
+
 ## 1. 项目是什么
 
 pi-web-ui 是 pi 编码智能体（`@earendil-works/pi-coding-agent` SDK）的 Web 聊天界面：
@@ -250,7 +254,7 @@ npm run desktop:dist # 本地打桌面安装包 → release/（gitignore；CI �
 
 ## 6. 发布流程
 
-> 详细文档见 `docs/release.md`
+> 以下是上游维护者的发布流程，只有用户明确授权对应仓库发布时才执行。用户 fork 的日常同步不运行 `npm publish`、发布标签或向 `origin` 推送；核对远端和任务范围后，仅向用户仓库推送本次项目提交。详细文档见 `docs/release.md`
 
 ```bash
 # 升版本 → 写 CHANGELOG（含 npm run changelog:i18n 自动记文案增量）→ 自检构建 → commit → push → 打 tag（Action 自动建 Release + 出桌面安装包）→ npm publish
@@ -335,11 +339,3 @@ _结构/流程变更时同步更新本文件及相关 `docs/` 文档。修改后
 ### 排队附件
 
 运行中发送的图片/文件必须和文字一起进入 SDK 的同一条 steer/followUp 用户消息，不能使用 nextTurn 附件缓冲（它不会随运行中的队列一起排空）。SDK clearQueue 只返回文本；删除条目重建队列时，使用每个 conversation 的 queueImages 保留图片，重复文本按队列位置处理。回归：tests/queued-attachments-test.mjs（本地多模态模拟服务，包含插队、排队及删除其他条目）、tests/unit/queued-attachments.test.ts。
-
-### 本地模型 MCP
-
-`bin/local-model-mcp.mjs` 是独立 stdio 桥接进程，供 Codex 派发固定模型的文字/图片任务；不依赖网页服务，不执行模型生成的命令。配置、生命周期、显式等待与验收见 `docs/local-model-mcp.md`；回归 `tests/local-model-mcp-test.mjs`。网络地址和凭据只放本机配置。
-
-普通 `submit_task` 每次独立接收必要材料，不自动复核或返工；主控收齐结果后执行必要验收。旧 `role` / `parent_task_id` 参数已移除，客户端应刷新工具目录。
-
-模型运行时覆盖、PLE 离线 FP8 转换、MTP 对照及 JSON 约束修复见 `deploy/pennyroyal/README.md`；实测结论见 `docs/swift-fp8-ple-results-2026-09-26.md`。源模型、转换产物、凭据和原始性能记录不入 Git。运行服务由 systemd 管理，停容器不能代替停服务单元。
