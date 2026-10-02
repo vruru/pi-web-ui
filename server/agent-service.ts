@@ -38,6 +38,7 @@ import {
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { WEBUI_SELF_UPDATE_ENABLED } from "./self-update-policy.js";
 import { BgServerTracker } from "./bg-servers.js";
 import { GenerationStatsTracker } from "./generation-stats.js";
 import { pendingCoreWork as pendingCoreWorkFor, withCoreWork } from "./core-work.js";
@@ -4832,6 +4833,17 @@ export class ClientSession {
 
 	/** Ask the npm registry for the latest pi-web-ui version and report it. */
 	async checkUpdate(): Promise<void> {
+		if (!WEBUI_SELF_UPDATE_ENABLED) {
+			this.emit({
+				type: "update_status",
+				current: ClientSession.currentAppVersion(),
+				latest: null,
+				latestPublishedAt: null,
+				upToDate: true,
+				selfUpdateEnabled: false,
+			});
+			return;
+		}
 		const current = ClientSession.currentAppVersion();
 		try {
 			// registry 遵从 <agentDir>/npm/.npmrc（与 `pi update` 经 npm 的行为一致，
@@ -4891,6 +4903,7 @@ export class ClientSession {
 		try {
 			const targets = collectTargets(this.agentDir, ClientSession.currentAppVersion(), undefined, {
 				projectCwd: this.conv?.cwd ?? this.cwd,
+				includeWebui: WEBUI_SELF_UPDATE_ENABLED,
 			});
 			const items = sortUpdateItems(
 				await checkAllUpdates(targets, undefined, () => this.getLang(), resolveNpmRegistry(this.agentDir)),
@@ -4900,17 +4913,19 @@ export class ClientSession {
 		} catch (err) {
 			// checkAll degrades per-item; only local enumeration blowing up lands
 			// here — still report a usable (webui-only) error item.
-			const items: UpdateItem[] = [
-				{
-					name: "pi-web-ui",
-					kind: "webui",
-					current: ClientSession.currentAppVersion(),
-					latest: null,
-					latestPublishedAt: null,
-					upToDate: false,
-					error: `检查更新失败：${(err as Error).message}`,
-				},
-			];
+			const items: UpdateItem[] = !WEBUI_SELF_UPDATE_ENABLED
+				? []
+				: [
+						{
+							name: "pi-web-ui",
+							kind: "webui",
+							current: ClientSession.currentAppVersion(),
+							latest: null,
+							latestPublishedAt: null,
+							upToDate: false,
+							error: `检查更新失败：${(err as Error).message}`,
+						},
+					];
 			this.emit({ type: "update_status_all", items });
 		}
 	}

@@ -6,7 +6,7 @@
 import { CHROME_PATH } from "./lib/chrome.mjs";
 import { freePort } from "./lib/port-utils.mjs";
 import { spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,30 @@ mkdirSync(join(base, "work"), { recursive: true });
 process.env.PI_WEB_PORT = String(PORT);
 process.env.PI_WEB_CWD = join(base, "work");
 process.env.PI_WEB_DATA_DIR = join(base, "data");
+process.env.PI_CODING_AGENT_DIR = join(base, "agent");
+process.env.PI_WEB_CORE_UPDATE_CHECK = "off";
+process.env.PI_WEB_PLUGIN_CATALOG_URL = "off";
+mkdirSync(join(base, "agent"), { recursive: true });
+writeFileSync(
+	join(base, "agent", "settings.json"),
+	JSON.stringify({ defaultProvider: "mock", defaultModel: "probe", extensions: [] }),
+);
+writeFileSync(join(base, "agent", "auth.json"), JSON.stringify({ mock: { type: "api_key", key: "local-test" } }));
+writeFileSync(
+	join(base, "agent", "models.json"),
+	JSON.stringify({
+		providers: {
+			mock: {
+				api: "openai-completions",
+				baseUrl: "http://127.0.0.1:9",
+				apiKey: "local-test",
+				models: [
+					{ id: "probe", name: "Probe", input: ["text"], reasoning: false, contextWindow: 32000, maxTokens: 1024 },
+				],
+			},
+		},
+	}),
+);
 
 // fileURLToPath（不是 URL.pathname）：Windows 上 ".pathname" 得到 "/E:/..."，
 // spawn 的脚本参数不存在 → ENOENT，测试根本起不来。
@@ -87,13 +111,22 @@ async function main() {
 	await page.goto(`http://localhost:${PORT}/`);
 	await page.waitForSelector(".topbar", { timeout: 60000 });
 
+	// A clean config may show the first-run setup; this test only checks updates.
+	try {
+		await page.locator(".modal-backdrop .modal-close").waitFor({ timeout: 3000 });
+		await page.locator(".modal-backdrop .modal-close").click();
+	} catch {
+		/* no first-run modal */
+	}
+	// Default layout keeps the version menu in the overflow panel.
+	await page.locator(".plugin-topbar-more > button").click();
 	// -- corner chip shows the running version -------------------------------
 	await page.waitForFunction(
-		(v) => [...document.querySelectorAll(".topbar-flow .chip")].some((el) => el.textContent.includes(`v${v}`)),
+		(v) => [...document.querySelectorAll("button.chip")].some((el) => el.textContent.includes(`v${v}`)),
 		pkgVersion,
 		{ timeout: 20000 },
 	);
-	const chip = page.locator(".topbar-flow .dropdown", {
+	const chip = page.locator(".dropdown", {
 		hasText: "v" + pkgVersion,
 	});
 	check("corner update chip shows v" + pkgVersion, (await chip.count()) > 0);
@@ -101,31 +134,53 @@ async function main() {
 	// -- open dropdown → registry check completes ----------------------------
 	await chip.locator("button.chip").click();
 	await page.waitForSelector(".dd-update", { timeout: 5000 });
-	await page.waitForFunction(
-		() => {
-			const rows = [...document.querySelectorAll(".dd-row")];
-			const latest = rows.find((r) => r.textContent.includes("最新版本"))?.textContent;
-			return latest && !latest.includes("检查中");
-		},
-		{ timeout: 20000 },
-	);
-	const rows = await page.locator(".dd-row").allTextContents();
-	const currentRow = rows.find((r) => r.includes("当前版本")) ?? "";
-	const latestRow = rows.find((r) => r.includes("最新版本")) ?? "";
-	check(`current version row shows v${pkgVersion}`, currentRow.includes(`v${pkgVersion}`));
-	check(
-		"latest version row resolved (version or error)",
-		/v\d+\.\d+\.\d+/.test(latestRow) || latestRow.includes("失败"),
-	);
-	const note = await page
-		.locator(".dd-note")
-		.first()
-		.textContent()
-		.catch(() => "");
-	check(
-		"status note shown (up-to-date / new version / error)",
-		note.includes("最新") || note.includes("失败") || note.includes("版本"),
-	);
+	const customBuild =
+		JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")).piWebUiDistribution?.selfUpdate === false;
+	if (customBuild) {
+		await page.getByText("定制版网页，通过仓库构建包更新。核心和插件可在下方单独更新。").waitFor();
+		check(
+			"custom build explains its update source",
+			await page
+				.locator(".dd-update")
+				.textContent()
+				.then((t) => t.includes("定制版")),
+		);
+		check(
+			"custom build has no public npm update action",
+			(await page.getByRole("button", { name: "在终端中更新", exact: true }).count()) === 0,
+		);
+		check(
+			"custom build does not claim to be the latest public release",
+			!(await page
+				.locator(".dd-update")
+				.textContent()
+				.then((t) => t.includes("已是最新版本"))),
+		);
+		check(
+			"current version remains visible",
+			await page
+				.locator(".dd-update")
+				.textContent()
+				.then((t) => t.includes(`v${pkgVersion}`)),
+		);
+	} else {
+		await page.waitForFunction(
+			() => {
+				const latest = [...document.querySelectorAll(".dd-row")].find((r) =>
+					r.textContent.includes("最新版本"),
+				)?.textContent;
+				return latest && !latest.includes("检查中");
+			},
+			{ timeout: 20000 },
+		);
+		const rows = await page.locator(".dd-row").allTextContents();
+		check(
+			"current version remains visible",
+			rows.some((r) => r.includes(`v${pkgVersion}`)),
+		);
+		const latest = rows.find((r) => r.includes("最新版本")) ?? "";
+		check("latest version resolved", /v\d+\.\d+\.\d+/.test(latest) || latest.includes("失败"));
+	}
 	check("no page errors", consoleErrors.length === 0);
 
 	await browser.close();

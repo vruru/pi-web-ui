@@ -264,6 +264,7 @@
 		"updateJustPublished": "v{version} は公開されたばかりで、npm のキャッシュがまだ同期されていない可能性があります——新しいバージョンが検出されない場合は、しばらくしてから再度確認してください",
 		"updateNow": "ターミナルで更新します",
 		"updateTabTitle": "pi-web-ui の更新",
+		"updateDeploymentOnly": "カスタム Web 版はリポジトリからのビルドで更新します。コアとプラグインは以下で個別に更新できます。",
 		"updateTerminalHint": "クリックすると、表示中のターミナルで npm i -g pi-web-ui@latest を実行します；完了後にサービスを再起動すると反映されます（pi-web-ui server restart）。",
 		"updateDesktopNote": "デスクトップ版は npm グローバルインストールを使いません。サーバーはアプリ内に同梱されているため、上記のターミナルコマンドは効果がありません。以下のアプリ内更新を使うか、ダウンロードページから新しいインストーラーを取得してください。",
 		"updateDesktopCheck": "デスクトップ更新を確認",

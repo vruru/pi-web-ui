@@ -264,6 +264,7 @@
 		"updateJustPublished": "La v{version} vient de paraître, le cache npm n'est peut-être pas encore synchronisé — si elle n'est pas détectée, réessayez plus tard",
 		"updateNow": "Mettre à jour dans le terminal",
 		"updateTabTitle": "Mettre à jour pi-web-ui",
+		"updateDeploymentOnly": "Version web personnalisée : mise à jour via une compilation du dépôt. Le noyau et les plugins peuvent être mis à jour séparément ci-dessous.",
 		"updateTerminalHint": "Un clic lancera npm i -g pi-web-ui@latest dans le terminal visible ; redémarrez ensuite le service (pi-web-ui server restart) pour appliquer.",
 		"updateDesktopNote": "L'app desktop n'utilise pas l'installation npm globale : son serveur est embarqué dans le paquet, la commande terminal ci-dessus est donc sans effet. Utilisez la mise à jour intégrée ci-dessous, ou récupérez un nouvel installeur sur la page de téléchargement.",
 		"updateDesktopCheck": "Vérifier les mises à jour desktop",

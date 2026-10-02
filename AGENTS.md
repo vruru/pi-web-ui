@@ -40,6 +40,7 @@ pi-web-ui/
 │   ├── index.ts                # 入口：express 静态 + /ws 端点、消息分发、心跳、优雅停机
 │   ├── protocol.ts             # ★ 唯一事实源：wire 协议类型（client↔server 消息）
 │   ├── agent-service.ts        # 核心：ClientSession（每客户端一个会话组，可并行多个对话）+ AgentService
+│   ├── self-update-policy.ts   # fork 包自更新来源保护：package.json 标记禁用官方 npm 覆盖，核心/插件检查保留；见 docs/deployment.md
 │   ├── core-update.ts          # 核心版本检查与独立更新进程；core-update-worker.ts 安装/备份/恢复/重启，core-update-admission.ts 控制升级期间新任务
 │   ├── ui-settings.ts          # 全局界面缩放：ui-settings.json 持久化，跨浏览器同步
 │   ├── generation-stats.ts     # Pi 每条 assistant 消息的生成计时：首输出起算，usage 定稿，供常驻底栏 tok/s

@@ -20,6 +20,8 @@
 
 ### Fixed
 
+- 定制 fork 的网页更新明确区分来源：不再用官方 npm 包覆盖本地功能及专用启动器；核心和插件更新保留，支持独立安装目录避免全局安装破坏运行服务。
+
 - 修复运行中插队/排队消息的附件与文字分离：图片、文件内容及引用随同一条消息投递；移除其他排队消息并重建队列时保留图片数据。
 
 - 已完成子代理保留结果但自动释放并发名额；初始化也预占名额，失败归还。子代理默认跟随派发者模型，忽略模板和旧的子代理默认模型，只有用户明确要求时才允许工具指定其他模型；模型不可用时不再静默换模型。
@@ -52,9 +54,9 @@
 <!-- auto-i18n:start -->
 ### i18n
 
-- 前端新增 key（26）：`coreUpdateTitle`、`coreUpdateRunningVersion`、`coreUpdateLatestVersion`、`coreUpdateUpdating`、`coreUpdateStarting`、`coreUpdateInstalling`、`coreUpdateRestarting`、`coreUpdateSucceeded`、`coreUpdateReconnecting`、`coreUpdateFailed`、`coreUpdateChecking`、`coreUpdateAvailable`、`coreUpdateCurrent`、`coreUpdateNotChecked`、`coreUpdateCheckFailed`、`coreUpdateHint`、`coreUpdateCheckedAt`、`coreUpdateCheck`、`coreUpdateInstall`、`generationRate`、`generationRateTip`、`elsewhereActions`、`finishedSubagents`、`uiZoomTitle`、`uiZoomHint`、`uiZoomCurrent`
-- 前端中文变更（2）：`tps`、`subagentDefaultModelHint`
-- 前端英文变更（2）：`tps`、`subagentDefaultModelHint`
+- 前端新增 key（29）：`coreUpdateTitle`、`coreUpdateRunningVersion`、`coreUpdateLatestVersion`、`coreUpdateUpdating`、`coreUpdateStarting`、`coreUpdateInstalling`、`coreUpdateRestarting`、`coreUpdateSucceeded`、`coreUpdateReconnecting`、`coreUpdateFailed`、`coreUpdateChecking`、`coreUpdateAvailable`、`coreUpdateCurrent`、`coreUpdateNotChecked`、`coreUpdateCheckFailed`、`coreUpdateHint`、`coreUpdateCheckedAt`、`coreUpdateCheck`、`coreUpdateInstall`、`generationRate`、`generationRateTip`、`bgScheduledHint`、`bgTaskStopProcesses`、`elsewhereActions`、`finishedSubagents`、`updateDeploymentOnly`、`uiZoomTitle`、`uiZoomHint`、`uiZoomCurrent`
+- 前端中文变更（4）：`tps`、`bgTasksTip`、`bgTasksDesc`、`subagentDefaultModelHint`
+- 前端英文变更（4）：`tps`、`bgTasksTip`、`bgTasksDesc`、`subagentDefaultModelHint`
 <!-- auto-i18n:end -->
 
 ## [0.94.1] — 2026-09-22

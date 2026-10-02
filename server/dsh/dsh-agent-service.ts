@@ -25,6 +25,7 @@
  * BgServerTracker（后台任务）、TerminalManager（PTY）、uploads.ts。
  */
 
+import { WEBUI_SELF_UPDATE_ENABLED } from "../self-update-policy.js";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -3949,6 +3950,17 @@ export class DshClientSession {
 	}
 
 	async checkUpdate(): Promise<void> {
+		if (!WEBUI_SELF_UPDATE_ENABLED) {
+			this.emit({
+				type: "update_status",
+				current: DshClientSession.currentAppVersion(),
+				latest: null,
+				latestPublishedAt: null,
+				upToDate: true,
+				selfUpdateEnabled: false,
+			});
+			return;
+		}
 		try {
 			// registry 遵从 ~/.pi/agent/npm/.npmrc（与 `pi update` 经 npm 的行为一致，issue #151）
 			const npmRegistry = resolveNpmRegistry(join(homedir(), ".pi", "agent"));
@@ -3983,6 +3995,7 @@ export class DshClientSession {
 		try {
 			const targets = collectTargets(join(homedir(), ".pi", "agent"), DshClientSession.currentAppVersion(), undefined, {
 				projectCwd: this.cwd,
+				includeWebui: WEBUI_SELF_UPDATE_ENABLED,
 			});
 			const items = await checkAllUpdates(
 				targets,

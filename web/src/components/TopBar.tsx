@@ -403,8 +403,9 @@ export function TopBar({
 	/** Run `npm i -g pi-web-ui@latest` in a visible terminal tab (SCM-style):
 	 *  reuse the tab with the same title, otherwise create one; switch to the
 	 *  terminal view so the user watches the install live. */
+	const selfUpdateEnabled = chat.update?.selfUpdateEnabled !== false;
 	const runUpdate = () => {
-		if (!chat.ready) return;
+		if (!chat.ready || !selfUpdateEnabled) return;
 		const title = t("updateTabTitle");
 		const cmd: CommandDef = {
 			name: title,
@@ -687,23 +688,28 @@ export function TopBar({
 					<span>{t("currentVersion")}</span>
 					<b>v{chat.update?.current ?? "…"}</b>
 				</div>
-				<div className="dd-row">
-					<span>{t("latestVersion")}</span>
-					<b>
-						{chat.update === null
-							? t("checkingUpdate")
-							: chat.update.error
-								? chat.update.error
-								: chat.update.latest
-									? `v${chat.update.latest}`
-									: t("checkingUpdate")}
-					</b>
-				</div>
-				{chat.update && chat.update.upToDate && <div className="dd-note ok">{t("upToDate")}</div>}
-				{chat.update && !chat.update.upToDate && chat.update.latest && (
+				{!selfUpdateEnabled ? (
+					<div className="dd-note">{t("updateDeploymentOnly")}</div>
+				) : (
+					<div className="dd-row">
+						<span>{t("latestVersion")}</span>
+						<b>
+							{chat.update === null
+								? t("checkingUpdate")
+								: chat.update.error
+									? chat.update.error
+									: chat.update.latest
+										? `v${chat.update.latest}`
+										: t("checkingUpdate")}
+						</b>
+					</div>
+				)}
+				{selfUpdateEnabled && chat.update && chat.update.upToDate && <div className="dd-note ok">{t("upToDate")}</div>}
+				{selfUpdateEnabled && chat.update && !chat.update.upToDate && chat.update.latest && (
 					<div className="dd-note warn">{t("updateAvailable", { version: chat.update.latest })}</div>
 				)}
-				{chat.update?.latestPublishedAt &&
+				{selfUpdateEnabled &&
+					chat.update?.latestPublishedAt &&
 					Date.now() - new Date(chat.update.latestPublishedAt).getTime() < 30 * 60_000 && (
 						<div className="dd-note warn">
 							{t("updateJustPublished", {
@@ -712,10 +718,10 @@ export function TopBar({
 						</div>
 					)}
 				{/* 浏览器：npm 终端命令；桌面壳：npm 对包内服务无效，走应用内更新 */}
-				{chat.update && !chat.update.upToDate && chat.update.latest && !inDesktopShell && (
+				{selfUpdateEnabled && chat.update && !chat.update.upToDate && chat.update.latest && !inDesktopShell && (
 					<div className="dd-note">{t("updateTerminalHint")}</div>
 				)}
-				{chat.update && !chat.update.upToDate && chat.update.latest && inDesktopShell && (
+				{selfUpdateEnabled && chat.update && !chat.update.upToDate && chat.update.latest && inDesktopShell && (
 					<div className="dd-note">{t("updateDesktopNote")}</div>
 				)}
 			</div>
@@ -723,12 +729,17 @@ export function TopBar({
 				<button type="button" className="dd-refresh" onClick={() => appSend({ type: "check_update" })}>
 					{chat.update === null ? t("checkingUpdate") : t("checkUpdate")}
 				</button>
-				{chat.update && !chat.update.upToDate && chat.update.latest && !inDesktopShell && (
+				{selfUpdateEnabled && chat.update && !chat.update.upToDate && chat.update.latest && !inDesktopShell && (
 					<button type="button" className="dd-refresh accent" onClick={runUpdate}>
 						{t("updateNow")}
 					</button>
 				)}
-				{chat.update && !chat.update.upToDate && chat.update.latest && inDesktopShell && renderDesktopUpdater()}
+				{selfUpdateEnabled &&
+					chat.update &&
+					!chat.update.upToDate &&
+					chat.update.latest &&
+					inDesktopShell &&
+					renderDesktopUpdater()}
 				{service && (
 					<button
 						type="button"
@@ -1044,7 +1055,7 @@ export function TopBar({
 					<>
 						<FiDownload />
 						<span className="chip-sub">v{chat.update?.current ?? "…"}</span>
-						{chat.update && !chat.update.upToDate && (
+						{selfUpdateEnabled && chat.update && !chat.update.upToDate && (
 							<span
 								className="update-dot"
 								title={t("updateAvailable", {

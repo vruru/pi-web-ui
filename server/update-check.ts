@@ -495,9 +495,10 @@ export function collectTargets(
 	agentDir: string,
 	webuiVersion: string,
 	probePiCore: () => string | null = defaultProbePiCore,
-	opts?: { projectCwd?: string },
+	opts?: { projectCwd?: string; includeWebui?: boolean },
 ): LocalPackage[] {
-	const targets: LocalPackage[] = [{ name: "pi-web-ui", version: webuiVersion, kind: "webui" }];
+	const targets: LocalPackage[] =
+		opts?.includeWebui === false ? [] : [{ name: "pi-web-ui", version: webuiVersion, kind: "webui" }];
 	const coreVersion = probePiCore() ?? readVendoredPiCore(agentDir);
 	if (coreVersion) {
 		targets.push({

@@ -178,3 +178,9 @@ server {
   结果一致，两种方式可混用）。
 - 插件目录（`<dataDir>/plugins/`）不需要在 nginx 单独配置——客户端请求
   `/pi/plugins/...`，剥离前缀后由后端标准路由处理。
+
+### 定制分支的更新来源
+
+用户 fork 的 `package.json` 带 `piWebUiDistribution.selfUpdate: false`。该安装包不检查或提供官方 npm `pi-web-ui` 覆盖更新；顶栏说明须从当前仓库的构建包更新，核心和扩展的更新仍可用。不要删除该标记来消除提示，否则会用上游包覆盖 fork 的启动器和功能。官方无标记包保持原更新行为；策略所需的包信息缺失或无法解析时安全禁用网页包更新。
+
+本机定制包宜用独立 npm prefix 安装（例如 `~/.local/lib/pi-web-ui-fork`），并让服务及用户命令指向这个安装包，避免全局 `npm i -g pi-web-ui@latest` 覆盖运行文件。迁移时保留服务环境、端口、数据目录、SDK 来源和旧包备份；先在临时端口验证，再替换服务路径。独立 prefix 置于全局 SDK 的上级目录下时，`PI_WEB_SDK=global` 仍能通过祖先目录找到全局 Pi 核心。

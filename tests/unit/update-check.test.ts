@@ -250,6 +250,18 @@ describe("collectTargets", () => {
 		}
 	});
 
+	it("custom distribution excludes public webui updates while keeping core and extensions", () => {
+		const dir = makeAgentDir({ foo: "^1.0.0" }, [["foo", "foo", "1.0.0"]]);
+		try {
+			expect(collectTargets(dir, "0.48.0", () => "1.0.0", { includeWebui: false })).toEqual([
+				{ name: CORE, version: "1.0.0", kind: "pi-core" },
+				{ name: "foo", version: "1.0.0", kind: "package" },
+			]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("probe miss + no vendored copy → no pi-core row, rest unchanged", () => {
 		const dir = makeAgentDir({ foo: "^1.0.0" }, [["foo", "foo", "1.0.0"]]);
 		try {

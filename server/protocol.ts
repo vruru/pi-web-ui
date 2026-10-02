@@ -2458,6 +2458,8 @@ export type ServerMessage =
 			 * when it was just published and registry caches may lag. */
 			latestPublishedAt: string | null;
 			upToDate: boolean;
+			/** False for a custom distribution that must not be replaced by the public npm package. */
+			selfUpdateEnabled?: boolean;
 			error?: string;
 	  }
 	/** Result of a check_updates_all run — one item per checked component

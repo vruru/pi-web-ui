@@ -264,6 +264,7 @@
 		"updateJustPublished": "v{version}이(가) 막 출시돼서 npm 캐시가 아직 동기화되지 않았을 수 있어요. 새 버전이 감지되지 않으면 잠시 후 다시 확인해 주세요",
 		"updateNow": "터미널에서 업데이트하기",
 		"updateTabTitle": "pi-web-ui 업데이트",
+		"updateDeploymentOnly": "사용자 지정 웹 버전은 저장소의 빌드로 업데이트합니다. 코어와 플러그인은 아래에서 별도로 업데이트할 수 있습니다.",
 		"updateTerminalHint": "클릭하면 보이는 터미널에서 npm i -g pi-web-ui@latest 명령을 실행해요. 완료된 후 서비스를 다시 시작하면 적용돼요(pi-web-ui server restart).",
 		"updateDesktopNote": "데스크톱 앱은 npm 전역 설치를 사용하지 않습니다. 서버가 앱 안에 내장되어 있어 위 터미널 명령은 효과가 없습니다. 아래 인앱 업데이트를 사용하거나 다운로드 페이지에서 새 설치 프로그램을 받으세요.",
 		"updateDesktopCheck": "데스크톱 업데이트 확인",

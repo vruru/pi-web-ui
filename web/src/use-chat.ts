@@ -212,6 +212,7 @@ export interface ChatState {
 		latest: string | null;
 		latestPublishedAt: string | null;
 		upToDate: boolean;
+		selfUpdateEnabled?: boolean;
 		error?: string;
 	} | null;
 	/** All-source update check (webui + pi core + installed packages). */
@@ -485,6 +486,7 @@ type Action =
 				latest: string | null;
 				latestPublishedAt: string | null;
 				upToDate: boolean;
+				selfUpdateEnabled?: boolean;
 				error?: string;
 			};
 	  }

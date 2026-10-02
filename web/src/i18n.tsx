@@ -297,6 +297,7 @@ export const zh = {
 	updateJustPublished: "v{version} 刚刚发布，npm 缓存可能尚未同步——若未检测到新版本，请稍后重新检查",
 	updateNow: "在终端中更新",
 	updateTabTitle: "更新 pi-web-ui",
+	updateDeploymentOnly: "定制版网页，通过仓库构建包更新。核心和插件可在下方单独更新。",
 	updateTerminalHint:
 		"点击后会在可见终端中运行 npm i -g pi-web-ui@latest；完成后重启服务生效（pi-web-ui server restart）。",
 	/* 桌面壳应用内更新（issue #180）：包内服务不受 npm 全局包影响 */
@@ -1880,6 +1881,8 @@ const en: Record<keyof typeof zh, string> = {
 		"v{version} was just published — npm cache may lag; if the new version isn't detected yet, re-check in a moment",
 	updateNow: "Update in terminal",
 	updateTabTitle: "Update pi-web-ui",
+	updateDeploymentOnly:
+		"Custom web build: update using a build from its repository. Core and plugins can be updated separately below.",
 	updateTerminalHint:
 		"Clicking runs npm i -g pi-web-ui@latest in a visible terminal; restart the service afterwards to take effect (pi-web-ui server restart).",
 	/* In-app desktop updates (issue #180): the bundled server ignores the global npm install */
