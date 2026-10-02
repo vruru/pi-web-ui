@@ -46,13 +46,15 @@ export class CoreUpdateAdmission {
 		this.sync();
 		const state = this.manager.getState();
 		const busyReason =
-			this.service.activeConversations() > 0 || this.service.pendingMessages() > 0 || this.pendingWork() > 0
+			this.service.activeConversations() > 0 || this.service.pendingMessages() > 0
 				? "有对话正在运行或消息排队，请结束后再更新。 / Wait for active conversations and queued messages to finish."
-				: this.pluginBusy()
-					? "插件安装正在进行，请结束后再更新。 / Wait for the plugin installation to finish."
-					: this.service.isQuiesced() && !this.ownsGate
-						? "服务已暂停接收新任务，请恢复服务后再更新。 / Resume the drained service before updating."
-						: undefined;
+				: this.pendingWork() > 0
+					? "有请求尚未完成（可能正在等待对话框确认），请完成或取消后再更新。 / A request is still pending (possibly waiting for a dialog); finish or cancel it before updating."
+					: this.pluginBusy()
+						? "插件安装正在进行，请结束后再更新。 / Wait for the plugin installation to finish."
+						: this.service.isQuiesced() && !this.ownsGate
+							? "服务已暂停接收新任务，请恢复服务后再更新。 / Resume the drained service before updating."
+							: undefined;
 		return { ...state, canUpdate: state.canUpdate && !busyReason && !this.starting, busyReason };
 	}
 

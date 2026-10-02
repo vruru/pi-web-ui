@@ -60,6 +60,24 @@ describe("accepted SDK work prevents core replacement before a stream exists", (
 		await expect(prompt).rejects.toThrow("image could not be read");
 		expect(service.pendingCoreWork()).toBe(0);
 	});
+	it("hands prompt admission to the SDK stream even when the prompt promise remains pending", async () => {
+		const completion = deferred<void>();
+		const client = Object.create(ClientSession.prototype) as ClientSession;
+		let accepted!: () => void;
+		Object.assign(client, {
+			promptImpl: vi.fn((_text: string, _attachments: unknown, _queue: boolean, release: () => void) => {
+				accepted = release;
+				return completion.promise;
+			}),
+		});
+		const prompt = client.prompt("hello");
+		expect(client.pendingCoreWork()).toBe(1);
+		accepted();
+		expect(client.pendingCoreWork()).toBe(0);
+		completion.resolve();
+		await prompt;
+		expect(client.pendingCoreWork()).toBe(0);
+	});
 	it("counts attach before session listing and creation, including a rejected initialization", async () => {
 		const initialization = deferred<ClientSession>();
 		const service = serviceWith();

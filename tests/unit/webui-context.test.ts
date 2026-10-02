@@ -12,6 +12,10 @@ function wrapLikeSdk(ui: WebUIContext) {
 }
 
 describe("WebUIContext SDK wrap", () => {
+	it("rejects unsupported custom dialogs instead of leaving extension commands pending", async () => {
+		const ui = new WebUIContext(() => {});
+		await expect(ui.custom(() => {})).rejects.toThrow("not supported in the web UI");
+	});
 	it("setStatus and notify remain functions after object spread", () => {
 		const ui = new WebUIContext(() => {});
 		const wrapped = wrapLikeSdk(ui);

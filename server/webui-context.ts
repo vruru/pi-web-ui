@@ -287,7 +287,8 @@ export class WebUIContext {
 	setFooter = (): void => {};
 	setHeader = (): void => {};
 	setTitle = (): void => {};
-	custom = <T>(_factory: unknown, _done?: unknown): Promise<T> => new Promise<T>(() => {});
+	custom = <T>(_factory: unknown, _done?: unknown): Promise<T> =>
+		Promise.reject(new Error("ui.custom() is not supported in the web UI"));
 	pasteToEditor = (): void => {};
 	setEditorText = (): void => {};
 	getEditorText = (): string => "";

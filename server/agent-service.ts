@@ -5784,8 +5784,8 @@ export class ClientSession {
 		this.emit(msg);
 	}
 
-	async prompt(...args: Parameters<ClientSession["promptImpl"]>): ReturnType<ClientSession["promptImpl"]> {
-		return withCoreWork(this, () => this.promptImpl(...args));
+	async prompt(text: string, attachments?: Parameters<ClientSession["promptImpl"]>[1], queue?: boolean): Promise<void> {
+		return withCoreWork(this, (release) => this.promptImpl(text, attachments, queue, release));
 	}
 
 	private async promptImpl(
@@ -5809,6 +5809,7 @@ export class ClientSession {
 		 * after the current turn settles, skipping remaining planned tool calls.
 		 */
 		queue = false,
+		sdkAccepted?: () => void,
 	): Promise<void> {
 		// Captured at the START (before any await): the conversation being
 		// addressed by this prompt. See the naming block below — a concurrent
@@ -6133,14 +6134,22 @@ ${DANGLING_TOOL_RESULT_TEXT_EN}`,
 				const payload = { text: queuedText, images };
 				conv.queueImages[kind].push(payload);
 				try {
-					await s.prompt(queuedText, { images, streamingBehavior: kind, expandPromptTemplates: false });
+					await s.prompt(queuedText, {
+						images,
+						streamingBehavior: kind,
+						expandPromptTemplates: false,
+						preflightResult: () => sdkAccepted?.(),
+					});
 				} catch (error) {
 					conv.queueImages[kind] = conv.queueImages[kind].filter((p) => p !== payload);
 					throw error;
 				}
 			} else {
 				for (const aside of asides) await s.sendCustomMessage(aside.message, { deliverAs: "nextTurn" });
-				await s.prompt(text, s.isStreaming ? { streamingBehavior: queue ? "followUp" : "steer" } : undefined);
+				await s.prompt(text, {
+					...(s.isStreaming ? { streamingBehavior: queue ? "followUp" : "steer" } : {}),
+					preflightResult: () => sdkAccepted?.(),
+				});
 			}
 		} catch (err) {
 			this.emit({

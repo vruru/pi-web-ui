@@ -14,7 +14,7 @@ import type { CoreUpdateState } from "../../server/protocol";
 
 const send = vi.hoisted(() => vi.fn());
 vi.mock("../../web/src/app-globals", () => ({ appSend: send }));
-vi.mock("../../web/src/i18n", () => ({ useT: () => (key: string) => key }));
+vi.mock("../../web/src/i18n", () => ({ useI18n: () => ({ locale: "zh", t: (key: string) => key }) }));
 let root: Root;
 let container: HTMLDivElement;
 const initial: CoreUpdateState = {
@@ -121,6 +121,7 @@ describe("core updater footer", () => {
 			receive(patch);
 			expect(document.querySelector<HTMLButtonElement>(".core-update-actions .primary")?.disabled).toBe(true);
 		}
+		expect(document.querySelector('[role="status"].core-update-progress')?.textContent).toBe("Working");
 		receive({});
 		render(false);
 		expect(document.querySelector<HTMLButtonElement>(".core-update-actions .primary")?.disabled).toBe(true);

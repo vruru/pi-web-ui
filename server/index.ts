@@ -1727,7 +1727,20 @@ service.onClientCwdChanged = (cwd, roots) => {
 
 // Pi core installation runs in an independent process; the browser and this
 // server are observers. Persisted worker state survives the service restart.
-const coreWork = new CoreUpdateWorkTracker();
+const coreWork = new CoreUpdateWorkTracker(
+	new Set([
+		"setModel",
+		"cycleModel",
+		"setThinking",
+		"cycleThinking",
+		"switchConversation",
+		"dismissConversation",
+		"setGoal",
+		"startGoalWizard",
+		"reloadExtensions",
+		"applyPreset",
+	]),
+);
 let coreAdmission: CoreUpdateAdmission | undefined;
 let lastCoreState = "";
 function coreUpdateState(): CoreUpdateState {

@@ -4,7 +4,7 @@ import { FiArrowUpCircle, FiRefreshCw, FiX } from "react-icons/fi";
 import { appSend } from "../app-globals";
 import { appUrl } from "../base-url";
 import { withToken } from "../auth-token";
-import { useT } from "../i18n";
+import { useI18n } from "../i18n";
 import { useFloatingPanel } from "../use-floating-panel";
 import {
 	claimCoreUpdateNotice,
@@ -23,7 +23,7 @@ export function CoreUpdateStatus({
 	status: string;
 	allowAutoNotice?: boolean;
 }) {
-	const t = useT();
+	const { locale, t } = useI18n();
 	const state = useCoreUpdateState();
 	const [open, setOpen] = useState(false);
 	const [requested, setRequested] = useState(false);
@@ -102,6 +102,8 @@ export function CoreUpdateStatus({
 					? t("coreUpdateReconnecting")
 					: null;
 	const check = () => appSend({ type: "check_core_update", force: true });
+	const busyReason = state?.busyReason?.split(" / ");
+	const visibleBusyReason = locale === "zh" ? busyReason?.[0] : (busyReason?.[1] ?? busyReason?.[0]);
 	return (
 		<>
 			<button
@@ -163,6 +165,11 @@ export function CoreUpdateStatus({
 						{state?.checkError && (
 							<p className="core-update-error">
 								{t("coreUpdateCheckFailed")}: {state.checkError}
+							</p>
+						)}
+						{visibleBusyReason && state?.updateAvailable && !running && (
+							<p className="core-update-progress" role="status" title={state?.busyReason}>
+								{visibleBusyReason}
 							</p>
 						)}
 						<p className="core-update-checked">
