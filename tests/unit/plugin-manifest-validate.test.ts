@@ -39,6 +39,23 @@ describe("P1-6 manifest 校验失败即拒", () => {
 		expect(v.errors.some((e) => e.path === "permissions[0]")).toBe(true);
 	});
 
+	it("ignores the historical terminal declaration without granting a capability", () => {
+		const v = validatePluginManifest(
+			{ permissions: ["fs:workspace+ssh", "net:ssh", "terminal", "tools"] },
+			"vscode-editor",
+		);
+		expect(v.errors).toEqual([]);
+		expect(v.warnings).toHaveLength(1);
+		expect(v.warnings[0].messageEn).toBe('capability "terminal" is deprecated and ignored');
+		expect(v.permissions).toEqual(["fs:workspace+ssh", "net:ssh", "tools"]);
+		expect(v.strict).toBe(true);
+	});
+	it.each(["termnal", "terminal:exec"])("still refuses unknown capability %s", (capability) => {
+		const v = validatePluginManifest({ permissions: [capability] }, "x");
+		expect(v.errors).toHaveLength(1);
+		expect(v.permissions).toEqual([]);
+	});
+
 	it("已知能力族全过", () => {
 		for (const f of KNOWN_PERMISSION_FAMILIES) {
 			const v = validatePluginManifest({ permissions: [f] }, "x");

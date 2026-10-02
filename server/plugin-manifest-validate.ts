@@ -45,6 +45,9 @@ export const KNOWN_PERMISSION_FAMILIES: ReadonlySet<string> = new Set([
 	"dom:anchor",
 ]);
 
+/** Historical declarations that never granted a host capability. Keep upgraded installs loadable. */
+export const LEGACY_IGNORED_PERMISSIONS: ReadonlySet<string> = new Set(["terminal"]);
+
 function isRecord(v: unknown): v is Record<string, unknown> {
 	return Boolean(v) && typeof v === "object" && !Array.isArray(v);
 }
@@ -134,6 +137,15 @@ export function validatePluginManifest(raw: unknown, dirName: string): ManifestV
 				continue;
 			}
 			const v = p.trim();
+			if (LEGACY_IGNORED_PERMISSIONS.has(v)) {
+				warnings.push({
+					path,
+					message: `能力「${v}」已废弃，已忽略`,
+					messageEn: `capability "${v}" is deprecated and ignored`,
+				});
+				continue;
+			}
+
 			if (!isKnownPermission(v)) {
 				// 未知族：拼写错了就永远授权失败，与静默丢弃同源 —— 直接拒。
 				errors.push({
