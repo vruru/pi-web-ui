@@ -464,6 +464,13 @@ const GLYPHS: Record<string, string> = {
 	database: "▥",
 	message: "✉",
 	activity: "〜",
+	markdown: "📄",
+	text: "≡",
+	image: "🖼",
+	branch: "⚚",
+	undo: "↺",
+	pin: "📌",
+	volume: "🔊",
 };
 
 /**

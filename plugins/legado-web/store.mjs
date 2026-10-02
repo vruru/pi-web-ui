@@ -21,6 +21,9 @@ export function createStore({ dir, legacyDir }) {
 	const ensure = () => {
 		mkdirSync(dir, { recursive: true });
 	};
+	// The store dir is referenced as a chat cwd (e.g. "AI fix source") before any
+	// write happens; create it eagerly so stat-based cwd switches never hit ENOENT.
+	ensure();
 
 	/** 键文件：新目录优先，旧插件目录兜底（读到就搬到新目录）。 */
 	const fileOf = (key) => {

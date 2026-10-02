@@ -203,10 +203,12 @@ export class DshRuntime {
 			throw new DshTransportError(bilingual(`launcher missing: ${this.launcher}`, `launcher 不存在: ${this.launcher}`));
 		}
 		if (!existsSync(this.jsonrpcEntry)) {
+			// 不写死版本号：依赖版本会随 package.json 升（见 docs/dsh-engine.md §1
+			// 「版本族」），写死的提示迟早骗人。报当前实际解析到的路径即可。
 			throw new DshTransportError(
 				bilingual(
-					`dsh-sdk-jsonrpc-server is not installed (missing ${this.jsonrpcEntry}). Run npm i @deepseek-ai/dsh-sdk-jsonrpc-server@0.1.1-rc.2 first`,
-					`dsh-sdk-jsonrpc-server 未安装（缺 ${this.jsonrpcEntry}）。请先 npm i @deepseek-ai/dsh-sdk-jsonrpc-server@0.1.1-rc.2`,
+					`dsh-sdk-jsonrpc-server is not installed (missing ${this.jsonrpcEntry}). Run npm i (see docs/dsh-engine.md for the pinned version family) first`,
+					`dsh-sdk-jsonrpc-server 未安装（缺 ${this.jsonrpcEntry}）。请先 npm i（版本族见 docs/dsh-engine.md）`,
 				),
 			);
 		}

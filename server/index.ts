@@ -16,6 +16,9 @@
  *   all share one conversation list per project.
  *   PI_CODING_AGENT_DIR  pi config dir (auth/models/skills) — passed to the SDK
  */
+// MUST be imported before the SDK is loaded so on-disk patches apply cleanly.
+import "./patch-remote-catalog.js";
+import "./patch-turn-end-boundary.js";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer, request as proxyRequest, type IncomingMessage } from "node:http";
@@ -23,7 +26,7 @@ import { createConnection } from "node:net";
 import { basename, delimiter, dirname, join, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import express from "express";
 import compression from "compression";
 import { WebSocket, WebSocketServer } from "ws";
@@ -32,7 +35,9 @@ import { sdkCopies, sdkOriginNote } from "./sdk-origin.js";
 import { PROTOCOL_VERSION } from "./protocol-version.js";
 import { AgentService, workspacePath, QuiesceRejectedError } from "./agent-service.js";
 import { WS_MAX_PAYLOAD_BYTES, isAbsoluteWirePath, wireToAbs } from "./files-service.js";
+import { httpHostAllowed } from "./host-guard.js";
 import { registerFileTransferRoutes } from "./file-transfer-routes.js";
+import { initAttachmentStore, readAttachment } from "./attachment-store.js";
 import { isAudioFile, previewKind } from "./text-sniff.js";
 import { startControlServer } from "./control-socket.js";
 import { scheduleUploadCleanup } from "./uploads.js";
@@ -42,6 +47,8 @@ import { isManaged, managedRefusal } from "./managed.js";
 import { launchOrigin, toServiceInfo } from "./launch-origin.js";
 import { parseTabs, tabsRefusal } from "./tabs.js";
 import { recordUnknownWsType } from "./ws-unknown-types.js";
+import { validateClientId } from "./ws-client-id.js";
+import { PendingCommandQueue } from "./ws-pending-queue.js";
 import {
 	installPack,
 	isKnownPack,
@@ -58,7 +65,8 @@ import {
 	type PluginConversationSnapshot,
 	type PluginRunEvent,
 } from "./plugins.js";
-import { PluginInstaller } from "./plugin-installer.js";
+import type { ToolPostRequest, ToolPreRequest } from "./plugin-tool-guard.js";
+import { buildPluginJobArgs, confirmPluginInstall, inspectInstallSpec, PluginInstaller } from "./plugin-installer.js";
 import { createPluginUpdateChecker } from "./plugin-updater.js";
 import { syncPluginCatalog } from "./plugin-catalog-sync.js";
 import type { ServerLang } from "./i18n.js";
@@ -71,11 +79,13 @@ import { CoreUpdateAdmission } from "./core-update-admission.js";
 import { CoreUpdateWorkTracker } from "./core-update-work.js";
 import { SchedulerStore } from "./scheduler-tasks.js";
 import { initHttpProxy } from "./http-proxy.js";
+import { globalLspPool } from "./lsp-tool.js";
 import { buildPiWebTokenCookie, decodeCookieToken, isTlsRequest } from "./auth-cookie.js";
 import type {
 	BgServer,
 	ClientMessage,
 	CoreUpdateState,
+	UiApprovalRule,
 	UiLayoutPrefs,
 	CommandDef,
 	PromptAttachment,
@@ -128,6 +138,20 @@ try {
 	mkdirSync(DATA_DIR, { recursive: true });
 } catch (err) {
 	console.warn(`[data] 无法创建数据目录 ${DATA_DIR}: ${(err as Error).message}`);
+}
+// issue #295：工作区直接就是家目录时，SDK 初始化期的同步目录扫描会落在 $HOME 上
+// （iCloud 占位符/外部卷坏挂载 → scandir/open 内核挂起 → 事件循环假死，hello 后无
+// ready）。新装服务默认已是 ~/pi-web-ui（见 bin/pi-web-ui.mjs serviceOptions）；
+// 老服务若仍指着家目录，在此提示一次，`server install` 重装即迁移。
+try {
+	if (resolve(CWD) === resolve(homedir())) {
+		console.warn(
+			`[ws] 工作区为用户主目录 ${CWD}：目录扫描可能因外部卷/同步盘挂载而长时间阻塞，` +
+				`建议用 \`pi-web-ui server install --cwd <项目目录>\` 重装迁移。`,
+		);
+	}
+} catch {
+	/* 路径比较失败不影响启动 */
 }
 // Dev-no-cache setting read without a ClientStateStore instance (the index.html
 // route runs before any client attaches). Reads the same global settings blob.
@@ -224,6 +248,21 @@ if (process.platform === "win32") {
 }
 
 const app = express();
+// Host 白名单（防 DNS rebinding，审查 #352）：无 token 部署下 HTTP 路由此前
+// 不校验 Host，恶意网页让自己的域名解析到 127.0.0.1 即可打满全部 API。
+// 显式白名单走 PI_WEB_ALLOW_HOSTS（与 WS 侧同 env）；设置了 PI_WEB_TOKEN 则
+// 由 token 鉴权兜底，不再限制 Host。WS 升级侧同规则见 originAllowed()。
+app.use((req, res, next) => {
+	const hostHeader = req.headers.host;
+	if (
+		typeof hostHeader === "string" &&
+		!httpHostAllowed(hostHeader, { allowHosts: ALLOW_HOSTS, hasAuthToken: Boolean(AUTH_TOKEN) })
+	) {
+		res.status(403).end("host not allowed");
+		return;
+	}
+	next();
+});
 app.use(express.json({ limit: "10mb" }));
 
 /** 从请求中提取候选 token：头 / 查询参数 / cookie（浏览器导航场景靠 cookie 续命）。 */
@@ -256,8 +295,16 @@ function requestTokens(req: { headers: IncomingMessage["headers"]; url?: string 
 	return out.filter(Boolean);
 }
 
+/** 口令比较用常时时间：先哈希到定长再 timingSafeEqual（长度差异被摘要抹平），
+ *  消除逐字节短路比较的时序侧信道（审查 #352：纵深防御，远程可利用性低）。 */
+function sameSecret(candidate: string): boolean {
+	const a = createHash("sha256").update(candidate).digest();
+	const b = createHash("sha256").update(AUTH_TOKEN).digest();
+	return timingSafeEqual(a, b);
+}
+
 function tokenOk(req: Parameters<typeof requestTokens>[0]): boolean {
-	return requestTokens(req).includes(AUTH_TOKEN);
+	return requestTokens(req).some(sameSecret);
 }
 
 /** 请求携带的 pi_web_token cookie 的**口令值**（未带/损坏时为空串）。
@@ -299,7 +346,7 @@ if (AUTH_TOKEN) {
 			// cookieToken 已解码成原文（issue #261），所以直接和原始口令比 ——
 			// 以前拿 `encodeURIComponent(AUTH_TOKEN)` 比，含 `=` / 非 ASCII 的口令
 			// 永远不相等（于是每个请求都重发 cookie，且带 cookie 的请求反而 401）。
-			if (cookie !== AUTH_TOKEN) {
+			if (!sameSecret(cookie)) {
 				res.setHeader("Set-Cookie", buildPiWebTokenCookie(encodeURIComponent(AUTH_TOKEN), 31536000, secure));
 			}
 		} else if (cookie) {
@@ -341,14 +388,14 @@ const TABS = parseTabs();
 registerFileTransferRoutes(app, (clientId) => service.get(clientId)?.cwd);
 
 app.get("/api/health", (_req, res) => {
+	// 审查 #352：该端点对未鉴权开放（监控探针需要），故只保留版本/引擎与 SDK
+	// 副本诊断信息，不再暴露 cwd（工作区路径披露）与 pid（指纹/信息收集面）。
 	res.json({
 		ok: true,
 		piVersion: VERSION,
 		// issue #260：服务实际加载的是自带副本，不是全局 pi CLI 那份。这里把两份都报出来，
 		// 用户就不用猜「为什么升了全局 SDK 不生效」。（纯新增字段，piVersion 语义不变。）
 		piSdkCopies: sdkCopies(),
-		cwd: CWD,
-		pid: process.pid,
 		engine: ENGINE,
 	});
 });
@@ -367,6 +414,36 @@ app.get("/api/plugin-updates", async (_req, res) => {
 		res.json({ updates: await getPluginUpdates() });
 	} catch {
 		res.status(503).json({ updates: [], error: "Plugin update check unavailable" });
+	}
+});
+
+/**
+ * 基于 SHA-256 内容寻址的附件静态服务：
+ * 永久强缓存（immutable），支持图片和文件读取。
+ */
+app.get("/api/attachment/:hash", async (req, res) => {
+	try {
+		const hash = String(req.params.hash ?? "").trim();
+		const hit = await readAttachment(hash);
+		if (!hit) {
+			res.status(404).end("attachment not found");
+			return;
+		}
+		res.setHeader("Content-Type", hit.mimeType);
+		res.setHeader("Content-Length", hit.buffer.length);
+		res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+		if (hit.mimeType === "image/svg+xml") {
+			// SVG 以文档形态打开（顶层导航/iframe）时内嵌 <script> 会在本应用
+			// origin 执行——附件内容可来自剪贴板/工作区文件，等同存储型 XSS
+			// （审查 #352 P0-1）。sandbox CSP 让文档形态降级到不透明 origin；
+			// <img> 引用不受影响（子资源响应的 CSP 不作用于引用页，且
+			// SVG-as-image 本就不执行脚本）。
+			res.setHeader("Content-Security-Policy", "sandbox");
+			res.setHeader("X-Content-Type-Options", "nosniff");
+		}
+		res.end(hit.buffer);
+	} catch (err) {
+		res.status(500).end((err as Error).message);
 	}
 });
 
@@ -429,6 +506,8 @@ app.get("/api/file", async (req, res) => {
 			// dotfiles: allow — issue #223：Express 5 的 send 默认 dotfiles=ignore，
 			// 工作区/数据目录常位于隐藏目录下（如 ~/.pi-web），绝对路径含点号段会被判 404。
 			// 路径已由上方的 workspacePath/isAbsoluteWirePath 做工作区 containment 校验，放行安全。
+			// 注：绝对 wire 路径分支是机器浏览设计（whole-machine browsing），
+			// 不受工作区约束——别被注释误导（审查 #352）。
 			res.download(abs, name, { dotfiles: "allow" });
 		} else {
 			if (isHtmlPreview) {
@@ -443,6 +522,11 @@ app.get("/api/file", async (req, res) => {
 				// no top-navigation. NEVER add allow-same-origin here.
 				const allowJs = req.query.allowJs === "1";
 				res.setHeader("Content-Security-Policy", allowJs ? "sandbox allow-scripts" : "sandbox");
+				res.setHeader("X-Content-Type-Options", "nosniff");
+			} else if (lower.endsWith(".svg")) {
+				// 与 /api/attachment 同理：SVG 文档形态的 <script> 沙箱化
+				// （审查 #352 P0-1），<img> 内嵌用法不受影响。
+				res.setHeader("Content-Security-Policy", "sandbox");
 				res.setHeader("X-Content-Type-Options", "nosniff");
 			}
 			res.sendFile(abs, { dotfiles: "allow" });
@@ -507,6 +591,9 @@ app.get("/api/preview/*splat", async (req, res) => {
 		if (lower.endsWith(".html") || lower.endsWith(".htm") || lower.endsWith(".xhtml")) {
 			const allowJs = req.query.allowJs === "1";
 			res.setHeader("Content-Security-Policy", allowJs ? "sandbox allow-scripts" : "sandbox");
+		} else if (lower.endsWith(".svg")) {
+			// 与 /api/attachment 同理：SVG 文档形态的 <script> 沙箱化（审查 #352 P0-1）。
+			res.setHeader("Content-Security-Policy", "sandbox");
 		}
 		res.sendFile(abs, { dotfiles: "allow" });
 	} catch {
@@ -826,8 +913,13 @@ function parseAuthority(a: string): { hostname: string; port: string } {
 }
 
 function originAllowed(req: IncomingMessage): boolean {
-	const hostHeader = (req.headers.host ?? "").toLowerCase();
-	const host = parseAuthority(hostHeader);
+	const hostHeader = req.headers.host ?? "";
+	// Host 白名单与 HTTP 侧同规则（审查 #352）：rebinding 下 Origin 会与
+	// 攻击者 Host 自比相等，必须先把非本机/私网的 Host 挡掉。
+	if (!httpHostAllowed(hostHeader, { allowHosts: ALLOW_HOSTS, hasAuthToken: Boolean(AUTH_TOKEN) })) {
+		return false;
+	}
+	const host = parseAuthority(hostHeader.toLowerCase());
 	if (ALLOW_HOSTS.length > 0 && !ALLOW_HOSTS.includes(host.hostname)) {
 		return false;
 	}
@@ -995,8 +1087,9 @@ export interface DispatchSession {
 	/** 返回值语义见 SlashHost.newChat：布尔值 = 是否落在一个可接收首条的空白
 	 *  新对话（/new <prompt> 用）。此处只管转发，返回值被丢弃，故允许 void。
 	 *  preset = DSH Agent 预设（pi 引擎忽略）。 */
-	newChat(preset?: string): Promise<boolean | void>;
+	newChat(preset?: string, ephemeral?: boolean): Promise<boolean | void>;
 	editMessage(messageId: string, text: string, attachments?: PromptAttachment[]): Promise<void>;
+	forkSession?(messageId: string, position?: "before" | "at", targetConvId?: string): Promise<void>;
 	cycleModel(): Promise<void>;
 	cycleThinking(): void;
 	flushSnapshot(forceFull?: boolean): void;
@@ -1005,6 +1098,8 @@ export interface DispatchSession {
 	 *  pi 与 dsh 都实现了；缺失时 dispatch 回 `unsupported`（不静默 —— 否则点开弹窗
 	 *  会永远停在「读取中」）。 */
 	getToolInfo?(name: string): void | Promise<void>;
+	/** 查询被某个压缩卡片折叠的历史消息（按需惰性加载，issue #398）。 */
+	getCompactedMessages?(compactionMessageId: string, targetConvId?: string): void | Promise<void>;
 	refreshSessions(): Promise<void>;
 	pushProjects(): Promise<void>;
 	removeProject(path: string): Promise<void>;
@@ -1013,7 +1108,9 @@ export interface DispatchSession {
 	renameConversation(id: string, name: string): Promise<void>;
 	dismissConversation(id: string, withFinishedSubagents?: boolean, force?: boolean): Promise<void>;
 	dismissFinishedSubagents(parentId?: string): Promise<void>;
+	handoffSubagent?(fromRunId: string, toRunId: string, payload: string): Promise<void>;
 	persistConversation?(id: string): Promise<void>;
+	setConversationPinned?(id: string, pinned: boolean): Promise<void>;
 	switchSession(path: string): Promise<void>;
 	switchConversation(id: string): Promise<void>;
 	listFiles(path?: string): Promise<void>;
@@ -1050,6 +1147,7 @@ export interface DispatchSession {
 	makeDir(path: string, setAsCwd?: boolean): Promise<void>;
 	checkUpdate(): Promise<void>;
 	checkUpdatesAll(force?: boolean): Promise<void>;
+	checkPluginUpdates?(manual?: boolean): Promise<void>;
 	resolveDialog(id: number, value: string | boolean | null): void;
 	installPiAgent(): Promise<void>;
 	setProviderApiKey(provider: string, apiKey: string): Promise<void>;
@@ -1068,7 +1166,22 @@ export interface DispatchSession {
 	addProviderKey(provider: string, apiKey: string, name?: string): Promise<void>;
 	activateProviderKey(provider: string, keyName: string): Promise<void>;
 	removeProviderKey(provider: string, keyName: string): Promise<void>;
-	fetchModelsList(reqId: number, baseUrl: string, apiKey?: string, authHeader?: boolean, api?: string): Promise<void>;
+	fetchModelsList(
+		reqId: number,
+		baseUrl: string,
+		apiKey?: string,
+		authHeader?: boolean,
+		api?: string,
+		providerId?: string,
+	): Promise<void>;
+	testModelConnection?(
+		reqId: number,
+		baseUrl: string,
+		apiKey?: string,
+		authHeader?: boolean,
+		api?: string,
+		providerId?: string,
+	): Promise<void>;
 	refreshProviderModels(providerId: string, reqId: number): Promise<void>;
 	refreshBuiltinModels(reqId: number): Promise<void>;
 	appendBuiltinModel(providerId: string, model: unknown, reqId: number): Promise<void>;
@@ -1079,10 +1192,24 @@ export interface DispatchSession {
 	getTerminalCwd(conversationId?: string): string;
 	listCommands(): Promise<void>;
 	saveCommands(commands: CommandDef[]): Promise<void>;
-	setGoal(goal: string, opts?: { reviewModel?: string; maxRounds?: number; locked?: boolean }): Promise<void>;
+	setGoal(
+		goal: string,
+		opts?: {
+			reviewModel?: string;
+			maxRounds?: number;
+			locked?: boolean;
+			/** 目标模式 2.0：执行者模型（DSH 引擎不接委托执行，忽略）。 */
+			execModel?: string;
+		},
+	): Promise<void>;
 	clearGoal(): Promise<void>;
 	startGoalWizard(text: string, opts?: { wizardModel?: string; maxRounds?: number; locked?: boolean }): Promise<void>;
-	setGoalPrefs(opts?: { reviewModel?: string; maxRounds?: number; locked?: boolean }): Promise<void>;
+	setGoalPrefs(opts?: {
+		reviewModel?: string;
+		maxRounds?: number;
+		locked?: boolean;
+		execModel?: string;
+	}): Promise<void>;
 	pushSettings(): void;
 	setSettings(partial: {
 		promptMode?: "append" | "replace";
@@ -1097,6 +1224,7 @@ export interface DispatchSession {
 		terminalToolsEnabled?: boolean;
 		terminalBash?: boolean;
 		terminalBashIdleMs?: number;
+		terminalBashMaxForegroundMs?: number;
 		editSoftEnabled?: boolean;
 		thinkingWrap?: boolean;
 		toolsWrap?: boolean;
@@ -1130,11 +1258,32 @@ export interface DispatchSession {
 	/** 浏览器页面调用回包（browser_page 工具，pi 引擎专有；DSH 无页面桥，
 	 *  方法缺失时 dispatch 侧的 `?.` 直接忽略这条消息）。 */
 	resolvePageCall?(id: string, ok: boolean, result?: unknown, error?: string): void;
+	forkSession?(messageId: string, position?: "before" | "at", conversationId?: string): Promise<void>;
+	rollbackSession?(messageId: string, conversationId?: string, restoreWorkspace?: boolean): Promise<void>;
+	resolveToolApproval?(
+		id: string,
+		decision: "approve" | "deny" | "edit",
+		editedParams?: unknown,
+		reason?: string,
+		/** "category" = 顺带记住本对话的该同类档位；"all" = 本对话后续全部允许。 */
+		scope?: "once" | "category" | "all",
+	): boolean;
+	/** 设置当前对话的审批放行策略（设置面板撤销区；纯内存态）。 */
+	setApprovalPolicy?(partial: { conversationId?: string; allowAll?: boolean; categories?: string[] }): void;
+	updatePlan?(steps: import("./protocol.js").PlanStep[], activeStepId?: string | null, conversationId?: string): void;
+	/** 切换计划模式（只规划不实施）：会话级，热生效。 */
+	setPlanMode?(enabled: boolean, conversationId?: string): Promise<void>;
+	/** 切换审查者模式（自动委派）：会话级，默认关。DSH 实现里直接拒（无工具闸门）。 */
+	setDelegateMode?(enabled: boolean, conversationId?: string): Promise<void>;
 	savePreset(name: string): Promise<void>;
 	applyPreset(name: string): Promise<void>;
 	deletePreset(name: string): Promise<void>;
 	/** Upsert 一个子代理模板（全局共享）。 */
 	saveSubagentTemplate(template: UiSubagentTemplate): Promise<void>;
+	saveApprovalRule?(rule: UiApprovalRule): Promise<void>;
+	saveApprovalRules?(rules: UiApprovalRule[]): Promise<void>;
+	deleteApprovalRule?(id: string): Promise<void>;
+	resetBuiltinApprovalRule?(id: string): Promise<void>;
 	/** 当前客户端的服务端语言（issue #91 v2：归一化 UI 代码，zh/EN/ja/…）。 */
 	getLang(): string;
 	/** Browser UI locale report (hello.locale / set_locale) — persist per
@@ -1204,6 +1353,25 @@ export interface EngineService {
 				isError?: boolean;
 		  }) => void)
 		| undefined;
+	/** bash/read 插件拦截（P1-5，pi 引擎；dsh 引擎无 customTool 注册面，不接）。 */
+	toolGuard?:
+		| {
+				pre: (
+					req: ToolPreRequest,
+					lang: string,
+				) => Promise<{
+					verdict:
+						| { decision: "allow" }
+						| { decision: "deny"; reason?: string; reasonEn?: string }
+						| { decision: "ask"; reason?: string; reasonEn?: string };
+					pluginId?: string;
+				}>;
+				post: (
+					req: ToolPostRequest,
+					lang: string,
+				) => Promise<{ content?: Array<{ type: string; text?: string }>; pluginIds: string[] } | undefined>;
+		  }
+		| undefined;
 	/** 运行轨迹事件转发（pi 引擎发射；dsh 引擎暂不发射，插件收不到即无轨迹）。 */
 	onRunEvent?: ((ev: PluginRunEvent) => void) | undefined;
 	/** 对话切换通知（切历史会话/切 running 对话/新对话/切项目，pi 引擎）。 */
@@ -1231,6 +1399,7 @@ const service: EngineService =
 
 // Server-string tables (issue #91 v2): packs' `serverStrings` sections feed
 // pick() lookup for non-zh/en UI languages (missing key → English fallback).
+initAttachmentStore(DATA_DIR);
 loadServerStrings(DATA_DIR);
 // Optional UI plugins (<dataDir>/plugins/<id>/): scanned on every client
 // attach so freshly dropped plugins appear without a server restart.
@@ -1253,6 +1422,9 @@ async function reloadPluginsAndPush(lang?: () => ServerLang): Promise<void> {
 interface PendingPathRequest {
 	resolve: (ok: boolean) => void;
 	timer: ReturnType<typeof setTimeout>;
+	/** 弹窗广播时在线的 clientId 集合：应答必须来自其中之一——广播后才连上的端
+	 *  没见过弹窗，不许代答（plugin_path_response 处理处校验）。 */
+	recipients: Set<string>;
 }
 const pendingPathRequests = new Map<string, PendingPathRequest>();
 /** 把授权表推给所有在线客户端（设置面板展示 + 撤销后刷新）。 */
@@ -1276,7 +1448,9 @@ pluginMgr.pathAccessRequester = (pluginId, dir, reason) =>
 			pendingPathRequests.delete(id);
 			resolve(false);
 		}, 120_000);
-		pendingPathRequests.set(id, { resolve, timer });
+		// 广播前先记下在线端集合：应答来源绑定用（防没见过弹窗的连接代答）。
+		const recipients = new Set(pluginMgr.onlineClientIds());
+		pendingPathRequests.set(id, { resolve, timer, recipients });
 		const payload = JSON.stringify({
 			type: "plugin_path_request",
 			id,
@@ -1305,6 +1479,8 @@ pluginMgr.onGrantsChanged = () => pushPluginGrants();
 interface PendingPermissionRequest {
 	resolve: (ans: { ok: boolean; remember: boolean }) => void;
 	timer: ReturnType<typeof setTimeout>;
+	/** 弹窗广播时在线的 clientId 集合：应答必须来自其中之一（同目录授权）。 */
+	recipients: Set<string>;
 }
 const pendingPermissionRequests = new Map<string, PendingPermissionRequest>();
 /** 把能力授权表推给所有在线客户端（设置面板展示 + 撤销后刷新）。 */
@@ -1337,7 +1513,9 @@ pluginMgr.permissionRequester = (pluginId, req) =>
 			}
 			resolve({ ok: false, remember: false });
 		}, 120_000);
-		pendingPermissionRequests.set(id, { resolve, timer });
+		// 广播前先记下在线端集合：应答来源绑定用（防没见过弹窗的连接代答）。
+		const recipients = new Set(pluginMgr.onlineClientIds());
+		pendingPermissionRequests.set(id, { resolve, timer, recipients });
 		const ask = JSON.stringify({
 			type: "plugin_permission_request",
 			id,
@@ -1358,6 +1536,42 @@ pluginMgr.permissionRequester = (pluginId, req) =>
 		}
 	});
 pluginMgr.onPermGrantsChanged = () => pushPluginPermissions();
+
+// ---------------------------------------------------------------------------
+// 特权 DOM 授权两步握手：grant 是提权方向，不接受「一帧消息直接落盘」——设置面板
+// 点击先发 plugin_dom_consent，服务端给该 pluginId 生成在途 consent 请求并广播
+// plugin_dom_consent_request，收到绑定来源的 plugin_dom_consent_response 才调
+// setDomConsent 持久写盘。发起端（settings 面板）按 from === 自己的 clientId 自动
+// 应答，用户点一下的体验不变；陌生连接既不在 recipients 里，也没有发起记录，
+// 只能等 120s 超时拒绝。revoke 是降权方向，保持单步直达（不走本表）。
+// ---------------------------------------------------------------------------
+interface PendingDomConsent {
+	/** 随广播下发的请求 id，应答按它回查（本表按 pluginId 键：同插件同时只允许一个在途）。 */
+	id: string;
+	pluginId: string;
+	/** 广播时在线的 clientId 集合：应答来源绑定（与目录/能力授权同一口径）。 */
+	recipients: Set<string>;
+	timer: ReturnType<typeof setTimeout>;
+}
+/** key = pluginId：wantsDom 插件集合有限 + 120s 自动过期，规模天然有界。 */
+const pendingDomConsents = new Map<string, PendingDomConsent>();
+/** 按 id 反查在途 consent 请求（应答只有 id；表很小，线性扫即可）。 */
+function findDomConsentById(id: string): PendingDomConsent | undefined {
+	for (const p of pendingDomConsents.values()) if (p.id === id) return p;
+	return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// 插件安装的用户确认门（P0）：plugin_catalog_sync 的 install:true 与 plugin_job
+// 的 install/update 在真正动安装器之前必须拿到用户确认。
+// ---------------------------------------------------------------------------
+async function confirmPluginInstallHelper(items: Array<{ id: string; source: string }>): Promise<boolean> {
+	return confirmPluginInstall(items, {
+		permGrants: pluginMgr.permGrants,
+		permissionRequester: pluginMgr.permissionRequester,
+		onGrantsChanged: pushPluginPermissions,
+	});
+}
 
 // 内置定时任务（issue #184）：全局 <dataDir>/scheduler-tasks.json，TTL 与
 // client-state 同级；Agent 工具建的任务优先唤醒发起对话（issue #193：
@@ -1510,6 +1724,16 @@ const scheduler = new SchedulerStore(DATA_DIR, {
 	},
 	onChange: () => pushSchedulerTasks(),
 	notify: (level, text, textEn) => pushNoticeToAll(level, text, textEn ?? text),
+	// issue #291：任务删除（含单次任务跑完自删）后回收其伪客户端，
+	// 否则 scheduler:<taskId> 会话会永久占据其他客户端的 elsewhere 列表。
+	onTaskRemoved: (taskId) => {
+		const svc = service as unknown as { releaseSchedulerClient?: (id: string) => void };
+		try {
+			svc.releaseSchedulerClient?.(taskId);
+		} catch {
+			// 回收失败不影响任务删除
+		}
+	},
 });
 scheduler.start();
 /** 把调度器任务列表推给所有在线客户端（设置面板展示 + 变更后刷新）。 */
@@ -1561,6 +1785,12 @@ void mcpBridge.load().then(() => {
 });
 // 插件扩展点：SDK 工具执行事件（bash/读文件等 start+end）转发给已注册的插件。
 service.onToolEvent = (ev) => pluginMgr.emitToolEvent(ev);
+// 插件扩展点（P1-5）：bash/read 执行前后的拦截（pre 拒/问即拦、post 脱敏补上下文；
+// 只覆盖已接管的这两处，DSH 引擎无 customTool 注册面不接）。
+service.toolGuard = {
+	pre: (req, lang) => pluginMgr.evaluateToolPre(req, lang),
+	post: (req, lang) => pluginMgr.evaluateToolPost(req, lang),
+};
 service.onRunEvent = (ev) => pluginMgr.emitRunEvent(ev);
 // 插件扩展点：对话切换通知（轨迹视图切会话后即重拉；dsh 引擎暂无）。
 service.onConversationChanged = () => pluginMgr.emitConversationChanged();
@@ -1739,6 +1969,11 @@ const coreWork = new CoreUpdateWorkTracker(
 		"startGoalWizard",
 		"reloadExtensions",
 		"applyPreset",
+		// 0.97 新增的会话级异步变更（建/改 runtime、落盘）：同样要等它们落定。
+		"setDelegateMode",
+		"setPlanMode",
+		"setPermissionPreset",
+		"persistConversation",
 	]),
 );
 let coreAdmission: CoreUpdateAdmission | undefined;
@@ -1832,6 +2067,10 @@ const SNAPSHOT_BACKPRESSURE_FACTOR = 3;
 const SNAPSHOT_BACKPRESSURE_MIN_BYTES = 262_144;
 /** 背压丢弃后的延迟重发间隔。 */
 const SNAPSHOT_RETRY_MS = 250;
+/** issue #295：attach（会话初始化）超过此时长未完成，先给浏览器一句可见提示，
+ *  避免界面永久停在「正在连接」而用户不知发生了什么。attach 本体继续等（不取消），
+ *  完成后照常走快照流程。 */
+const ATTACH_SLOW_NOTICE_MS = 8_000;
 
 /**
  * Multi-tab serialization sharing: emit() hands the SAME message object to
@@ -1858,8 +2097,13 @@ wss.on("connection", (ws) => {
 	let closed = false;
 	/** 最近一份全量 snapshot 的估算字节数（UTF-16 ×2），供背压相对阈值用（issue #11）。 */
 	let lastSnapshotBytes = 0;
-	/** Commands received while the session is still being created — replayed after attach. */
-	let pending: ClientMessage[] = [];
+	/** Commands received while the session is still being created — replayed after attach.
+	 *  带上限（256 条）：attach 挂死/失败保活期间队列不再无界增长，超限丢最旧并告警。 */
+	const pending = new PendingCommandQueue();
+	/** attach 完成（含插件链 + 首快照）前一律排队（见 hello 分支的 replayQueued）：
+	 *  ready 先行后，ready 只代表传输通，插件命令目录/首快照都还没好，直接分发
+	 *  会撞「未知命令」/ rev 链断裂。 */
+	let attachDone = false;
 	/** 背压丢快照后的延迟重发定时器（去重：一次只排一个）。 */
 	let snapshotRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -1917,6 +2161,26 @@ wss.on("connection", (ws) => {
 	// cid getter lets plugins target THIS socket via host.sendTo(clientId).
 	const removePluginSender = pluginMgr.addSender(send, () => clientId);
 
+	/** DOM 授权落盘 + notice 反馈（两步握手的 grant 与单步 revoke 共用收尾）。
+	 *  cs 缺席（未 attach 完成）时只落盘不提示——消息本来就会在 attach 前排队。 */
+	const applyDomConsent = (pluginId: string, granted: boolean): void => {
+		void pluginMgr
+			.setDomConsent(pluginId, granted)
+			.then((r) => {
+				const cs2 = clientId ? service.get(clientId) : undefined;
+				if (r.error) cs2?.emitNotice("warning", `DOM 授权失败：${r.error}`, `DOM consent failed: ${r.error}`);
+				else if (r.changed)
+					cs2?.emitNotice(
+						"info",
+						granted ? `已授权插件「${pluginId}」完全 DOM 访问` : `已撤销插件「${pluginId}」完全 DOM 访问`,
+						granted
+							? `Granted full DOM access to plugin "${pluginId}"`
+							: `Revoked full DOM access from plugin "${pluginId}"`,
+					);
+			})
+			.catch(() => {});
+	};
+
 	const dispatch = (msg: ClientMessage): void => {
 		if (!clientId) {
 			pending.push(msg);
@@ -1924,8 +2188,8 @@ wss.on("connection", (ws) => {
 		}
 		const session = service.get(clientId);
 		const cs = session ? coreWork.wrap(session) : undefined;
-		if (!cs) {
-			// Session not ready yet (hello processing) — hold the command.
+		if (!cs || !attachDone) {
+			// Session not ready yet (hello processing / plugin chain) — hold the command.
 			pending.push(msg);
 			return;
 		}
@@ -1979,9 +2243,20 @@ wss.on("connection", (ws) => {
 						send({ type: "core_update_state", state: coreUpdateState() });
 					});
 				break;
-			case "prompt":
+			case "prompt": {
+				const hasAttach = Boolean(msg.attachments && msg.attachments.length > 0);
+				if (!msg.text?.trim() && !hasAttach) {
+					send({
+						type: "notice",
+						level: "warning",
+						text: "发送已忽略：提示词为空且未附带文件或上下文引用。",
+						textEn: "Prompt ignored: text is empty and no attachments were provided.",
+					});
+					break;
+				}
 				void cs.prompt(msg.text, msg.attachments, msg.queue);
 				break;
+			}
 			case "queue_remove":
 				cs.removeQueued(msg.kind, msg.text, msg.index);
 				break;
@@ -2007,10 +2282,16 @@ wss.on("connection", (ws) => {
 				void cs.listBgServers();
 				break;
 			case "new_chat":
-				void cs.newChat(msg.preset);
+				void cs.newChat(msg.preset, msg.ephemeral);
 				break;
 			case "edit_message":
 				void cs.editMessage(msg.messageId, msg.text, msg.attachments);
+				break;
+			case "fork_session":
+				void cs.forkSession?.(msg.messageId, msg.position, msg.conversationId);
+				break;
+			case "rollback_session":
+				void cs.rollbackSession?.(msg.messageId, msg.conversationId, msg.restoreWorkspace);
 				break;
 			case "cycle_model":
 				void cs.cycleModel();
@@ -2035,6 +2316,9 @@ wss.on("connection", (ws) => {
 				} else {
 					send({ type: "tool_info", name: msg.name, found: false, unsupported: true });
 				}
+				break;
+			case "get_compacted_messages":
+				void cs.getCompactedMessages?.(msg.compactionMessageId, msg.conversationId);
 				break;
 			case "list_sessions":
 				void cs.refreshSessions();
@@ -2062,8 +2346,16 @@ wss.on("connection", (ws) => {
 					void cs.persistConversation(msg.id);
 				}
 				break;
+			case "pin_conversation":
+				if (typeof cs.setConversationPinned === "function") {
+					void cs.setConversationPinned(msg.id, msg.pinned);
+				}
+				break;
 			case "dismiss_finished_subagents":
 				void cs.dismissFinishedSubagents(msg.parentId);
+				break;
+			case "subagent_handoff":
+				void cs.handoffSubagent?.(msg.fromRunId, msg.toRunId, msg.payload);
 				break;
 			case "switch_session":
 				void cs.switchSession(msg.path);
@@ -2198,6 +2490,11 @@ wss.on("connection", (ws) => {
 			case "check_updates_all":
 				void cs.checkUpdatesAll(msg.force === true);
 				break;
+			case "check_plugin_updates":
+				if (typeof cs.checkPluginUpdates === "function") {
+					void cs.checkPluginUpdates(true);
+				}
+				break;
 			case "restart_service": {
 				// Same effect as `pi-web-ui server restart`: this process exits and its
 				// supervisor brings it back (launchd/systemd immediately, the Windows
@@ -2275,7 +2572,10 @@ wss.on("connection", (ws) => {
 				void cs.listProviders();
 				break;
 			case "fetch_models":
-				void cs.fetchModelsList(msg.reqId, msg.baseUrl, msg.apiKey, msg.authHeader, msg.api);
+				void cs.fetchModelsList(msg.reqId, msg.baseUrl, msg.apiKey, msg.authHeader, msg.api, msg.providerId);
+				break;
+			case "test_model_connection":
+				void cs.testModelConnection?.(msg.reqId, msg.baseUrl, msg.apiKey, msg.authHeader, msg.api, msg.providerId);
 				break;
 			case "refresh_provider_models":
 				void cs.refreshProviderModels(msg.providerId, msg.reqId);
@@ -2360,6 +2660,7 @@ wss.on("connection", (ws) => {
 					reviewModel: msg.reviewModel,
 					maxRounds: msg.maxRounds,
 					locked: msg.locked,
+					execModel: msg.execModel,
 				});
 				break;
 			case "clear_goal":
@@ -2377,6 +2678,7 @@ wss.on("connection", (ws) => {
 					reviewModel: msg.reviewModel,
 					maxRounds: msg.maxRounds,
 					locked: msg.locked,
+					execModel: msg.execModel,
 				});
 				break;
 			case "get_settings":
@@ -2415,8 +2717,10 @@ wss.on("connection", (ws) => {
 					terminalToolsEnabled: msg.terminalToolsEnabled,
 					terminalBash: msg.terminalBash,
 					terminalBashIdleMs: msg.terminalBashIdleMs,
+					terminalBashMaxForegroundMs: (msg as { terminalBashMaxForegroundMs?: number }).terminalBashMaxForegroundMs,
 					toolWatchdogTimeoutMs: (msg as { toolWatchdogTimeoutMs?: number }).toolWatchdogTimeoutMs,
 					readDirEnabled: (msg as { readDirEnabled?: boolean }).readDirEnabled,
+					toolApprovalEnabled: (msg as { toolApprovalEnabled?: boolean }).toolApprovalEnabled,
 					editSoftEnabled: (msg as { editSoftEnabled?: boolean }).editSoftEnabled,
 					questionnaireEnabled: (msg as { questionnaireEnabled?: boolean }).questionnaireEnabled,
 					parallelReminderEnabled: (msg as { parallelReminderEnabled?: boolean }).parallelReminderEnabled,
@@ -2488,51 +2792,151 @@ wss.on("connection", (ws) => {
 				const jobLang = () => cs?.getLang() ?? "en";
 				const jobId = String(msg.jobId ?? "");
 				const pluginId = String(msg.id ?? "");
-				const started = pluginInstaller.start(
-					{
+				// function 声明会提升、TS 对 msg 判别联合的收窄进不了闭包 —— 先拍平成常量。
+				const jobAction = msg.action;
+				const jobSpec = {
+					jobId,
+					action: jobAction,
+					id: pluginId,
+					source: msg.source,
+					build: msg.build === true,
+					noBuild: msg.noBuild === true,
+				};
+				const jobDone = (ok: boolean, error?: string) => {
+					send({
+						type: "plugin_job",
 						jobId,
-						action: msg.action,
-						id: pluginId,
-						source: msg.source,
-						build: msg.build === true,
-						noBuild: msg.noBuild === true,
-					},
-					{
+						action: jobAction,
+						pluginId,
+						phase: "done",
+						ok,
+						...(error ? { error } : {}),
+						output: "",
+					});
+				};
+				// 参数静态校验：参数非法直接拒绝，避免向客户端发起无意义/恶意的确认弹窗。
+				const argCheck = buildPluginJobArgs(jobSpec, DATA_DIR, jobLang);
+				if ("error" in argCheck) {
+					jobDone(false, argCheck.error);
+					break;
+				}
+				// 安装确认门（P0）：install/update 先经用户确认。第三方页面脚本可以直发
+				// plugin_job；拒绝/超时直接回一条 done，让面板上的作业就地结束（不占
+				// 安装锁、不弹「失败」之外的噪音）。卸载不在本门范围内（由面板本身发起）。
+				if (jobAction === "install" || jobAction === "update") {
+					const alreadyGranted = pluginMgr.permGrants.has("plugin-installer", "net", { host: "github.com" });
+					if (!alreadyGranted) {
+						send({
+							type: "plugin_job",
+							jobId,
+							action: jobAction,
+							pluginId,
+							phase: "start",
+						});
+						send({
+							type: "plugin_job",
+							jobId,
+							action: jobAction,
+							pluginId,
+							phase: "log",
+							line: jobLang() === "zh" ? "等待确认安装授权…" : "Waiting for install confirmation…",
+						});
+					}
+					void confirmPluginInstallHelper([{ id: pluginId, source: String(msg.source ?? "") }])
+						.then((confirmed) => {
+							if (!confirmed) {
+								jobDone(
+									false,
+									jobLang() === "zh"
+										? "用户未确认安装（拒绝或 120 秒超时）"
+										: "Installation not confirmed (rejected or timed out after 120s)",
+								);
+								return;
+							}
+							startPluginJob();
+						})
+						.catch(() => jobDone(false, jobLang() === "zh" ? "安装确认流程异常" : "Installation confirmation error"));
+					break;
+				}
+				startPluginJob();
+				// 真正派发作业（确认门通过后走这里）：被拒（忙 / 托管实例 / 参数非法）也要回
+				// 一条 done，让面板上的作业就地结束。
+				function startPluginJob(): void {
+					const started = pluginInstaller.start(jobSpec, {
 						lang: jobLang,
 						emit: (m) => send(m),
 						done: async (ok, info) => {
 							if (ok) {
 								await reloadPluginsAndPush(jobLang);
+								const isZh = jobLang() === "zh";
+								const actionLabel =
+									jobAction === "uninstall"
+										? isZh
+											? "卸载"
+											: "uninstalled"
+										: jobAction === "update"
+											? isZh
+												? "更新"
+												: "updated"
+											: isZh
+												? "安装"
+												: "installed";
+								cs?.emitNotice(
+									"info",
+									`插件「${pluginId}」${actionLabel}完成`,
+									`Plugin "${pluginId}" ${actionLabel} successfully`,
+								);
 							} else if (info.error) {
 								cs?.emitNotice("error", `插件操作失败：${info.error}`, `Plugin operation failed: ${info.error}`);
 							}
 						},
-					},
-				);
-				if (!started.ok) {
-					// 被拒（忙 / 托管实例 / 参数非法）也要回一条 done，让面板上的作业就地结束。
-					send({
-						type: "plugin_job",
-						jobId,
-						action: msg.action,
-						pluginId,
-						phase: "done",
-						ok: false,
-						error: started.error,
-						output: "",
 					});
+					if (!started.ok) jobDone(false, started.error);
 				}
 				break;
 			}
 			case "plugin_job_cancel":
 				pluginInstaller.cancel(String(msg.jobId ?? ""));
 				break;
+			// 注册面目录（DSH P2-7）：只读装配（slot/工具/宿主方法表+当前占用者），按需拉取。
+			case "plugin_api_catalog": {
+				const requestId = String(msg.requestId ?? "");
+				send({ type: "plugin_api_catalog_result", requestId, catalog: pluginMgr.getApiCatalog() });
+				break;
+			}
+			// 安装前先读 spec（DSH P0-3）：不联网也能查（形状/已装），GitHub 源再探一次
+			// raw manifest。结果只作引导（UI 把 problem 渲染成输入框下的一句话），不阻塞安装。
+			case "plugin_install_inspect": {
+				const requestId = String(msg.requestId ?? "");
+				const source = String(msg.source ?? "");
+				void inspectInstallSpec(source, {
+					pluginsDir: pluginMgr.pluginsDir,
+					...(typeof msg.explicitId === "string" && msg.explicitId.trim() ? { explicitId: msg.explicitId.trim() } : {}),
+					force: msg.force === true,
+				}).then((r) => {
+					send({
+						type: "plugin_install_inspect_result",
+						requestId,
+						source,
+						kind: r.spec.kind,
+						suggestedId: r.suggestedId,
+						installed: r.installed,
+						...(r.problem ? { problem: r.problem } : {}),
+						...(r.detail ? { detail: r.detail } : {}),
+						...(r.manifest ? { manifest: r.manifest } : {}),
+					});
+				});
+				break;
+			}
 			// -- 插件目录授权（issue #146）------------------------------------------
 			case "plugin_path_response": {
-				const pending = pendingPathRequests.get(String(msg.id ?? ""));
-				if (pending) {
+				const id = String(msg.id ?? "");
+				const pending = pendingPathRequests.get(id);
+				// 来源绑定：应答必须来自弹窗广播时在线的 clientId——广播后才连上的
+				// 端没见过弹窗，忽略其代答（pending 保留，真正的弹窗端仍可答复）。
+				if (pending && clientId && pending.recipients.has(clientId)) {
 					clearTimeout(pending.timer);
-					pendingPathRequests.delete(String(msg.id ?? ""));
+					pendingPathRequests.delete(id);
 					pending.resolve(msg.ok === true);
 				}
 				break;
@@ -2541,7 +2945,8 @@ wss.on("connection", (ws) => {
 			case "plugin_permission_response": {
 				const id = String(msg.id ?? "");
 				const pending = pendingPermissionRequests.get(id);
-				if (pending) {
+				// 来源绑定：同 plugin_path_response——只有收到弹窗广播的端可代答。
+				if (pending && clientId && pending.recipients.has(clientId)) {
 					clearTimeout(pending.timer);
 					pendingPermissionRequests.delete(id);
 					// 先答复者胜：通知其它在线端收起同一条请求（与目录授权不同，这里要显式 resolved）。
@@ -2560,22 +2965,46 @@ wss.on("connection", (ws) => {
 				break;
 			}
 			case "plugin_dom_consent": {
-				void pluginMgr
-					.setDomConsent(msg.pluginId, msg.granted === true)
-					.then((r) => {
-						if (r.error) cs?.emitNotice("warning", `DOM 授权失败：${r.error}`, `DOM consent failed: ${r.error}`);
-						else if (r.changed)
-							cs?.emitNotice(
-								"info",
-								msg.granted === true
-									? `已授权插件「${msg.pluginId}」完全 DOM 访问`
-									: `已撤销插件「${msg.pluginId}」完全 DOM 访问`,
-								msg.granted === true
-									? `Granted full DOM access to plugin "${msg.pluginId}"`
-									: `Revoked full DOM access from plugin "${msg.pluginId}"`,
-							);
-					})
-					.catch(() => {});
+				// grant 是提权方向：走两步握手——只生成在途 consent 请求并广播，不在此
+				// 处落盘；收到绑定来源的 plugin_dom_consent_response 后才 setDomConsent。
+				// 同 pluginId 已有在途请求时忽略（首个优先，120s 超时自动失效）。
+				if (msg.granted === true) {
+					const pid = typeof msg.pluginId === "string" ? msg.pluginId.trim() : "";
+					if (!pid || !pluginMgr.isDomPlugin(pid) || pendingDomConsents.has(pid)) break;
+					const id = randomUUID();
+					const timer = setTimeout(() => {
+						pendingDomConsents.delete(pid);
+					}, 120_000);
+					pendingDomConsents.set(pid, { id, pluginId: pid, recipients: new Set(pluginMgr.onlineClientIds()), timer });
+					// from = 发起端 clientId：前端只自动应答自己发起的授权（设置面板点击）。
+					const payload = JSON.stringify({ type: "plugin_dom_consent_request", id, pluginId: pid, from: clientId });
+					for (const client of wss.clients) {
+						if (client.readyState === WebSocket.OPEN) {
+							try {
+								client.send(payload);
+							} catch {
+								/* 死连接 */
+							}
+						}
+					}
+					break;
+				}
+				// revoke 是降权方向：单步直达（不在途等待），pluginId 校验交给 setDomConsent。
+				applyDomConsent(msg.pluginId, false);
+				break;
+			}
+			// -- DOM 授权两步握手的应答：按 id 回查在途请求，且应答连接必须在弹窗
+			// 广播时的在线端集合里，才允许把 grant 持久写盘。
+			case "plugin_dom_consent_response": {
+				const id = typeof msg.id === "string" ? msg.id : "";
+				const pendingConsent = findDomConsentById(id);
+				if (pendingConsent && clientId && pendingConsent.recipients.has(clientId)) {
+					clearTimeout(pendingConsent.timer);
+					pendingDomConsents.delete(pendingConsent.pluginId);
+					// ok=false = 显式拒绝：只清在途请求不落盘（当前前端自动应答只发
+					// true，这里守住协议语义，将来接拒绝按钮不用动服务端）。
+					if (msg.ok === true) applyDomConsent(pendingConsent.pluginId, true);
+				}
 				break;
 			}
 			case "plugin_path_revoke": {
@@ -2614,10 +3043,22 @@ wss.on("connection", (ws) => {
 						customCatalogPath: pluginMgr.customCatalogPath,
 						pluginsDir: join(DATA_DIR, "plugins"),
 						installer: pluginInstaller,
+						// 只有插件目录真的变了才重启已激活插件，避免重复广播工作目录。
 						afterWrite: (pluginsChanged) => (pluginsChanged ? reloadPluginsAndPush(syncLang) : pluginMgr.pushCatalog()),
 						lang: syncLang,
+						// 本地文件来源只允许工作区内（防任意路径文件探测 oracle）。
+						workspaceRoot: cs?.cwd ?? CWD,
+						// 安装确认门（P0）：拒绝/超时只写目录不安装。
+						confirmInstall: (items) => confirmPluginInstallHelper(items),
 					},
 				).then((r) => {
+					if (r.installRefused) {
+						cs?.emitNotice(
+							"warning",
+							"目录已同步，但安装未获用户确认（拒绝或超时），未安装任何插件",
+							"Catalog synced, but installation was not confirmed (denied or timed out) — nothing was installed",
+						);
+					}
 					send({
 						type: "plugin_catalog_sync_result",
 						requestId,
@@ -2667,6 +3108,29 @@ wss.on("connection", (ws) => {
 					void cs.answerQuestion?.(msg.id, msg.answers, msg.cancelled);
 				}
 				break;
+			case "tool_approval_response":
+				cs.resolveToolApproval?.(msg.id, msg.decision, msg.editedParams, msg.reason, msg.scope);
+				break;
+			case "set_approval_policy":
+				cs.setApprovalPolicy?.({
+					conversationId: msg.conversationId,
+					allowAll: msg.allowAll,
+					categories: msg.categories,
+				});
+				break;
+			case "plan_update":
+				cs.updatePlan?.(msg.steps, msg.activeStepId, msg.conversationId);
+				break;
+			case "set_plan_mode":
+				// 计划模式（只规划不实施）：会话级开关，热生效（提示词重建 + 工具硬闸门）。
+				void cs.setPlanMode?.(msg.enabled, msg.conversationId);
+				break;
+			case "set_delegate_mode":
+				// 审查者模式（自动委派）：会话级开关，默认关。开启后本对话只审阅，
+				// 用户 prompt 由服务端转给常驻落盘执行对话。DSH 引擎的实现在
+				// setDelegateMode 里直接拒（无 customTools 注册面 → 闸门无处可挂）。
+				void cs.setDelegateMode?.(msg.enabled, msg.conversationId);
+				break;
 			case "page_response":
 				// 浏览器（page-picker 扩展经前端）对 browser_page 的回包：恢复挂起的
 				// pageCall；id 不匹配（超时后迟到/页面刷新）由 resolvePageCall 静默忽略。
@@ -2680,6 +3144,18 @@ wss.on("connection", (ws) => {
 				break;
 			case "delete_subagent_template":
 				void cs.deleteSubagentTemplate(msg.name);
+				break;
+			case "save_approval_rule":
+				void cs.saveApprovalRule?.(msg.rule);
+				break;
+			case "save_approval_rules":
+				void cs.saveApprovalRules?.(msg.rules);
+				break;
+			case "delete_approval_rule":
+				void cs.deleteApprovalRule?.(msg.id);
+				break;
+			case "reset_builtin_approval_rule":
+				void cs.resetBuiltinApprovalRule?.(msg.id);
 				break;
 			case "apply_preset":
 				void cs.applyPreset(msg.name);
@@ -2754,6 +3230,25 @@ wss.on("connection", (ws) => {
 		}
 	};
 
+	/** ready 握手帧：首连与重复 hello 的幂等回包共用同一构造，避免两处漂移。 */
+	const readyMsg = (cid: string): ServerMessage => ({
+		type: "ready",
+		uiZoomPercent: uiSettings.uiZoomPercent,
+		clientId: cid,
+		serverVersion: VERSION,
+		coreUpdate: coreUpdateState(),
+		protocolVersion: PROTOCOL_VERSION,
+		engine: ENGINE,
+		// This package's own version. `serverVersion` is the pi SDK's,
+		// and the client used to learn ours from the update check —
+		// which a managed instance never runs.
+		appVersion: appVersion(),
+		buildId: buildId(),
+		managed: MANAGED,
+		tabs: TABS ? [...TABS] : undefined,
+		service: SERVICE_INFO ?? undefined,
+	});
+
 	ws.on("message", (data) => {
 		let msg: ClientMessage;
 		try {
@@ -2763,34 +3258,45 @@ wss.on("connection", (ws) => {
 		}
 
 		if (msg.type === "hello") {
+			// 重放守卫：一条连接只允许 attach 一次。clientId 已赋值说明 hello 处理过
+			//（或进行中），再来的 hello 幂等回一条 ready 即可——否则重复 hello 会把
+			// service.attach 整个再跑一遍：重型 ClientSession 重复创建 + 旧 send sink
+			// 永久泄漏（removePluginSender 只在 close 时清一次）。
+			if (clientId) {
+				if (!closed) send(readyMsg(clientId));
+				return;
+			}
 			if (coreAdmission?.isBusy()) {
 				send({ type: "core_update_state", state: coreUpdateState() });
 				ws.close(4403, "core update in progress");
 				return;
 			}
-			const cid = msg.clientId || randomUUID();
+			// clientId 校验：外部输入，类型/长度/字符集不合格直接换 randomUUID()——
+			// 它随后成为 ClientSession key 与上传落盘目录名（uploads/<clientId>/，
+			// saveUpload 的两条路径都从这里来，入口统一拦一次即可）。
+			const cid = validateClientId(msg.clientId) ?? randomUUID();
 			clientId = cid;
+			// issue #295：ready 先行 —— 传输握手不等待会话初始化。attach 会进 SDK 的
+			// resourceLoader.reload 等同步目录扫描，坏挂载/家目录下可能阻塞数十秒；
+			// ready 在握手里先发，前端立刻离开「正在连接」（快照随后到）。
+			if (!closed) {
+				send(readyMsg(cid));
+			}
+			// attach 慢提示：本体继续等，不取消；完成后照常走快照流程。
+			const slowTimer = setTimeout(() => {
+				if (closed) return;
+				send({
+					type: "notice",
+					level: "warning",
+					text: "会话初始化耗时较长（可能在扫描工作区目录），请稍候…",
+					textEn: "Session init is taking a while (possibly scanning the workspace) — hang on…",
+				});
+			}, ATTACH_SLOW_NOTICE_MS);
 			service
 				.attach(cid, send)
 				.then((cs) => {
+					clearTimeout(slowTimer);
 					if (closed) return;
-					send({
-						type: "ready",
-						uiZoomPercent: uiSettings.uiZoomPercent,
-						clientId: cid,
-						serverVersion: VERSION,
-						coreUpdate: coreUpdateState(),
-						protocolVersion: PROTOCOL_VERSION,
-						engine: ENGINE,
-						// This package's own version. `serverVersion` is the pi SDK's,
-						// and the client used to learn ours from the update check —
-						// which a managed instance never runs.
-						appVersion: appVersion(),
-						buildId: buildId(),
-						managed: MANAGED,
-						tabs: TABS ? [...TABS] : undefined,
-						service: SERVICE_INFO ?? undefined,
-					});
 					// Plugin catalog: re-scan + activate new dirs on every attach so
 					// freshly dropped plugins show up without a server restart.
 					pluginMgr
@@ -2824,35 +3330,66 @@ wss.on("connection", (ws) => {
 							} catch {
 								/* 推送失败不挡快照 */
 							}
+							replayQueued();
 						})
 						.catch(() => {
 							if (closed) return;
 							// ensureLoaded 失败（如磁盘读错）不能卡死快照——前端 30s 无消息
 							// 会重连，重连又失败会陷入循环。至少把状态推下去。
 							cs.flushSnapshot();
+							replayQueued();
 						});
 					// hello may carry the UI locale — persist it before replaying
 					// anything queued during startup (issue #91).
 					if (msg.locale) void service.setLocale(cid, msg.locale);
-					// Replay anything that arrived while the session was starting.
-					const queued = pending;
-					pending = [];
-					for (const m of queued) dispatch(m);
+					// attach 期间收到的命令先排队（dispatch 里的 pending），必须等插件链
+					// 就绪后再重放：prompt 里可能是插件命令（/probe-grant 等），目录由
+					// 下面的 applyPluginCommandCatalog 同步；提前重放会撞上「未知命令」。
+					// ready 先行（issue #295）之前，客户端收到 ready 时 attach 已完成，
+					// 首条命令天然落在插件加载之后；现在 ready 与 attach 脱钩，不等就重放
+					// 等于把竞态窗口从一个 RTT 放大到整个插件扫描期（CI 必现 grant 超时）。
+					const replayQueued = (): void => {
+						attachDone = true;
+						for (const m of pending.drain()) dispatch(m);
+					};
 				})
 				.catch((err: unknown) => {
 					// Admission refused (quiesce): close the socket so the browser
 					// reconnect loop keeps retrying until admission reopens. Do NOT
 					// leave a half-alive connection that can only show an error.
+					clearTimeout(slowTimer);
 					if (err instanceof QuiesceRejectedError) {
 						closed = true;
 						if (ws.readyState === WebSocket.OPEN) {
-							ws.close(4403, "quiesced");
+							// 先发 4403 关闭帧，等它刷出去再真正撕连接：close 后立刻
+							// terminate 会把关闭握手一起掐掉，客户端只能看到 1006
+							// （quiesce-test 的 brand-new client 断言 4403）。
+							try {
+								ws.close(4403, "quiesced");
+							} catch {
+								/* already closing */
+							}
+							setTimeout(() => {
+								try {
+									if (ws.readyState !== WebSocket.CLOSED) ws.terminate?.();
+								} catch {
+									/* ignore */
+								}
+							}, 500);
+						} else {
+							try {
+								ws.terminate?.();
+							} catch {
+								/* ignore */
+							}
 						}
-						ws.terminate?.();
 						return;
 					}
 					// Real init failure (bad agent dir etc.) — keep the connection
 					// open so the user can see the error and fix it.
+					// 排队的命令此时无会话可服务，直接丢弃（否则 attachDone 永 false，
+					// 队列越积越深；用户修好后重连会重发 get_state）。
+					pending.clear();
 					send({
 						type: "notice",
 						level: "error",
@@ -2869,7 +3406,7 @@ wss.on("connection", (ws) => {
 	ws.on("close", () => {
 		service.noteSocketClose();
 		closed = true;
-		pending = [];
+		pending.clear();
 		removePluginSender();
 		if (snapshotRetryTimer) {
 			clearTimeout(snapshotRetryTimer);
@@ -2911,13 +3448,12 @@ httpServer.listen(PORT, HOST, () => {
 	console.log(`    session dir : ${SESSION_DIR_ROOT}`);
 	console.log(`    pi SDK      : v${VERSION}`);
 	// issue #260：全局那份 pi SDK 不是服务在用的那份（自带副本赢在 Node 解析顺序上）。
-	// 不提示的话，用户会以为 `npm i -g @earendil-works/pi-coding-agent@latest` 生效了。
+	// #321 起默认已反转（resolve-global-sdk 自动跟随更新的那份），这条提示只在
+	// 「进程没跟上」（升级发生在启动后 / 旧构建没注入钩子）或显式 PI_WEB_SDK=bundled
+	// 钉死自带副本时出现。
 	const sdkNote = sdkOriginNote(sdkCopies(), VERSION);
 	if (sdkNote) {
 		console.log(`    pi SDK note : ${sdkNote}`);
-		console.log(
-			`                  Upgrading the global pi CLI does not change this server — upgrade pi-web-ui instead.`,
-		);
 	}
 	console.log(`    bind        : ${HOST}:${PORT}`);
 	console.log("");
@@ -2947,7 +3483,7 @@ if (!bootCatalogDisabled) {
 			customCatalogPath: pluginMgr.customCatalogPath,
 			pluginsDir: join(DATA_DIR, "plugins"),
 			installer: pluginInstaller,
-			// Market metadata must not tear down running plugin instances.
+			// Market metadata must not tear down running plugin instances（重载会重复触发激活广播）。
 			afterWrite: (pluginsChanged) => (pluginsChanged ? reloadPluginsAndPush() : pluginMgr.pushCatalog()),
 		},
 	).then((r) => {
@@ -3045,6 +3581,7 @@ async function shutdown(signal: "SIGINT" | "SIGTERM" = "SIGINT"): Promise<void> 
 		pluginInstaller.dispose();
 		mcpHotReload.dispose();
 		mcpBridge.dispose();
+		await globalLspPool.shutdownAll();
 		await service.disposeAll();
 		// Don't let dead browsers hold the exit open: half-open WebSocket /
 		// keep-alive HTTP connections (e.g. test clients killed without

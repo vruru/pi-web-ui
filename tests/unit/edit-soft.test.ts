@@ -64,6 +64,58 @@ describe("edit_soft applySoftEdits", () => {
 		]);
 		expect(newContent).toBe("const a = 9;\nconst b = 8;\n");
 	});
+
+	// 回归：edits 若按「靠后的区域写在前面」的降序给出，也必须按位置升序应用。
+	// 旧实现按传入顺序逆序应用 → 后面的替换先改变长度，前面的偏移串位，写坏文件
+	// （历史 bug：protocol.ts / use-chat.ts / ChatInput.tsx）。
+	it("回归：edits 降序给出（后面的区域在前）也不串位", () => {
+		const file = "const A = 1; // aaaaaaaaaa\nconst B = 2; // bbbbbb\nconst C = 3; // cccc\n";
+		const eA = { oldText: "const A = 1; // aaaaaaaaaa", newText: "const A = 1; // A_EXTENDED_LONG" };
+		const eB = { oldText: "const B = 2; // bbbbbb", newText: "const B = 2;" };
+		const eC = { oldText: "const C = 3; // cccc", newText: "const C = 3; // Ccccccccccccccccccccc" };
+		const expected = "const A = 1; // A_EXTENDED_LONG\nconst B = 2;\nconst C = 3; // Ccccccccccccccccccccc\n";
+		// 所有 6 种排列都必须得到同一结果。
+		for (const order of [
+			[eA, eB, eC],
+			[eC, eB, eA],
+			[eB, eC, eA],
+			[eA, eC, eB],
+			[eC, eA, eB],
+			[eB, eA, eC],
+		]) {
+			expect(run(file, order).newContent).toBe(expected);
+		}
+	});
+
+	// 回归：多行块（含 } 结尾）降序给出，块内长度变化也不能让边框串位。
+	it("回归：以 } 结尾的多行块降序给出也不串位", () => {
+		const file = "if (a) {\n  b();\n}\nmid();\nif (c) {\n  d();\n}\n";
+		const { newContent } = run(file, [
+			{ oldText: "if (c) {\n  d();\n}", newText: "if (c) {\n  dd();\n}" },
+			{ oldText: "if (a) {\n  b();\n}", newText: "if (a) {\n  bb();\n  bb2();\n}" },
+		]);
+		expect(newContent).toBe("if (a) {\n  bb();\n  bb2();\n}\nmid();\nif (c) {\n  dd();\n}\n");
+	});
+});
+
+describe("edit_soft 非法片段防御", () => {
+	// 旧实现在这种「跨行但首/尾没对齐整行」的片段上会静默写出粘连内容：
+	// `foo(a);\nfoo(b);` 把 `a);\nfoo(` 换成 `z();` → `foo(z();b);`。现在拒绝。
+	it("跨行未对齐片段被拒绝（不再静默写坏）", () => {
+		expect(() => run("foo(a);\nfoo(b);\n", [{ oldText: "a);\nfoo(", newText: "z();" }])).toThrow(/line boundaries/);
+		expect(() => run("foo(a);\nb();\n", [{ oldText: "a);\nb();", newText: "z();" }])).toThrow(/line boundaries/);
+		expect(() => run("foo(a);\nb();\n", [{ oldText: "foo(a);\nb(", newText: "z();" }])).toThrow(/line boundaries/);
+	});
+
+	it("整行对齐的多行块仍正常", () => {
+		const { newContent } = run("foo(a);\nb();\n", [{ oldText: "foo(a);\nb();", newText: "foo(z);\nbb();" }]);
+		expect(newContent).toBe("foo(z);\nbb();\n");
+	});
+
+	it("单行片段仍允许（不影响行结构）", () => {
+		const { newContent } = run("if (x) { b(); }\n", [{ oldText: "b();", newText: "c();" }]);
+		expect(newContent).toBe("if (x) { c(); }\n");
+	});
 });
 
 describe("edit_soft oldTextCores", () => {

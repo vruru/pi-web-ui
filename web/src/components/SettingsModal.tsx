@@ -1,9 +1,11 @@
 import { usePluginUpdates } from "../use-plugin-updates";
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
 	FiAlertTriangle,
 	FiArchive,
 	FiBox,
+	FiChevronDown,
+	FiChevronUp,
 	FiClock,
 	FiCpu,
 	FiDownload,
@@ -21,6 +23,7 @@ import {
 	FiSend,
 	FiSettings,
 	FiShield,
+	FiVolume2,
 	FiSliders,
 	FiTool,
 	FiTrash2,
@@ -32,7 +35,7 @@ import {
 import { CopyButton } from "./copy-button";
 import { PluginIcon } from "../plugin-icon";
 import { HintTip } from "./HintTip";
-import { sortAgentPresets } from "./DshPresetBar";
+import { sortAgentPresets, presetText } from "./DshPresetBar";
 import { DSH_PERMISSION_ORDER, permDescKey, permLabelKey } from "./DshPermissionBar";
 import { PluginPage } from "./PluginPage";
 import { PluginSettingsForm } from "./PluginSettingsForm";
@@ -41,16 +44,21 @@ import type {
 	DshPermissionOption,
 	SchedulerTaskView,
 	UiAgentPreset,
+	UiApprovalRule,
 	UiExtensionInfo,
 	UiLayoutPrefs,
 	UiSlotId,
 	UiPluginCatalogEntry,
 	UiPluginInfo,
+	UiPluginUpdateInfo,
 	UiSettingsState,
 	UiSkillInfo,
 	UiSubagentTemplate,
 } from "../types";
 import { SchedulerPanel } from "./SchedulerPanel";
+import { SoundSettingsPanel, TtsSettingsPanel } from "./SoundSettings";
+import { playSound, type SoundSettings } from "../sounds";
+import { speak, type TtsSettings } from "../tts";
 import {
 	clearPromptHistory,
 	loadPromptHistory,
@@ -68,13 +76,15 @@ import { useT, useI18n } from "../i18n";
 import { UI_ZOOM_LEVELS, normalizeUiZoomPercent } from "../ui-zoom";
 import {
 	buildUiSlots,
+	HIDDEN_FROM_LAYOUT_ITEM_IDS,
 	REQUIRED_TOPBAR_ITEM_IDS,
 	restoreAllUi,
 	restoreUiItem,
 	withPluginViewItems,
+	type UiDiagnostic,
 	type UiSlotEntry,
 } from "../ui-slots";
-import type { CatalogSyncState, PluginJobState } from "../use-chat";
+import type { CatalogSyncState, PluginInstallInspectState, PluginJobState } from "../use-chat";
 import { appSend, useAppGlobals } from "../app-globals";
 import { countPluginPhases, pluginPhase, type PluginPhase } from "../plugin-phase";
 import {
@@ -86,9 +96,17 @@ import {
 	type PluginLogLevel,
 } from "../plugin-logs";
 import { QUICK_PHRASE_DEFAULTS } from "../quick-phrases";
-import { DEFAULT_PROMPT_TEMPLATE, PROMPT_TOKENS, isReadonlyPromptSource } from "../../../server/prompt-composer.js";
+import {
+	DEFAULT_PROMPT_TEMPLATE,
+	PROMPT_TOKENS,
+	estimatePromptTokens,
+	isReadonlyPromptSource,
+} from "../../../server/prompt-composer.js";
 import {
 	AGENT_TOOL_CATALOG,
+	CORE_BUILTIN_TOOL_NAMES,
+	filterToolsByPreset,
+	presetShowsSkillCatalog,
 	MARKERS_LIST_TOOL_NAME,
 	SUBAGENT_TOOL_NAMES,
 	TERMINAL_TOOL_NAMES,
@@ -126,10 +144,16 @@ interface SettingsModalProps {
 		plugins: UiPluginInfo[];
 		/** Installable-plugin list (marketplace) — one-click install candidates. */
 		pluginCatalog: UiPluginCatalogEntry[];
+		/** 插件更新状态表，key = pluginId。 */
+		pluginUpdates?: Record<string, UiPluginUpdateInfo> | null;
+		/** 是否正在检查插件更新。 */
+		checkingPluginUpdates?: boolean;
 		/** 插件后台作业（安装/更新/卸载）的实时状态，key = jobId（issue #152）。 */
 		pluginJobs: Record<string, PluginJobState>;
 		/** 最近一次目录同步的回执（issue #165「从目录同步」框展示用）。 */
 		catalogSync: CatalogSyncState | null;
+		/** 最近一次「安装前先读 spec」的检查结果（DSH P0-3）。 */
+		installInspect: PluginInstallInspectState | null;
 		/** 插件重载纪元：作为插件 client bundle URL 的 ?e= 缓存击穿参数传给插件页（#146）。 */
 		pluginsEpoch: number;
 		/** 插件目录授权表（设置面板列出 + 可撤销）。 */
@@ -159,7 +183,8 @@ interface SettingsModalProps {
 			exitCode: number | null;
 			command?: CommandDef;
 		}[];
-		state?: { cwd: string; conversationId: string } | null;
+		/** 轻量会话状态的窄投影（只列设置页要用的字段）。 */
+		state?: { cwd: string; conversationId: string; delegateMode?: boolean } | null;
 		activeConversationId?: string | null;
 		/** 内置定时任务（issue #184，全局列表；DSH 引擎下为空） */
 		schedulerTasks: SchedulerTaskView[];
@@ -168,6 +193,12 @@ interface SettingsModalProps {
 	/** Switch the top-level view to the terminal (uninstall runs there). */
 	onSwitchToTerminal: () => void;
 	onClose: () => void;
+	/** Sound cue + TTS settings — state lives in App (localStorage-backed),
+	 *  shared with the TopBar sound dropdown via props. */
+	sound: SoundSettings;
+	onSoundChange: (settings: SoundSettings) => void;
+	tts: TtsSettings;
+	onTtsChange: (settings: TtsSettings) => void;
 }
 
 /** A row with an enable/disable switch (skill / extension). */
@@ -218,6 +249,7 @@ function ToggleRow({
 	enabled,
 	onToggle,
 	action,
+	disabled,
 }: {
 	title: React.ReactNode;
 	subtitle?: string;
@@ -227,6 +259,8 @@ function ToggleRow({
 	onToggle: () => void;
 	/** Optional extra control rendered left of the switch (e.g. uninstall). */
 	action?: React.ReactNode;
+	/** 被默认预设过滤时禁用开关（展示实效 off，底层禁用名单原样保留）。 */
+	disabled?: boolean;
 }) {
 	const t = useT();
 	return (
@@ -244,8 +278,9 @@ function ToggleRow({
 				className={`set-switch ${enabled ? "on" : ""}`}
 				role="switch"
 				aria-checked={enabled}
+				disabled={disabled}
 				title={enabled ? t("settingsEnabled") : t("settingsDisabled")}
-				onClick={onToggle}
+				onClick={disabled ? undefined : onToggle}
 			>
 				<span className="set-switch-knob" />
 			</button>
@@ -367,8 +402,10 @@ type SettingsTab =
 	| "prompt-history"
 	| "scheduler"
 	| "tools"
+	| "approval-rules"
 	| "question"
 	| "display"
+	| "sound"
 	| "quick"
 	| "markers"
 	| "skills"
@@ -381,12 +418,122 @@ type SettingsTab =
 	| "subagent-templates"
 	| `plugin-page:${string}`;
 
-export function SettingsModal({ chat, terminal, initialSection, onSwitchToTerminal, onClose }: SettingsModalProps) {
+/** set_settings 允许的字段（原 setPartial 内联类型提出为具名类型，供乐观合并层复用）。 */
+interface SettingsPatch {
+	promptMode?: "append" | "replace";
+	customSystemPrompt?: string;
+	promptTemplate?: string;
+	promptOverrides?: Record<string, string>;
+	disabledSkills?: string[];
+	disabledExtensions?: string[];
+	disabledPlugins?: string[];
+	/** 宿主 UI 布局偏好（插件 UI 贡献 + 内置条目的隐藏/排序/分组；纯 UI，per-client）。 */
+	uiLayout?: UiLayoutPrefs;
+	uiZoomPercent?: number;
+	/** 统一工具禁用名单（工具 tab 逐工具开关；遗留单开关仍可用，会折回此名单）。 */
+	disabledAgentTools?: string[];
+	/** 插件 AI 工具禁用名单（工具名；live 生效无需 reload）。 */
+	disabledPluginTools?: string[];
+	terminalToolsEnabled?: boolean;
+	terminalBash?: boolean;
+	terminalBashIdleMs?: number;
+	terminalBashMaxForegroundMs?: number;
+	toolWatchdogTimeoutMs?: number;
+	/** read 工具读目录开关（默认开；行为开关，live 生效无需 reload，见 server/read-tool.ts）。 */
+	readDirEnabled?: boolean;
+	/** 工具执行审批总开关（默认开；纯运行开关，live 生效无需 reload）。 */
+	toolApprovalEnabled?: boolean;
+	editSoftEnabled?: boolean;
+	questionnaireEnabled?: boolean;
+	goalModeEnabled?: boolean;
+	parallelReminderEnabled?: boolean;
+	thinkingWrap?: boolean;
+	toolsWrap?: boolean;
+	toolImagesEnabled?: boolean;
+	devNoCache?: boolean;
+	autoReload?: boolean;
+	skillsFullText?: string[];
+	quickPhrases?: string[];
+	quickPhrasesEnabled?: boolean;
+	visionBridgeEnabled?: boolean;
+	visionBridgeModel?: string | null;
+	visionBridgePromptMode?: "append" | "replace";
+	visionBridgePrompt?: string;
+	scmCommitMsgPromptMode?: "append" | "replace";
+	scmCommitMsgPrompt?: string;
+	planModePromptMode?: "append" | "replace";
+	planModePrompt?: string;
+	planModeDefaultPrompt?: string;
+	subagentDefaultModel?: string | null;
+	retryMaxAttempts?: number;
+	softCapTokens?: number;
+	softCapByModel?: Record<string, number>;
+	reviewPrompt?: string;
+	reviewDisabledSkills?: string[];
+	markersEnabled?: boolean;
+	disabledMarkers?: string[];
+}
+
+/** 结构相等（乐观补丁对账用）：同值或 JSON 形态一致（覆盖数组/对象字段）。 */
+function looseEqual(a: unknown, b: unknown): boolean {
+	if (a === b) return true;
+	try {
+		return JSON.stringify(a) === JSON.stringify(b);
+	} catch {
+		return false;
+	}
+}
+
+/** 未确认补丁的最长存活时间：超过后以服务端为准落层（服务端会归一化部分字段，
+ *  或同值被另一端覆盖 —— 乐观值不能永久遮蔽真实状态）。 */
+const PENDING_MAX_AGE_MS = 10_000;
+
+export function SettingsModal({
+	chat,
+	terminal,
+	initialSection,
+	onSwitchToTerminal,
+	onClose,
+	sound,
+	onSoundChange,
+	tts,
+	onTtsChange,
+}: SettingsModalProps) {
 	const t = useT();
 	const { locale } = useI18n();
 	// {{token}} 元数据文案键是动态的（promptTok_<token>[,_desc]），用 tt 跳过字面量类型。
 	const tt = (k: string) => t(k as Parameters<typeof t>[0]);
-	const settings = chat.settings;
+	// 审查 #2：服务端快照是异步回程的，快速连续操作时（如连点两个技能开关）第二次
+	// 点击若直接从旧快照计算全量新值，会把第一次的修改覆盖回去（丢更新）。这里维护
+	// 一层「未确认补丁」：组件内所有显示与计算统一走 `settings` = 最新快照 + 补丁
+	// （原始快照留作 serverSettings 供对账）。
+	const serverSettings = chat.settings;
+	const [pendingSettings, setPendingSettings] = useState<Record<string, { value: unknown; at: number }>>({});
+	const settings = useMemo<UiSettingsState | null>(() => {
+		if (!serverSettings) return null;
+		if (Object.keys(pendingSettings).length === 0) return serverSettings;
+		const merged = { ...serverSettings } as UiSettingsState & Record<string, unknown>;
+		for (const [k, { value }] of Object.entries(pendingSettings)) merged[k] = value;
+		return merged;
+	}, [serverSettings, pendingSettings]);
+	// 快照回程 rebase：补丁值被服务端确认（原始快照追平）即落层；超过
+	// PENDING_MAX_AGE_MS 仍未追平的也落层 —— 服务端会归一化部分字段（trim/钳制/
+	// 去重）或值已被他端改写，以服务端为准，避免乐观值永久遮蔽真实状态。
+	useEffect(() => {
+		if (!serverSettings) return;
+		setPendingSettings((prev) => {
+			if (Object.keys(prev).length === 0) return prev;
+			const next: Record<string, { value: unknown; at: number }> = {};
+			const now = Date.now();
+			for (const [k, { value, at }] of Object.entries(prev)) {
+				const confirmed = looseEqual((serverSettings as unknown as Record<string, unknown>)[k], value);
+				if (!confirmed && now - at < PENDING_MAX_AGE_MS) next[k] = { value, at };
+			}
+			return Object.keys(next).length === Object.keys(prev).length ? prev : next;
+		});
+	}, [serverSettings]);
+	// 审批放行策略（仅内存、随对话走；审批弹窗的「允许同类 / 全部允许」在这里撤销）。
+	const approvalPolicy = settings?.approvalPolicy;
 	// 全局运行态（引擎 / 受管）：不再从 App 一路传进来，见 web/src/app-globals.ts。
 	const { engine, managed } = useAppGlobals();
 	// DSH 引擎：无 pi 扩展/技能体系与视觉桥概念 —— 隐藏对应分区/改占位说明。
@@ -412,6 +559,11 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 		}
 	}, [tab, isDsh]);
 
+	// 打开设置面板或当前工作区/会话切换时，主动拉取一次最新设置快照（确保 {{context}}、生效提示词与 token 估算为当前项目最新值）。
+	useEffect(() => {
+		appSend({ type: "get_settings" });
+	}, [chat.state?.cwd, chat.activeConversationId]);
+
 	// Compose prompt — 组合模板（{{token}} 自由拼装）+ 各来源覆盖。本地草稿：
 	// 模板聚焦中不覆盖；某个来源的覆盖框聚焦中不覆盖该 key（防回显打断输入）。
 	const [promptTemplateDraft, setPromptTemplateDraft] = useState("");
@@ -431,6 +583,9 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 	const [scmMsgDraft, setScmMsgDraft] = useState("");
 	const [scmMsgMode, setScmMsgMode] = useState<"append" | "replace">("append");
 	const scmMsgFocus = useRef(false);
+	const [planModeDraft, setPlanModeDraft] = useState("");
+	const [planModeMode, setPlanModeMode] = useState<"append" | "replace">("append");
+	const planModeFocus = useRef(false);
 	// Goal-review prompt is an independent draft: it does not change the main
 	// agent system prompt and is only used by the isolated reviewer.
 	const [reviewPromptDraft, setReviewPromptDraft] = useState("");
@@ -442,9 +597,26 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 	const [tplIsNew, setTplIsNew] = useState(false);
 	// 删除子代理模板的两步确认。
 	const [confirmTplDelete, setConfirmTplDelete] = useState<string | null>(null);
+	// 正在编辑的审批规则草稿。
+	const [ruleDraft, setRuleDraft] = useState<UiApprovalRule | null>(null);
+	const [ruleIsNew, setRuleIsNew] = useState(false);
+	const [ruleToolsText, setRuleToolsText] = useState("");
+	const [ruleError, setRuleError] = useState<string | null>(null);
+	const [confirmRuleDelete, setConfirmRuleDelete] = useState<string | null>(null);
+	const [confirmRuleReset, setConfirmRuleReset] = useState<string | null>(null);
 	// Read-only viewer for the FULL system prompt actually in effect.
 	const [showFullPrompt, setShowFullPrompt] = useState(false);
 	const [showToolsSchema, setShowToolsSchema] = useState(false);
+	// 当前生效提示词与工具 schema 的 token 占用（估算值，非精确分词）。
+	const promptTokenEstimate = useMemo(
+		() => estimatePromptTokens(settings?.effectiveSystemPrompt ?? ""),
+		[settings?.effectiveSystemPrompt],
+	);
+	const toolsSchemaTokenEstimate = useMemo(
+		() => estimatePromptTokens(settings?.toolsSchema ?? ""),
+		[settings?.toolsSchema],
+	);
+	const totalContextTokenEstimate = promptTokenEstimate + toolsSchemaTokenEstimate;
 	// 宽屏聊天列开关（纯前端 localStorage，见 chat-width-settings.ts）。
 	const wideChat = useWideChat();
 	// present_files 卡片：AI 标了「先看这个」时要不要自动弹预览窗（纯前端偏好，localStorage）。
@@ -568,13 +740,26 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 					: settings.scmCommitMsgDefaultPrompt || "",
 			);
 		}
+		// 计划模式提示词：replace 且存的是空（= 内置默认）时预填默认文本。
+		setPlanModeMode(settings.planModePromptMode);
+		if (!planModeFocus.current) {
+			setPlanModeDraft(
+				settings.planModePromptMode === "append" || settings.planModePrompt
+					? settings.planModePrompt
+					: settings.planModeDefaultPrompt || "",
+			);
+		}
 		if (!reviewPromptFocus.current) setReviewPromptDraft(settings.reviewPrompt);
-	}, [settings, vbPromptMode, scmMsgMode]);
+	}, [settings, vbPromptMode, scmMsgMode, planModeMode]);
 
 	const [idleMsDraft, setIdleMsDraft] = useState<string>(String(settings?.terminalBashIdleMs ?? 15000));
 	useEffect(() => {
 		setIdleMsDraft(String(settings?.terminalBashIdleMs ?? 15000));
 	}, [settings?.terminalBashIdleMs]);
+	const [maxMsDraft, setMaxMsDraft] = useState<string>(String(settings?.terminalBashMaxForegroundMs ?? 60000));
+	useEffect(() => {
+		setMaxMsDraft(String(settings?.terminalBashMaxForegroundMs ?? 60000));
+	}, [settings?.terminalBashMaxForegroundMs]);
 	// 工具看门狗超时（分钟，默认 20 分钟；0 = 禁用）。
 	const [watchdogMinDraft, setWatchdogMinDraft] = useState<string>(
 		String(Math.round((settings?.toolWatchdogTimeoutMs ?? 1200000) / 60_000)),
@@ -605,11 +790,15 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 	 *  刻意放在 tabs 之前（也就跑在上面的 `if (!settings) return null` 之前）：插件自定义页
 	 *  （settings.pages）也是导航的一项，得先算出来；而引用它的回落 effect 是 hook，
 	 *  不能写在条件 return 之后。 */
+	// 合并诊断（P0-1）：未知 slot / 未知 kind / arrange 目标不存在 / 插件被禁用或激活
+	// 失败都产出一条带归因的记录，布局页顶部横幅展示（按 pluginId 分组，可折叠）。
+	const uiDiagnostics: UiDiagnostic[] = [];
 	const uiSlots = buildUiSlots(withPluginViewItems(chat.plugins), {
 		locale,
 		t: (key: string) => t(key as Parameters<typeof t>[0]),
 		disabledPlugins: chat.settings?.disabledPlugins ?? [],
 		layout: chat.settings?.uiLayout,
+		diagnostics: uiDiagnostics,
 	});
 
 	/** `settings.pages` 里可渲染的插件页（导航一项 = 一页）。跳过：宿主条目（该槽位按契约是
@@ -641,12 +830,53 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 	const disabledTools = new Set(settings.disabledAgentTools ?? []);
 	const disabledToolsCount = disabledTools.size;
 
+	// pi 引擎默认预设的二次过滤（server/tool-manager.ts filterToolsByPreset）：预设是
+	// 禁用名单之外的第二层门控。默认预设为极简/代码/只读/纯对话时，大批开关看似开着
+	// 实则对新对话不生效——此处算出实效，被过滤的行置灰并在顶部挂横幅（一键切回全功能）。
+	const piPresetId = isDsh ? null : (chat.dshPresets?.defaultPreset ?? null);
+	const piPresetFiltering = !!piPresetId && piPresetId !== "standard";
+	const piPresetAllowed: Set<string> = piPresetFiltering
+		? new Set(
+				filterToolsByPreset(
+					[...AGENT_TOOL_CATALOG.map((e) => e.name), "bash", "read", "edit", "write"],
+					piPresetId ?? undefined,
+				),
+			)
+		: new Set(AGENT_TOOL_CATALOG.map((e) => e.name));
+	const piPresetName = presetText(
+		chat.dshPresets?.presets.find((pp) => pp.id === piPresetId) ?? {
+			id: piPresetId ?? "",
+			trust: "system",
+			isDefault: false,
+		},
+		locale,
+		t,
+	).name;
+	const isBlockedByPreset = (name: string) => piPresetFiltering && !piPresetAllowed.has(name);
+	const blockedPresetCount = piPresetFiltering
+		? AGENT_TOOL_CATALOG.filter((e) => !piPresetAllowed.has(e.name)).length
+		: 0;
+	// 非 standard 预设下插件工具一律不可用（见 tool-manager.ts 语义总表）：
+	// 横幅计数把「实际被拦的已启用插件工具」也算上，行级开关同步置灰。
+	const blockedPluginCount = piPresetFiltering
+		? chat.plugins
+				.flatMap((pp) => pp.agentTools ?? [])
+				.filter((pt) => !(settings.disabledPluginTools ?? []).includes(pt.name)).length
+		: 0;
+
+	// 界面插件更新检查状态
+	const pluginUpdates = chat.pluginUpdates;
+	const hasBuiltinPluginUpdate = Object.values(pluginUpdates ?? {}).some((u) => u.updatable && (u.builtin ?? false));
+	const hasAnyPluginUpdate = Object.values(pluginUpdates ?? {}).some((u) => u.updatable);
+
 	const tabs: {
 		id: SettingsTab;
 		icon: React.ReactNode;
 		label: string;
 		/** 有计数徽标（与各区块标题里的 set-count 同源）。 */
 		count?: number;
+		/** 状态指示红点（如存在内置插件更新）。 */
+		dot?: boolean;
 		/** 插件自定义页：内容交给 PluginPage 渲染（内置分区没有这一项）。 */
 		pluginPage?: { plugin: UiPluginInfo; entry: UiSlotEntry };
 		/** 悬浮提示（插件条目的 `hint`）。 */
@@ -681,12 +911,25 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 						label: t("settingsTools"),
 						count: disabledToolsCount + (settings.disabledMarkers?.length ?? 0) || undefined,
 					},
+					{
+						id: "approval-rules" as const,
+						icon: <FiShield />,
+						label: t("settingsApprovalRules"),
+						count: (settings.approvalRules ?? []).length || undefined,
+					},
 				]),
 		{ id: "display", icon: <FiMessageSquare />, label: t("settingsMessageDisplay") },
+		{ id: "sound", icon: <FiVolume2 />, label: t("settingsSoundVoice") },
 		{ id: "quick", icon: <FiSend />, label: t("quickPhrases"), count: settings.quickPhrases.length },
 		{ id: "skills", icon: <FiCpu />, label: t("settingsSkills"), count: settings.skills.length },
 		{ id: "extensions", icon: <FiPackage />, label: t("settingsExtensions"), count: settings.extensions.length },
-		{ id: "plugins", icon: <FiBox />, label: t("settingsUiPlugins"), count: chat.plugins.length },
+		{
+			id: "plugins",
+			icon: <FiBox />,
+			label: t("settingsUiPlugins"),
+			count: chat.plugins.length,
+			dot: hasBuiltinPluginUpdate || hasAnyPluginUpdate,
+		},
 		{ id: "layout", icon: <FiSliders />, label: t("uiLayoutTitle") },
 		{ id: "review", icon: <FiZap />, label: t("settingsReview"), count: settings.reviewSkills.length },
 		// DSH：无视觉桥概念（真图片直通 vision 模型），隐藏该分区。
@@ -730,54 +973,18 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 	const disabledSkills = new Set(settings.disabledSkills);
 	const disabledExts = new Set(settings.disabledExtensions);
 
-	const setPartial = (patch: {
-		promptMode?: "append" | "replace";
-		customSystemPrompt?: string;
-		promptTemplate?: string;
-		promptOverrides?: Record<string, string>;
-		disabledSkills?: string[];
-		disabledExtensions?: string[];
-		disabledPlugins?: string[];
-		/** 宿主 UI 布局偏好（插件 UI 贡献 + 内置条目的隐藏/排序/分组；纯 UI，per-client）。 */
-		uiLayout?: UiLayoutPrefs;
-		uiZoomPercent?: number;
-		/** 统一工具禁用名单（工具 tab 逐工具开关；遗留单开关仍可用，会折回此名单）。 */
-		disabledAgentTools?: string[];
-		/** 插件 AI 工具禁用名单（工具名；live 生效无需 reload）。 */
-		disabledPluginTools?: string[];
-		terminalToolsEnabled?: boolean;
-		terminalBash?: boolean;
-		terminalBashIdleMs?: number;
-		toolWatchdogTimeoutMs?: number;
-		/** read 工具读目录开关（默认开；行为开关，live 生效无需 reload，见 server/read-tool.ts）。 */
-		readDirEnabled?: boolean;
-		editSoftEnabled?: boolean;
-		questionnaireEnabled?: boolean;
-		goalModeEnabled?: boolean;
-		parallelReminderEnabled?: boolean;
-		thinkingWrap?: boolean;
-		toolsWrap?: boolean;
-		toolImagesEnabled?: boolean;
-		devNoCache?: boolean;
-		autoReload?: boolean;
-		skillsFullText?: string[];
-		quickPhrases?: string[];
-		quickPhrasesEnabled?: boolean;
-		visionBridgeEnabled?: boolean;
-		visionBridgeModel?: string | null;
-		visionBridgePromptMode?: "append" | "replace";
-		visionBridgePrompt?: string;
-		scmCommitMsgPromptMode?: "append" | "replace";
-		scmCommitMsgPrompt?: string;
-		subagentDefaultModel?: string | null;
-		retryMaxAttempts?: number;
-		softCapTokens?: number;
-		softCapByModel?: Record<string, number>;
-		reviewPrompt?: string;
-		reviewDisabledSkills?: string[];
-		markersEnabled?: boolean;
-		disabledMarkers?: string[];
-	}) => appSend({ type: "set_settings", ...patch });
+	const setPartial = (patch: SettingsPatch) => {
+		// 审查 #2：先把补丁盖进本地未确认层（显示立即生效，下一次点击的「全量新值」
+		// 计算也基于它），再原样发服务端（服务端只合并给出的字段）。快照回程后由
+		// 上方 rebase effect 对账落层。
+		const now = Date.now();
+		setPendingSettings((prev) => {
+			const stamped = { ...prev };
+			for (const [k, v] of Object.entries(patch)) stamped[k] = { value: v, at: now };
+			return stamped;
+		});
+		appSend({ type: "set_settings", ...patch });
+	};
 
 	/** 提交快捷短语行内编辑（空 = 取消；与原值相同 = 无操作；其余走服务端归一化）。 */
 	const commitQuickEdit = () => {
@@ -813,7 +1020,7 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 		chat.plugins.map((p) => [p.id, p.source]),
 		Object.values(chat.pluginJobs ?? {}).map((j) => [j.jobId, j.phase === "done", j.ok]),
 	]);
-	const pluginUpdates = usePluginUpdates(tab === "plugins" && !managed, updateRevision);
+	const updatablePlugins = usePluginUpdates(tab === "plugins" && !managed, updateRevision);
 	const togglePlugin = (p: UiPluginInfo) => {
 		const next = new Set(disabledPlugins);
 		if (next.has(p.id)) next.delete(p.id);
@@ -830,6 +1037,7 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 
 	// 子代理各工具的「?」说明（key 与 tool-manager.ts 的 SUBAGENT_TOOL_NAMES 对齐）。
 	const SUBAGENT_TOOL_TIPS: Record<string, string> = {
+		subagent: t("toolDescSubagent"),
 		subagent_spawn: t("toolDescSubagentSpawn"),
 		subagent_get_result: t("toolDescSubagentGetResult"),
 		subagent_steer: t("toolDescSubagentSteer"),
@@ -837,6 +1045,17 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 		subagent_stop: t("toolDescSubagentStop"),
 		subagent_wait_all: t("toolDescSubagentWaitAll"),
 		subagent_templates: t("toolDescSubagentTemplates"),
+	};
+	// 核心内置工具的「?」说明（key 与 tool-manager.ts 的 CORE_BUILTIN_TOOL_NAMES 对齐）。
+	const CORE_TOOL_TIPS: Record<string, string> = {
+		bash: t("toolCoreBashDesc"),
+		read: t("toolCoreReadDesc"),
+		edit: t("toolCoreEditDesc"),
+		write: t("toolCoreWriteDesc"),
+		powershell: t("toolCorePowershellDesc"),
+		ls: t("toolCoreLsDesc"),
+		grep: t("toolCoreGrepDesc"),
+		find: t("toolCoreFindDesc"),
 	};
 	// 统一工具开关（工具 tab 逐工具；与 toggleSkill 同模式）。
 	const toggleAgentTool = (name: string) => {
@@ -940,6 +1159,46 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 		return best;
 	};
 
+	/** 「安装前先读 spec」的一句话提示（DSH P0-3）：形状不对 / 已装 / 远端无 manifest
+	 *  都在输入框下就地告知，不阻塞填写；探到的 manifest 顺带展示给用户确认。 */
+	const inspectHint = (r: PluginInstallInspectState | null) => {
+		if (!r) return null;
+		if (r.problem === "already-installed")
+			return (
+				<div className="set-catalog-hint warn" data-problem={r.problem}>
+					{t("pluginInspectAlreadyInstalled", { id: r.suggestedId })}
+				</div>
+			);
+		if (r.problem === "network")
+			return (
+				<div className="set-catalog-hint" data-problem={r.problem}>
+					{t("pluginInspectNetwork")}
+				</div>
+			);
+		if (r.problem === "invalid-spec")
+			return (
+				<div className="set-catalog-hint warn" data-problem={r.problem}>
+					{t("pluginInspectInvalid")}
+				</div>
+			);
+		if (r.problem === "not-found" || r.problem === "not-a-package" || r.problem === "not-a-bundle")
+			return (
+				<div className="set-catalog-hint warn" data-problem={r.problem}>
+					{t("pluginInspectNotPlugin")}
+				</div>
+			);
+		if (r.problem) return <div className="set-catalog-hint warn">{r.detail}</div>;
+		if (!r.manifest) return null;
+		return (
+			<div className="set-catalog-hint ok" data-problem="ok">
+				<span aria-hidden>✓ </span>
+				{r.manifest.name ?? r.manifest.id ?? r.suggestedId}
+				{r.manifest.version ? ` v${r.manifest.version}` : ""}
+				{r.manifest.description ? ` · ${r.manifest.description}` : ""}
+			</div>
+		);
+	};
+
 	/** 就地显示作业状态：进行中（带最后一行输出）/ 成功 / 失败（带输出尾部）。 */
 	const renderJobStatus = (pluginId: string) => {
 		const job = jobFor(pluginId);
@@ -991,8 +1250,9 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 		{ slot: "modal.dialog", labelKey: "uiLayoutModal" },
 	];
 	/** 渲染层真正按 align 分区的槽位（其余槽位的 align 存了也无处生效，布局页就不提供了）。
-	 *  顶栏与底栏/输入框动作区同口径：顶栏现在**每个**条目的 align 都生效（贴边例外已取消，
-	 *  ☰/📁 也是普通条目：顺序、对齐、显隐全部可改，手机上它们默认就是最左/最右）。 */
+	 *  顶栏与底栏/输入框动作区同口径：顶栏可受管条目的 align 均生效（手机端特有的对话折叠
+	 *  按钮 host:history 与文件列表折叠按钮 host:files 是两侧列表的唯一入口，不可被管理显示，
+	 *  已从设置页中去掉）。 */
 	const uiAlignSlots: UiSlotId[] = ["bottombar", "composer.actions", "topbar.primary"];
 	const [uiLayoutFilter, setUiLayoutFilter] = useState("");
 	/** 槽位 id → 布局页分区标题（movedFrom「移自哪」的显示用）。 */
@@ -1120,6 +1380,33 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 		});
 	};
 
+	/** 「安装前先读 spec」：来源变了（防抖 500ms）自动查一次 —— 输入框下面就地显示
+	 *  形状/已装/远端有没有 manifest，不用等 CLI 跑完再猜（DSH P0-3）。 */
+	const [catInspectReq, setCatInspectReq] = useState("");
+	useEffect(() => {
+		const source = catSource.trim();
+		if (!source) {
+			setCatInspectReq("");
+			return;
+		}
+		const timer = setTimeout(() => {
+			const requestId = randomUuid();
+			setCatInspectReq(requestId);
+			appSend({
+				type: "plugin_install_inspect",
+				requestId,
+				source,
+				...(catId.trim() ? { explicitId: catId.trim() } : {}),
+			});
+		}, 500);
+		return () => clearTimeout(timer);
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [catSource, catId]);
+	/** 与当前输入对齐的那次检查结果：requestId 对得上、且来源与输入框一致
+	 *  （值变了、新结果还没回来时不展示旧结论，免得说错话）。 */
+	const insp = chat.installInspect;
+	const catInspect = insp && insp.requestId === catInspectReq && insp.source === catSource.trim() ? insp : null;
+
 	/** 正在等的那次同步的回执（requestId 对上才展示；别人的/插件的同步不掺和）。 */
 	const syncReceipt = chat.catalogSync && chat.catalogSync.requestId === catSyncReq ? chat.catalogSync : null;
 	// 同步成功才记住 URL（失败的不进“最近”，免得一键重放一个坏地址）。
@@ -1208,6 +1495,7 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 								<span className="settings-tab-icon">{tb.icon}</span>
 								<span className="settings-tab-label">{tb.label}</span>
 								{tb.count !== undefined && <span className="set-count">{tb.count}</span>}
+								{tb.dot && <span className="update-dot" style={{ marginLeft: 4 }} />}
 							</button>
 						))}
 					</nav>
@@ -1220,6 +1508,71 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 									{t("settingsSystemPrompt")}
 									<HintTip text={`${t("promptComposeHint")}\n${t("promptComposeDesc")}`} />
 								</div>
+								<div className="set-prompt-view-triggers">
+									<button
+										type="button"
+										className="set-view-prompt-btn"
+										aria-expanded={showFullPrompt}
+										onClick={() => setShowFullPrompt((v) => !v)}
+									>
+										<span>{t("settingsViewPrompt")}</span>
+										{promptTokenEstimate > 0 && (
+											<span className="set-prompt-token-est">
+												{t("settingsViewPromptTokens", { n: promptTokenEstimate.toLocaleString() })}
+											</span>
+										)}
+										<span>{showFullPrompt ? "▴" : "▾"}</span>
+									</button>
+									<button
+										type="button"
+										className="set-view-prompt-btn"
+										aria-expanded={showToolsSchema}
+										onClick={() => setShowToolsSchema((v) => !v)}
+									>
+										<span>{t("settingsViewToolsSchema")}</span>
+										{toolsSchemaTokenEstimate > 0 && (
+											<span className="set-prompt-token-est">
+												{t("settingsViewPromptTokens", { n: toolsSchemaTokenEstimate.toLocaleString() })}
+											</span>
+										)}
+										<span>{showToolsSchema ? "▴" : "▾"}</span>
+									</button>
+									{totalContextTokenEstimate > 0 && (
+										<span className="set-prompt-total-est">
+											{t("settingsPromptContextTotal", { n: totalContextTokenEstimate.toLocaleString() })}
+										</span>
+									)}
+								</div>
+								{showFullPrompt && (
+									<div className="set-prompt-view">
+										<div className="set-prompt-view-head">
+											<span>{t("settingsViewPrompt")}</span>
+											<HintTip text={t("settingsViewPromptHint")} />
+											<CopyButton text={settings.effectiveSystemPrompt} />
+										</div>
+										{settings.effectiveSystemPrompt ? (
+											<pre className="set-prompt-view-text">{settings.effectiveSystemPrompt}</pre>
+										) : (
+											<p className="set-empty">{t("settingsViewPromptEmpty")}</p>
+										)}
+									</div>
+								)}
+								{showToolsSchema && (
+									<div className="set-prompt-view">
+										<div className="set-prompt-tools">
+											<div className="set-prompt-view-head">
+												<span>{t("settingsViewToolsSchema")}</span>
+												<HintTip text={t("settingsViewToolsSchemaHint")} />
+												<CopyButton text={settings.toolsSchema} />
+											</div>
+											{settings.toolsSchema ? (
+												<pre className="set-prompt-view-text">{settings.toolsSchema}</pre>
+											) : (
+												<p className="set-empty">{t("settingsViewToolsSchemaEmpty")}</p>
+											)}
+										</div>
+									</div>
+								)}
 								<div className="set-field">
 									<label className="set-field-label">{t("promptTemplateLabel")}</label>
 									<textarea
@@ -1462,52 +1815,6 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 										</button>
 									</div>
 								</div>
-								<button
-									type="button"
-									className="set-view-prompt-btn"
-									aria-expanded={showFullPrompt}
-									onClick={() => setShowFullPrompt((v) => !v)}
-								>
-									{t("settingsViewPrompt")} {showFullPrompt ? "▴" : "▾"}
-								</button>
-								{showFullPrompt && (
-									<div className="set-prompt-view">
-										<div className="set-prompt-view-head">
-											<span>{t("settingsViewPrompt")}</span>
-											<HintTip text={t("settingsViewPromptHint")} />
-											<CopyButton text={settings.effectiveSystemPrompt} />
-										</div>
-										{settings.effectiveSystemPrompt ? (
-											<pre className="set-prompt-view-text">{settings.effectiveSystemPrompt}</pre>
-										) : (
-											<p className="set-empty">{t("settingsViewPromptEmpty")}</p>
-										)}
-									</div>
-								)}
-								<button
-									type="button"
-									className="set-view-prompt-btn"
-									aria-expanded={showToolsSchema}
-									onClick={() => setShowToolsSchema((v) => !v)}
-								>
-									{t("settingsViewToolsSchema")} {showToolsSchema ? "▴" : "▾"}
-								</button>
-								{showToolsSchema && (
-									<div className="set-prompt-view">
-										<div className="set-prompt-tools">
-											<div className="set-prompt-view-head">
-												<span>{t("settingsViewToolsSchema")}</span>
-												<HintTip text={t("settingsViewToolsSchemaHint")} />
-												<CopyButton text={settings.toolsSchema} />
-											</div>
-											{settings.toolsSchema ? (
-												<pre className="set-prompt-view-text">{settings.toolsSchema}</pre>
-											) : (
-												<p className="set-empty">{t("settingsViewToolsSchemaEmpty")}</p>
-											)}
-										</div>
-									</div>
-								)}
 							</div>
 						)}
 
@@ -1556,6 +1863,51 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 									onChange={(e) => setScmMsgDraft(e.target.value)}
 								/>
 								<p className="set-hint">{t("scmCommitMsgSettingsHint")}</p>
+							</div>
+						)}
+
+						{/* ---- 计划模式提示词（计划模式开启时追加给模型的那一段） ---- */}
+						{tab === "prompt" && !isDsh && (
+							<div className="set-section">
+								<div className="set-section-title">
+									<FiEdit3 className="set-section-icon" />
+									{t("planModePromptSettingsTitle")}
+									<HintTip text={t("planModePromptSettingsDesc")} />
+								</div>
+								<FieldRow label={t("planModePromptMode")}>
+									<select
+										className="set-select"
+										value={planModeMode}
+										onChange={(e) => {
+											const mode = e.target.value as "append" | "replace";
+											setPlanModeMode(mode);
+											setPartial({ planModePromptMode: mode });
+										}}
+									>
+										<option value="append">{t("promptModeAppend")}</option>
+										<option value="replace">{t("promptModeReplace")}</option>
+									</select>
+								</FieldRow>
+								<textarea
+									className="set-prompt-input"
+									rows={8}
+									placeholder={t("planModePromptPlaceholder")}
+									value={planModeDraft}
+									onFocus={() => (planModeFocus.current = true)}
+									onBlur={() => {
+										planModeFocus.current = false;
+										// 与系统提示词同一契约：replace 下未改动的内置默认存空（用默认）。
+										const text =
+											planModeMode === "replace" &&
+											settings.planModeDefaultPrompt &&
+											planModeDraft === settings.planModeDefaultPrompt
+												? ""
+												: planModeDraft;
+										setPartial({ planModePromptMode: planModeMode, planModePrompt: text });
+									}}
+									onChange={(e) => setPlanModeDraft(e.target.value)}
+								/>
+								<p className="set-hint">{t("planModePromptSettingsHint")}</p>
 							</div>
 						)}
 
@@ -1681,12 +2033,103 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 									<FiTool className="set-section-icon" />
 									{t("settingsTools")}
 								</div>
+								{piPresetFiltering && (
+									<p className="set-catalog-hint warn">
+										{t("toolsPresetBanner", { name: piPresetName, count: blockedPresetCount + blockedPluginCount })}{" "}
+										<button
+											type="button"
+											className="chip"
+											onClick={() => appSend({ type: "dsh_preset_default", preset: "standard" })}
+										>
+											{t("toolsBackToStandard")}
+										</button>
+									</p>
+								)}
 								<ToggleRow
 									title={t("readDirEnabled")}
 									tip={t("readDirEnabledDesc")}
 									enabled={settings.readDirEnabled !== false}
 									onToggle={() => setPartial({ readDirEnabled: settings.readDirEnabled === false })}
 								/>
+								<ToggleRow
+									title={t("toolApprovalEnabled")}
+									tip={t("toolApprovalEnabledDesc")}
+									enabled={settings.toolApprovalEnabled !== false}
+									onToggle={() => setPartial({ toolApprovalEnabled: settings.toolApprovalEnabled === false })}
+									action={
+										!isDsh ? (
+											<button
+												type="button"
+												className="tpl-chip"
+												onClick={() => setTab("approval-rules")}
+												title={t("settingsApprovalRulesDesc")}
+											>
+												<FiShield /> {t("manageApprovalRules")}
+											</button>
+										) : undefined
+									}
+								/>
+								{chat.dshPermission && chat.dshPermission.options.length > 0 && (
+									<div className="set-mode-row" style={{ marginTop: 8, marginBottom: 8 }}>
+										<label className="set-field-label">
+											{t("dshPermDefault")}
+											<HintTip text={t("dshPermDefaultDesc")} />
+										</label>
+										<select
+											className="set-select"
+											value={chat.dshPermission.defaultPreset}
+											onChange={(e) => appSend({ type: "dsh_permission_default", preset: e.target.value })}
+										>
+											{DSH_PERMISSION_ORDER.filter((v) => chat.dshPermission!.options.some((o) => o.value === v)).map(
+												(v) => (
+													<option key={v} value={v}>
+														{t(permLabelKey(v))}
+													</option>
+												),
+											)}
+										</select>
+									</div>
+								)}
+								{/* 已记住的放行（本对话）：只存内存，撤销就在设置里（审批弹窗本身不再出现） */}
+								{approvalPolicy?.allowAll || (approvalPolicy?.categories.length ?? 0) > 0 ? (
+									<div className="set-field" style={{ marginTop: 8 }}>
+										<div className="set-field-label">
+											{t("toolApprovalPolicyTitle")}
+											<HintTip text={t("toolApprovalPolicyHint")} />
+										</div>
+										{approvalPolicy?.allowAll && (
+											<div className="set-row">
+												<span className="set-hint">{t("toolApprovalPolicyAllowAll")}</span>
+												<button
+													type="button"
+													className="btn"
+													onClick={() => appSend({ type: "set_approval_policy", allowAll: false })}
+												>
+													{t("toolApprovalPolicyRevoke")}
+												</button>
+											</div>
+										)}
+										{(approvalPolicy?.categories ?? []).map((c) => (
+											<div className="set-row" key={c.id}>
+												<span className="set-hint">{locale === "zh" ? c.label : c.labelEn}</span>
+												<button
+													type="button"
+													className="btn"
+													onClick={() =>
+														appSend({
+															type: "set_approval_policy",
+															categories: (approvalPolicy?.categories ?? [])
+																.filter((x) => x.id !== c.id)
+																.map((x) => x.id),
+														})
+													}
+												>
+													{t("toolApprovalPolicyRevoke")}
+												</button>
+											</div>
+										))}
+									</div>
+								) : null}
 								<FieldRow
 									label={t("toolWatchdogTimeout")}
 									tip={t("toolWatchdogTimeoutDesc")}
@@ -1715,16 +2158,39 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 										}}
 									/>
 								</FieldRow>
+								<div className="set-field-label">
+									{t("toolsSectionCore")}
+									<HintTip text={t("toolsCoreHint")} />
+								</div>
+								{CORE_BUILTIN_TOOL_NAMES.map((n) => {
+									const blocked = isBlockedByPreset(n);
+									return (
+										<ToggleRow
+											key={n}
+											title={n}
+											tip={CORE_TOOL_TIPS[n]}
+											subtitle={blocked ? t("toolsBlockedByPreset", { name: piPresetName }) : undefined}
+											enabled={!blocked && !disabledTools.has(n)}
+											disabled={blocked}
+											onToggle={() => toggleAgentTool(n)}
+										/>
+									);
+								})}
 								<div className="set-field-label">{t("toolsSectionTerminal")}</div>
-								{TERMINAL_TOOL_NAMES.map((n) => (
-									<ToggleRow
-										key={n}
-										title={n}
-										tip={t("settingsTerminalToolsDesc")}
-										enabled={!disabledTools.has(n)}
-										onToggle={() => toggleAgentTool(n)}
-									/>
-								))}
+								{TERMINAL_TOOL_NAMES.map((n) => {
+									const blocked = isBlockedByPreset(n);
+									return (
+										<ToggleRow
+											key={n}
+											title={n}
+											tip={t("settingsTerminalToolsDesc")}
+											subtitle={blocked ? t("toolsBlockedByPreset", { name: piPresetName }) : undefined}
+											enabled={!blocked && !disabledTools.has(n)}
+											disabled={blocked}
+											onToggle={() => toggleAgentTool(n)}
+										/>
+									);
+								})}
 								<ToggleRow
 									title={t("terminalBashTakeover")}
 									tip={t("terminalBashTakeoverDesc")}
@@ -1732,37 +2198,66 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 									onToggle={() => setPartial({ terminalBash: !settings.terminalBash })}
 								/>
 								{settings.terminalBash && (
-									<FieldRow label={t("terminalBashIdleMs")} htmlFor="tb-idle-ms">
-										<input
-											id="tb-idle-ms"
-											className="set-input"
-											type="number"
-											min={0}
-											step={1000}
-											value={idleMsDraft}
-											onChange={(e) => setIdleMsDraft(e.target.value)}
-											onBlur={() => {
-												const n = Math.max(0, Math.floor(Number(idleMsDraft) || 0));
-												setIdleMsDraft(String(n));
-												if (n !== settings.terminalBashIdleMs) {
-													setPartial({ terminalBashIdleMs: n });
-												}
-											}}
-										/>
-									</FieldRow>
+									<>
+										<FieldRow label={t("terminalBashIdleMs")} tip={t("terminalBashIdleMsDesc")} htmlFor="tb-idle-ms">
+											<input
+												id="tb-idle-ms"
+												className="set-input"
+												type="number"
+												min={0}
+												step={1000}
+												value={idleMsDraft}
+												onChange={(e) => setIdleMsDraft(e.target.value)}
+												onBlur={() => {
+													const n = Math.max(0, Math.floor(Number(idleMsDraft) || 0));
+													setIdleMsDraft(String(n));
+													if (n !== settings.terminalBashIdleMs) {
+														setPartial({ terminalBashIdleMs: n });
+													}
+												}}
+											/>
+										</FieldRow>
+										<FieldRow
+											label={t("terminalBashMaxForegroundMs")}
+											tip={t("terminalBashMaxForegroundMsDesc")}
+											htmlFor="tb-max-ms"
+										>
+											<input
+												id="tb-max-ms"
+												className="set-input"
+												type="number"
+												min={0}
+												step={1000}
+												value={maxMsDraft}
+												onChange={(e) => setMaxMsDraft(e.target.value)}
+												onBlur={() => {
+													const n = Math.max(0, Math.floor(Number(maxMsDraft) || 0));
+													setMaxMsDraft(String(n));
+													if (n !== settings.terminalBashMaxForegroundMs) {
+														setPartial({ terminalBashMaxForegroundMs: n });
+													}
+												}}
+											/>
+										</FieldRow>
+									</>
 								)}
 								<div className="set-field-label">
 									{t("toolsSectionSubagent")} <HintTip text={t("toolsSubagentDepHint")} />
 								</div>
-								{SUBAGENT_TOOL_NAMES.map((n) => (
-									<ToggleRow
-										key={n}
-										title={n}
-										tip={SUBAGENT_TOOL_TIPS[n]}
-										enabled={!disabledTools.has(n)}
-										onToggle={() => toggleAgentTool(n)}
-									/>
-								))}
+								{SUBAGENT_TOOL_NAMES.map((n) => {
+									const blocked = isBlockedByPreset(n);
+									return (
+										<ToggleRow
+											key={n}
+											title={n}
+											tip={SUBAGENT_TOOL_TIPS[n]}
+											subtitle={blocked ? t("toolsBlockedByPreset", { name: piPresetName }) : undefined}
+											enabled={!blocked && !disabledTools.has(n)}
+											disabled={blocked}
+											onToggle={() => toggleAgentTool(n)}
+										/>
+									);
+								})}
 								<div className="set-field-label">
 									{t("settingsMarkers")}
 									<HintTip text={`${t("settingsMarkersDesc")}\n${t("markerRenameTip")}`} />
@@ -1799,19 +2294,30 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 								<ToggleRow
 									title={MARKERS_LIST_TOOL_NAME}
 									tip={`${t("todoListEnabledDesc")}\n${t("todoListOffHint")}`}
-									enabled={!disabledTools.has(MARKERS_LIST_TOOL_NAME)}
+									subtitle={
+										isBlockedByPreset(MARKERS_LIST_TOOL_NAME)
+											? t("toolsBlockedByPreset", { name: piPresetName })
+											: undefined
+									}
+									enabled={!isBlockedByPreset(MARKERS_LIST_TOOL_NAME) && !disabledTools.has(MARKERS_LIST_TOOL_NAME)}
+									disabled={isBlockedByPreset(MARKERS_LIST_TOOL_NAME)}
 									onToggle={() => toggleAgentTool(MARKERS_LIST_TOOL_NAME)}
 								/>
 								<div className="set-field-label">{t("toolsSectionOther")}</div>
-								{OTHER_AGENT_TOOLS.map((tool) => (
-									<ToggleRow
-										key={tool.name}
-										title={tool.name}
-										tip={`${tt(tool.descKey ?? tool.name)}\n${tt(tool.offHintKey ?? tool.name)}`}
-										enabled={!disabledTools.has(tool.name)}
-										onToggle={() => toggleAgentTool(tool.name)}
-									/>
-								))}
+								{OTHER_AGENT_TOOLS.map((tool) => {
+									const blocked = isBlockedByPreset(tool.name);
+									return (
+										<ToggleRow
+											key={tool.name}
+											title={tool.name}
+											tip={`${tt(tool.descKey ?? tool.name)}\n${tt(tool.offHintKey ?? tool.name)}`}
+											subtitle={blocked ? t("toolsBlockedByPreset", { name: piPresetName }) : undefined}
+											enabled={!blocked && !disabledTools.has(tool.name)}
+											disabled={blocked}
+											onToggle={() => toggleAgentTool(tool.name)}
+										/>
+									);
+								})}
 								<div className="set-field-label">
 									{t("toolsSectionPlugin")}
 									<HintTip text={t("toolsPluginHint")} />
@@ -1819,25 +2325,39 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 								{pluginToolGroups.length === 0 ? (
 									<p className="set-empty">{chat.plugins.length === 0 ? t("noUiPlugins") : t("pluginToolsEmpty")}</p>
 								) : (
-									pluginToolGroups.map((g) => (
-										<div key={g.plugin.id}>
-											<div className="set-row-desc">
-												{g.plugin.icon ? `${g.plugin.icon} ` : ""}
-												{g.plugin.name} · {g.plugin.id}
+									pluginToolGroups.map((g) => {
+										const pluginDisabled = disabledPlugins.has(g.plugin.id);
+										return (
+											<div key={g.plugin.id}>
+												<div className="set-row-desc">
+													{g.plugin.icon ? `${g.plugin.icon} ` : ""}
+													{g.plugin.name} · {g.plugin.id}
+													{pluginDisabled ? ` (${t("pluginDisabledInPlugins")})` : ""}
+												</div>
+												{g.tools.map((tool) => (
+													<ToggleRow
+														key={tool.name}
+														title={tool.label && tool.label !== tool.name ? `${tool.label} (${tool.name})` : tool.name}
+														tip={
+															tool.description
+																? `${tool.description}\n${t("pluginToolOffHint")}`
+																: t("pluginToolOffHint")
+														}
+														subtitle={
+															pluginDisabled
+																? t("pluginToolsDisabledByPlugin")
+																: piPresetFiltering
+																	? t("toolsBlockedByPreset", { name: piPresetName })
+																	: undefined
+														}
+														enabled={!pluginDisabled && !piPresetFiltering && !disabledPluginTools.has(tool.name)}
+														disabled={pluginDisabled || piPresetFiltering}
+														onToggle={() => !pluginDisabled && !piPresetFiltering && togglePluginTool(tool.name)}
+													/>
+												))}
 											</div>
-											{g.tools.map((tool) => (
-												<ToggleRow
-													key={tool.name}
-													title={tool.label && tool.label !== tool.name ? `${tool.label} (${tool.name})` : tool.name}
-													tip={
-														tool.description ? `${tool.description}\n${t("pluginToolOffHint")}` : t("pluginToolOffHint")
-													}
-													enabled={!disabledPluginTools.has(tool.name)}
-													onToggle={() => togglePluginTool(tool.name)}
-												/>
-											))}
-										</div>
-									))
+										);
+									})
 								)}
 							</div>
 						)}
@@ -2147,6 +2667,26 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 							</div>
 						)}
 
+						{/* ---- 声音与语音（提示音事件开关 + 本地 TTS 播报，issue #288） ---- */}
+						{tab === "sound" && (
+							<div className="set-section">
+								<div className="set-section-title">
+									<FiVolume2 className="set-section-icon" />
+									{t("settingsSoundVoice")}
+								</div>
+								<SoundSettingsPanel
+									settings={sound}
+									onChange={onSoundChange}
+									onPreview={(kind) => playSound(kind, sound)}
+								/>
+								<TtsSettingsPanel
+									settings={tts}
+									onChange={onTtsChange}
+									onPreview={() => speak(t("ttsPreviewLine"), { ...tts, enabled: true })}
+								/>
+							</div>
+						)}
+
 						{/* ---- 快捷短语（输入框上方一键发送） ------------------------------ */}
 						{tab === "quick" && (
 							<div className="set-section">
@@ -2294,6 +2834,9 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 									<HintTip text={`${t("skillFullTextLabel")}：${t("skillFullTextDesc")}`} />
 									<span className="set-count">{settings.skills.length}</span>
 								</div>
+								{!isDsh && piPresetFiltering && !presetShowsSkillCatalog(piPresetId ?? undefined) && (
+									<p className="set-catalog-hint warn">{t("skillsHiddenByPreset", { name: piPresetName })}</p>
+								)}
 								{settings.skills.length === 0 ? (
 									<p className="set-empty">{isDsh ? t("dshSkillsNote") : t("noSkills")}</p>
 								) : (
@@ -2392,6 +2935,21 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 									</button>
 								</div>
 								<div className="set-note">{t("uiLayoutHint")}</div>
+								{uiDiagnostics.length > 0 && (
+									<details className="set-ui-diag" open={uiDiagnostics.some((d) => d.level === "error")}>
+										<summary>⚠ {t("uiLayoutDiagTitle", { n: uiDiagnostics.length })}</summary>
+										<ul className="set-ui-diag-list">
+											{uiDiagnostics.map((d, i) => (
+												<li key={`${d.pluginId ?? "host"}:${d.entryId ?? i}`} className={`set-ui-diag-item ${d.level}`}>
+													{d.pluginId ? <code>{d.pluginId}</code> : null}
+													{d.entryId ? <code>{d.entryId}</code> : null}
+													<span>{d.message}</span>
+												</li>
+											))}
+										</ul>
+										<div className="set-ui-diag-hint">{t("uiLayoutDiagHint")}</div>
+									</details>
+								)}
 								<input
 									className="set-ui-filter"
 									value={uiLayoutFilter}
@@ -2424,7 +2982,13 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 								</div>
 								{uiLayoutSections.map(({ slot, labelKey }) => {
 									const entries = (uiSlots[slot] ?? []).filter(
-										(e) => isDsh || (e.id !== "host:composer-dsh-perm" && e.id !== "host:composer-dsh-preset"),
+										(e) =>
+											(isDsh ||
+												(e.id !== "host:composer-dsh-perm" &&
+													e.id !== "host:composer-dsh-preset" &&
+													// 计划模式靠 pi 引擎的工具硬闸门，DSH 无 customTools 注册面 → 不列。
+													e.id !== "host:goal-plan")) &&
+											!HIDDEN_FROM_LAYOUT_ITEM_IDS.has(e.id),
 									);
 									const q = uiLayoutFilter.trim().toLowerCase();
 									// 按实际界面分组展示：顶栏/底栏/输入框动作区在界面上按对齐段
@@ -2584,8 +3148,12 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 										bodyRef.current?.scrollTo({ top: 0 });
 									}}
 								>
+									<FiBox />
 									{t("pluginListTab")}
 									<span className="set-count">{chat.plugins.length}</span>
+									{(hasBuiltinPluginUpdate || hasAnyPluginUpdate) && (
+										<span className="update-dot" style={{ marginLeft: 4 }} />
+									)}
 								</button>
 							</div>
 						)}
@@ -2838,6 +3406,7 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 											value={catSource}
 											onChange={(ev) => setCatSource(ev.target.value)}
 										/>
+										{inspectHint(catInspect)}
 										<input
 											className="set-input"
 											placeholder={t("pluginCatalogId")}
@@ -2884,6 +3453,9 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 									<div className="set-list set-list-flat">
 										{chat.pluginCatalog.map((e) => {
 											const installed = installedPluginIds.has(e.id);
+											const upd = chat.pluginUpdates?.[e.id];
+											const isUpdatable = installed && (updatablePlugins.has(e.id) || upd?.updatable === true);
+											const isRunning = Boolean(jobFor(e.id) && jobFor(e.id)?.phase !== "done");
 											return (
 												<div key={e.id} className="set-catalog-row">
 													<div className="set-catalog-main">
@@ -2893,6 +3465,19 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 															</span>
 															{installed && <span className="set-catalog-installed">{t("pluginInstalled")}</span>}
 															{!e.builtin && <span className="set-catalog-custom">{t("pluginCatalogCustom")}</span>}
+															{isUpdatable && (
+																<span
+																	className="set-catalog-update-badge"
+																	title={
+																		upd?.latestVersion
+																			? `${upd?.version ?? ""} → v${upd.latestVersion}`
+																			: (upd?.remoteSha ?? "")
+																	}
+																>
+																	{t("pluginUpdateAvailableBadge")}
+																	{upd?.latestVersion ? ` v${upd.latestVersion}` : ""}
+																</span>
+															)}
 														</div>
 														{e.description && <div className="set-catalog-desc">{e.description}</div>}
 														<div className="set-catalog-source">{e.source}</div>
@@ -2901,21 +3486,27 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 													<div className="set-row-actions">
 														{installed ? (
 															<>
-																{pluginUpdates.has(e.id) && (
+																{isUpdatable && (
 																	<button
 																		type="button"
-																		className="set-uninstall"
-																		title={t("pluginUpdateHint")}
+																		className={`set-uninstall${isUpdatable ? " accent" : ""}`}
+																		disabled={isRunning}
+																		title={
+																			isUpdatable && upd?.latestVersion
+																				? t("pluginUpdateAvailableDetail", { version: `v${upd.latestVersion}` })
+																				: t("pluginUpdateHint")
+																		}
 																		onClick={() => runUiPluginUpdate(e.id, e.source)}
 																	>
-																		<FiRefreshCw />
-																		{t("pluginUpdate")}
+																		<FiRefreshCw className={isRunning ? "set-job-spin" : ""} />
+																		{isRunning ? t("pluginJobRunning") : t("pluginUpdate")}
 																	</button>
 																)}
 																{confirmUiUninstall === e.id ? (
 																	<button
 																		type="button"
 																		className="set-uninstall confirm"
+																		disabled={isRunning}
 																		title={t("pluginUninstallHint")}
 																		onClick={() => runUiPluginUninstall(e.id)}
 																	>
@@ -2925,6 +3516,7 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 																	<button
 																		type="button"
 																		className="set-uninstall"
+																		disabled={isRunning}
 																		title={t("pluginUninstallHint")}
 																		onClick={() => setConfirmUiUninstall(e.id)}
 																	>
@@ -2938,10 +3530,20 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 																type="button"
 																className="set-uninstall"
 																title={t("pluginInstallHint")}
+																disabled={isRunning}
 																onClick={() => runCatalogInstall(e)}
 															>
-																<FiDownload />
-																{t("pluginInstall")}
+																{isRunning ? (
+																	<>
+																		<FiRefreshCw className="set-job-spin" />
+																		{t("pluginJobRunning")}
+																	</>
+																) : (
+																	<>
+																		<FiDownload />
+																		{t("pluginInstall")}
+																	</>
+																)}
 															</button>
 														)}
 														{!e.builtin && (
@@ -2973,6 +3575,16 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 									<button
 										type="button"
 										className="set-uninstall"
+										title={t("pluginCheckUpdatesHint")}
+										disabled={chat.checkingPluginUpdates}
+										onClick={() => appSend({ type: "check_plugin_updates" })}
+									>
+										<FiRefreshCw className={chat.checkingPluginUpdates ? "spin" : ""} />
+										{chat.checkingPluginUpdates ? t("checkingUpdate") : t("pluginCheckUpdates")}
+									</button>
+									<button
+										type="button"
+										className="set-uninstall"
 										title={t("pluginRescanHint")}
 										onClick={() => appSend({ type: "plugins_reload" })}
 									>
@@ -2987,164 +3599,191 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 									<p className="set-empty">{t("noUiPlugins")}</p>
 								) : (
 									<div className="set-list set-list-flat">
-										{chat.plugins.map((p) => (
-											<Fragment key={p.id}>
-												<ToggleRow
-													key={p.id}
-													title={
-														<>
-															<InvDot
-																phase={pluginPhase(p, disabledPlugins.has(p.id))}
-																label={tt(phaseLabelKey(pluginPhase(p, disabledPlugins.has(p.id))))}
-															/>
-															<PluginIcon icon={p.icon} iconSvg={p.iconSvg} /> {p.name}
-														</>
-													}
-													subtitle={
-														(p.error
-															? `${p.id} · ${p.error}`
-															: p.source
-																? `${p.id} · ${p.source}`
-																: `${p.id} · ${t("uiPluginNoSource")}`) +
-														(p.permissions?.length ? ` · ${t("uiPluginPerms")}: ${p.permissions.join(", ")}` : "")
-													}
-													enabled={!disabledPlugins.has(p.id) && !p.error}
-													onToggle={() => !p.error && togglePlugin(p)}
-													action={
-														<div className="set-row-actions">
-															{p.source && pluginUpdates.has(p.id) && (
-																<button
-																	type="button"
-																	className="set-uninstall"
-																	title={t("pluginUpdateHint")}
-																	onClick={() => runUiPluginUpdate(p.id, p.source!)}
-																>
-																	<FiRefreshCw />
-																	{t("pluginUpdate")}
+										{chat.plugins.map((p) => {
+											const upd = chat.pluginUpdates?.[p.id];
+											// Offered only for a verified newer source (fork rule); either check may confirm it.
+											const isUpdatable = updatablePlugins.has(p.id) || upd?.updatable === true;
+											const isRunning = Boolean(jobFor(p.id) && jobFor(p.id)?.phase !== "done");
+											return (
+												<Fragment key={p.id}>
+													<ToggleRow
+														key={p.id}
+														title={
+															<>
+																<InvDot
+																	phase={pluginPhase(p, disabledPlugins.has(p.id))}
+																	label={tt(phaseLabelKey(pluginPhase(p, disabledPlugins.has(p.id))))}
+																/>
+																<PluginIcon icon={p.icon} iconSvg={p.iconSvg} /> {p.name}
+																{isUpdatable && (
+																	<span
+																		className="set-catalog-update-badge"
+																		title={
+																			upd?.latestVersion
+																				? `v${p.version ?? "0.0.0"} → v${upd.latestVersion}`
+																				: (upd?.remoteSha ?? "")
+																		}
+																	>
+																		{t("pluginUpdateAvailableBadge")}
+																		{upd?.latestVersion ? ` v${upd.latestVersion}` : ""}
+																	</span>
+																)}
+															</>
+														}
+														subtitle={
+															(p.error
+																? `${p.id} · ${p.error}`
+																: p.source
+																	? `${p.id} · ${p.source}`
+																	: `${p.id} · ${t("uiPluginNoSource")}`) +
+															(p.permissions?.length ? ` · ${t("uiPluginPerms")}: ${p.permissions.join(", ")}` : "")
+														}
+														enabled={!disabledPlugins.has(p.id) && !p.error}
+														onToggle={() => !p.error && togglePlugin(p)}
+														action={
+															<div className="set-row-actions">
+																{p.source && isUpdatable && (
+																	<button
+																		type="button"
+																		className={`set-uninstall${isUpdatable ? " accent" : ""}`}
+																		disabled={isRunning}
+																		title={
+																			isUpdatable && upd?.latestVersion
+																				? t("pluginUpdateAvailableDetail", { version: `v${upd.latestVersion}` })
+																				: t("pluginUpdateHint")
+																		}
+																		onClick={() => runUiPluginUpdate(p.id, p.source!)}
+																	>
+																		<FiRefreshCw className={isRunning ? "set-job-spin" : ""} />
+																		{isRunning ? t("pluginJobRunning") : t("pluginUpdate")}
+																	</button>
+																)}
+																{confirmUiUninstall === p.id ? (
+																	<button
+																		type="button"
+																		className="set-uninstall confirm"
+																		disabled={isRunning}
+																		title={t("pluginUninstallHint")}
+																		onClick={() => runUiPluginUninstall(p.id)}
+																	>
+																		{t("uninstallConfirm")}
+																	</button>
+																) : (
+																	<button
+																		type="button"
+																		className="set-uninstall"
+																		disabled={isRunning}
+																		title={t("pluginUninstallHint")}
+																		onClick={() => setConfirmUiUninstall(p.id)}
+																	>
+																		<FiTrash2 />
+																		{t("uninstallExt")}
+																	</button>
+																)}
+															</div>
+														}
+													/>
+													{renderJobStatus(p.id)}
+													{/* 注册的 AI 工具开关统一收口到「工具」tab 汇总区，这里只保留一行入口（免得已装列表太长；DSH 无工具 tab 则不显示） */}
+													{p.agentTools && p.agentTools.length > 0 && !isDsh && (
+														<div className="set-row" title={t("pluginToolOffHint")}>
+															<span className="set-ui-source">
+																{t("pluginToolsSection")} ({p.agentTools.length})
+																{p.agentTools.some((tool) => disabledPluginTools.has(tool.name))
+																	? ` · ${t("settingsDisabled")}`
+																	: ""}
+															</span>
+															<div className="set-row-actions">
+																<button type="button" className="set-uninstall" onClick={() => setTab("tools")}>
+																	{t("settingsTools")} →
 																</button>
-															)}
-															{confirmUiUninstall === p.id ? (
-																<button
-																	type="button"
-																	className="set-uninstall confirm"
-																	title={t("pluginUninstallHint")}
-																	onClick={() => runUiPluginUninstall(p.id)}
-																>
-																	{t("uninstallConfirm")}
-																</button>
-															) : (
-																<button
-																	type="button"
-																	className="set-uninstall"
-																	title={t("pluginUninstallHint")}
-																	onClick={() => setConfirmUiUninstall(p.id)}
-																>
-																	<FiTrash2 />
-																	{t("uninstallExt")}
-																</button>
-															)}
+															</div>
 														</div>
-													}
-												/>
-												{/* 注册的 AI 工具开关统一收口到「工具」tab 汇总区，这里只保留一行入口（免得已装列表太长；DSH 无工具 tab 则不显示） */}
-												{p.agentTools && p.agentTools.length > 0 && !isDsh && (
-													<div className="set-row" title={t("pluginToolOffHint")}>
-														<span className="set-ui-source">
-															{t("pluginToolsSection")} ({p.agentTools.length})
-															{p.agentTools.some((tool) => disabledPluginTools.has(tool.name))
-																? ` · ${t("settingsDisabled")}`
-																: ""}
-														</span>
-														<div className="set-row-actions">
-															<button type="button" className="set-uninstall" onClick={() => setTab("tools")}>
-																{t("settingsTools")} →
-															</button>
-														</div>
-													</div>
-												)}
-												{/* 运行时日志：host.log 分级缓冲，按需拉取（不进快照），与诊断互不干扰 */}
-												<div className="set-row set-log-row">
-													<button
-														type="button"
-														className="set-diag-toggle"
-														onClick={() => {
-															if (logOpen === p.id) setLogOpen(null);
-															else {
-																setLogOpen(p.id);
-																appSend(pluginLogsFetch(p.id));
-															}
-														}}
-													>
-														<FiFileText />
-														{t("pluginLogTitle")} ({getPluginLogs(p.id).length}) ·{" "}
-														{logOpen === p.id ? t("pluginLogHide") : t("pluginLogShow")}
-													</button>
-													{logOpen === p.id && <PluginLogView pluginId={p.id} />}
-												</div>
-												{/* 诊断记录：manifest/ui 解析丢弃原因 + 运行时 warning/error 摘要 */}
-												{p.diagnostics && p.diagnostics.length > 0 && (
-													<div className="set-row set-diag-row">
+													)}
+													{/* 运行时日志：host.log 分级缓冲，按需拉取（不进快照），与诊断互不干扰 */}
+													<div className="set-row set-log-row">
 														<button
 															type="button"
 															className="set-diag-toggle"
-															onClick={() => setDiagOpen(diagOpen === p.id ? null : p.id)}
+															onClick={() => {
+																if (logOpen === p.id) setLogOpen(null);
+																else {
+																	setLogOpen(p.id);
+																	appSend(pluginLogsFetch(p.id));
+																}
+															}}
 														>
-															<FiAlertTriangle />
-															{t("pluginDiagTitle")} ({p.diagnostics.length}) ·{" "}
-															{diagOpen === p.id ? t("pluginDiagHide") : t("pluginDiagShow")}
+															<FiFileText />
+															{t("pluginLogTitle")} ({getPluginLogs(p.id).length}) ·{" "}
+															{logOpen === p.id ? t("pluginLogHide") : t("pluginLogShow")}
 														</button>
-														{diagOpen === p.id && (
-															<ul className="set-diag-list">
-																{p.diagnostics.map((d, i) => (
-																	<li key={`${p.id}-${i}`}>{d}</li>
-																))}
-															</ul>
-														)}
+														{logOpen === p.id && <PluginLogView pluginId={p.id} />}
 													</div>
-												)}
-												{/* 特权 DOM：声明了 dom 能力的插件，bundle 默认 403，需用户逐个授权 */}
-												{p.wantsDom && (
-													<div className="set-row" title={t("pluginDomDesc")}>
-														<span className="set-ui-source">
-															{p.domGranted ? t("pluginDomGranted") : t("pluginDomNeed")}
-														</span>
-														<div className="set-row-actions">
+													{/* 诊断记录：manifest/ui 解析丢弃原因 + 运行时 warning/error 摘要 */}
+													{p.diagnostics && p.diagnostics.length > 0 && (
+														<div className="set-row set-diag-row">
 															<button
 																type="button"
-																className={`set-uninstall${p.domGranted ? "" : " confirm"}`}
-																title={t("pluginDomDesc")}
-																onClick={() =>
-																	appSend({
-																		type: "plugin_dom_consent",
-																		pluginId: p.id,
-																		granted: !p.domGranted,
-																	})
-																}
+																className="set-diag-toggle"
+																onClick={() => setDiagOpen(diagOpen === p.id ? null : p.id)}
 															>
-																{p.domGranted ? t("pluginDomRevoke") : t("pluginDomGrant")}
+																<FiAlertTriangle />
+																{t("pluginDiagTitle")} ({p.diagnostics.length}) ·{" "}
+																{diagOpen === p.id ? t("pluginDiagHide") : t("pluginDiagShow")}
 															</button>
+															{diagOpen === p.id && (
+																<ul className="set-diag-list">
+																	{p.diagnostics.map((d, i) => (
+																		<li key={`${p.id}-${i}`}>{d}</li>
+																	))}
+																</ul>
+															)}
 														</div>
-													</div>
-												)}
-												{/* 声明式设置：manifest settings schema → 自动渲染表单（可折叠，默认折叠） */}
-												{p.settingsSchema && p.settingsSchema.length > 0 && (
-													<div className="set-row set-settings-row">
-														<button
-															type="button"
-															className="set-diag-toggle"
-															onClick={() => setSettingsOpen((prev) => ({ ...prev, [p.id]: !prev[p.id] }))}
-														>
-															<FiSliders />
-															{t("pluginSettingsTitle")} ({p.settingsSchema.length}) ·{" "}
-															{settingsOpen[p.id] ? t("pluginSettingsHide") : t("pluginSettingsShow")}
-														</button>
-														{settingsOpen[p.id] && (
-															<PluginSettingsForm plugin={p} models={settings?.subagentModels ?? []} />
-														)}
-													</div>
-												)}
-											</Fragment>
-										))}
+													)}
+													{/* 特权 DOM：声明了 dom 能力的插件，bundle 默认 403，需用户逐个授权 */}
+													{p.wantsDom && (
+														<div className="set-row" title={t("pluginDomDesc")}>
+															<span className="set-ui-source">
+																{p.domGranted ? t("pluginDomGranted") : t("pluginDomNeed")}
+															</span>
+															<div className="set-row-actions">
+																<button
+																	type="button"
+																	className={`set-uninstall${p.domGranted ? "" : " confirm"}`}
+																	title={t("pluginDomDesc")}
+																	onClick={() =>
+																		appSend({
+																			type: "plugin_dom_consent",
+																			pluginId: p.id,
+																			granted: !p.domGranted,
+																		})
+																	}
+																>
+																	{p.domGranted ? t("pluginDomRevoke") : t("pluginDomGrant")}
+																</button>
+															</div>
+														</div>
+													)}
+													{/* 声明式设置：manifest settings schema → 自动渲染表单（可折叠，默认折叠） */}
+													{p.settingsSchema && p.settingsSchema.length > 0 && (
+														<div className="set-row set-settings-row">
+															<button
+																type="button"
+																className="set-diag-toggle"
+																onClick={() => setSettingsOpen((prev) => ({ ...prev, [p.id]: !prev[p.id] }))}
+															>
+																<FiSliders />
+																{t("pluginSettingsTitle")} ({p.settingsSchema.length}) ·{" "}
+																{settingsOpen[p.id] ? t("pluginSettingsHide") : t("pluginSettingsShow")}
+															</button>
+															{settingsOpen[p.id] && (
+																<PluginSettingsForm plugin={p} models={settings?.subagentModels ?? []} />
+															)}
+														</div>
+													)}
+												</Fragment>
+											);
+										})}
 									</div>
 								)}
 							</div>
@@ -3204,6 +3843,15 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 									tip={`${t("goalModeEnabledDesc")}\n${t("goalModeOffHint")}`}
 									enabled={settings.goalModeEnabled}
 									onToggle={() => setPartial({ goalModeEnabled: !settings.goalModeEnabled })}
+								/>
+								{/* 审查者模式（会话级，默认关）：开启后本对话只审阅，用户请求由服务端
+								    转给一个常驻落盘执行对话；写类/派发类工具被服务端硬闸门拒。
+								    不是全局设置 → 直接发协议消息，不走 setPartial。 */}
+								<ToggleRow
+									title={t("delegateMode")}
+									tip={`${t("delegateModeDesc")}\n${t("delegateModeOffHint")}`}
+									enabled={chat.state?.delegateMode === true}
+									onToggle={() => appSend({ type: "set_delegate_mode", enabled: !(chat.state?.delegateMode === true) })}
 								/>
 								<textarea
 									className="set-prompt-input"
@@ -3327,7 +3975,7 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 							</div>
 						)}
 
-						{tab === "presets" && isDsh && chat.dshPresets && chat.dshPresets.presets.length > 0 && (
+						{tab === "presets" && chat.dshPresets && chat.dshPresets.presets.length > 0 && (
 							<div className="set-section">
 								<div className="set-section-title">
 									<FiCpu className="set-section-icon" />
@@ -3344,34 +3992,37 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 									>
 										{sortAgentPresets(chat.dshPresets.presets).map((p) => (
 											<option key={p.id} value={p.id} disabled={!!p.broken}>
-												{p.name ?? p.id}
+												{presetText(p, locale, t).name}
 												{p.trust === "user" ? ` · ${t("dshPresetUser")}` : ""}
 											</option>
 										))}
 									</select>
 								</div>
 								<div className="set-list">
-									{sortAgentPresets(chat.dshPresets.presets).map((p) => (
-										<div className="set-row" key={p.id}>
-											<div className="set-row-info">
-												<div className="set-row-name">
-													{p.name ?? p.id}
-													{p.trust === "user" && <span className="dd-preset-tag">{t("dshPresetUser")}</span>}
-													{p.id === chat.dshPresets!.defaultPreset && (
-														<span className="dd-preset-tag">{t("dshPresetDefaultTag")}</span>
-													)}
-													{p.broken && <span className="dd-preset-tag warn">{t("dshPresetBroken")}</span>}
+									{sortAgentPresets(chat.dshPresets.presets).map((p) => {
+										const text = presetText(p, locale, t);
+										return (
+											<div className="set-row" key={p.id}>
+												<div className="set-row-info">
+													<div className="set-row-name">
+														{text.name}
+														{p.trust === "user" && <span className="dd-preset-tag">{t("dshPresetUser")}</span>}
+														{p.id === chat.dshPresets!.defaultPreset && (
+															<span className="dd-preset-tag">{t("dshPresetDefaultTag")}</span>
+														)}
+														{p.broken && <span className="dd-preset-tag warn">{t("dshPresetBroken")}</span>}
+													</div>
+													{text.description && !p.broken && <div className="set-row-desc">{text.description}</div>}
+													{p.broken && <div className="set-row-desc">{p.broken}</div>}
 												</div>
-												{p.description && !p.broken && <div className="set-row-desc">{p.description}</div>}
-												{p.broken && <div className="set-row-desc">{p.broken}</div>}
 											</div>
-										</div>
-									))}
+										);
+									})}
 								</div>
 								<p className="set-hint">{t("dshPresetUserNote")}</p>
 							</div>
 						)}
-						{tab === "presets" && isDsh && chat.dshPermission && chat.dshPermission.options.length > 0 && (
+						{tab === "presets" && chat.dshPermission && chat.dshPermission.options.length > 0 && (
 							<div className="set-section">
 								<div className="set-section-title">
 									<FiShield className="set-section-icon" />
@@ -3784,6 +4435,380 @@ export function SettingsModal({ chat, terminal, initialSection, onSwitchToTermin
 												</div>
 											</div>
 										))}
+									</div>
+								)}
+							</div>
+						)}
+
+						{/* ---- approval rules（全局共享；DSH 引擎隐藏该分区） ---------- */}
+						{tab === "approval-rules" && !isDsh && (
+							<div className="set-section">
+								<div className="set-section-title">
+									<FiShield className="set-section-icon" />
+									{t("settingsApprovalRules")}
+									<HintTip text={t("settingsApprovalRulesDesc")} />
+									<span className="set-count">{settings.approvalRules?.length ?? 0}</span>
+									<button
+										type="button"
+										className="set-save-btn"
+										title={t("approvalRuleNew")}
+										onClick={() => {
+											setRuleDraft({
+												id: `custom.${randomUuid().slice(0, 8)}`,
+												enabled: true,
+												tools: ["bash"],
+												field: "command",
+												match: "regex",
+												value: "",
+												action: "ask",
+												label: "",
+												labelEn: "",
+												reason: "",
+												reasonEn: "",
+											});
+											setRuleToolsText("bash");
+											setRuleIsNew(true);
+											setRuleError(null);
+										}}
+									>
+										<FiPlus /> {t("approvalRuleNew")}
+									</button>
+								</div>
+
+								{/* ---- 编辑 / 新建表单 ---------- */}
+								{ruleDraft && (
+									<div className="rule-editor">
+										<div className="set-section-title" style={{ fontSize: 13, marginBottom: 4 }}>
+											{ruleIsNew ? t("approvalRuleNew") : `${t("approvalRuleEdit")} · ${ruleDraft.label}`}
+										</div>
+										<FieldRow label={t("approvalRuleLabel")}>
+											<input
+												className="set-input"
+												value={ruleDraft.label}
+												placeholder="例如：拦截 Docker 危险操作"
+												onChange={(e) => setRuleDraft({ ...ruleDraft, label: e.target.value })}
+											/>
+										</FieldRow>
+										<FieldRow label={t("approvalRuleLabelEn")}>
+											<input
+												className="set-input"
+												value={ruleDraft.labelEn ?? ""}
+												placeholder="e.g. Block dangerous Docker commands"
+												onChange={(e) => setRuleDraft({ ...ruleDraft, labelEn: e.target.value })}
+											/>
+										</FieldRow>
+										<FieldRow label={t("approvalRuleTools")} tip={t("approvalRuleToolsTip")}>
+											<input
+												className="set-input"
+												value={ruleToolsText}
+												placeholder="bash, write, edit (或 * 通配)"
+												onChange={(e) => {
+													setRuleToolsText(e.target.value);
+													const arr = e.target.value
+														.split(",")
+														.map((x) => x.trim().toLowerCase())
+														.filter(Boolean);
+													setRuleDraft({ ...ruleDraft, tools: arr.length > 0 ? arr : ["*"] });
+												}}
+											/>
+										</FieldRow>
+										<div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+											<div style={{ flex: 1, minWidth: 160 }}>
+												<FieldRow label={t("approvalRuleField")}>
+													<select
+														className="set-select"
+														value={ruleDraft.field}
+														onChange={(e) =>
+															setRuleDraft({
+																...ruleDraft,
+																field: e.target.value as "command" | "path" | "params",
+															})
+														}
+													>
+														<option value="command">{t("approvalRuleFieldCommand")}</option>
+														<option value="path">{t("approvalRuleFieldPath")}</option>
+														<option value="params">{t("approvalRuleFieldParams")}</option>
+													</select>
+												</FieldRow>
+											</div>
+											<div style={{ flex: 1, minWidth: 160 }}>
+												<FieldRow label={t("approvalRuleMatch")}>
+													<select
+														className="set-select"
+														value={ruleDraft.match}
+														onChange={(e) =>
+															setRuleDraft({
+																...ruleDraft,
+																match: e.target.value as "regex" | "glob" | "contains" | "prefix" | "outside_workspace",
+															})
+														}
+													>
+														<option value="regex">{t("approvalRuleMatchRegex")}</option>
+														<option value="glob">{t("approvalRuleMatchGlob")}</option>
+														<option value="contains">{t("approvalRuleMatchContains")}</option>
+														<option value="prefix">{t("approvalRuleMatchPrefix")}</option>
+														<option value="outside_workspace">{t("approvalRuleMatchOutsideWs")}</option>
+													</select>
+												</FieldRow>
+											</div>
+											<div style={{ flex: 1, minWidth: 160 }}>
+												<FieldRow label="命中动作">
+													<select
+														className="set-select"
+														value={ruleDraft.action}
+														onChange={(e) =>
+															setRuleDraft({
+																...ruleDraft,
+																action: e.target.value as "ask" | "deny" | "allow",
+															})
+														}
+													>
+														<option value="ask">{t("approvalRuleActionAsk")}</option>
+														<option value="deny">{t("approvalRuleActionDeny")}</option>
+														<option value="allow">{t("approvalRuleActionAllow")}</option>
+													</select>
+												</FieldRow>
+											</div>
+										</div>
+										{ruleDraft.match !== "outside_workspace" && (
+											<FieldRow label={t("approvalRuleValue")} tip={t("approvalRuleValueTip")}>
+												<input
+													className="set-input"
+													value={ruleDraft.value}
+													placeholder="匹配表达式或关键字…"
+													onChange={(e) => setRuleDraft({ ...ruleDraft, value: e.target.value })}
+												/>
+											</FieldRow>
+										)}
+										<FieldRow label={t("approvalRuleReason")}>
+											<input
+												className="set-input"
+												value={ruleDraft.reason ?? ""}
+												placeholder="例如：检测到删除镜像或容器操作"
+												onChange={(e) => setRuleDraft({ ...ruleDraft, reason: e.target.value })}
+											/>
+										</FieldRow>
+										<FieldRow label={t("approvalRuleReasonEn")}>
+											<input
+												className="set-input"
+												value={ruleDraft.reasonEn ?? ""}
+												placeholder="e.g. Detected docker image/container removal"
+												onChange={(e) => setRuleDraft({ ...ruleDraft, reasonEn: e.target.value })}
+											/>
+										</FieldRow>
+										<div className="set-row">
+											<label
+												className="set-checkbox-label"
+												style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+											>
+												<input
+													type="checkbox"
+													checked={ruleDraft.enabled}
+													onChange={(e) => setRuleDraft({ ...ruleDraft, enabled: e.target.checked })}
+												/>
+												{t("approvalRuleEnabled")}
+											</label>
+										</div>
+										{ruleError && <div style={{ color: "var(--red, #ef4444)", fontSize: 12 }}>{ruleError}</div>}
+										<div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
+											<button
+												type="button"
+												className="btn"
+												onClick={() => {
+													setRuleDraft(null);
+													setRuleError(null);
+												}}
+											>
+												{t("cancel")}
+											</button>
+											<button
+												type="button"
+												className="btn btn-primary"
+												onClick={() => {
+													if (!ruleDraft.label.trim()) {
+														setRuleError("请填写规则名称");
+														return;
+													}
+													if (ruleDraft.match === "regex") {
+														try {
+															new RegExp(ruleDraft.value);
+														} catch (err) {
+															setRuleError(`正则表达式非法：${(err as Error).message}`);
+															return;
+														}
+													}
+													appSend({ type: "save_approval_rule", rule: ruleDraft });
+													setRuleDraft(null);
+													setRuleError(null);
+												}}
+											>
+												{t("save")}
+											</button>
+										</div>
+									</div>
+								)}
+
+								{/* ---- 规则列表 ---------- */}
+								{(settings.approvalRules ?? []).length === 0 ? (
+									<p className="set-hint">{t("approvalRuleEmpty")}</p>
+								) : (
+									<div className="set-list set-list-flat">
+										{(settings.approvalRules ?? []).map((rule, idx) => {
+											const isBuiltin = rule.builtin === true;
+											return (
+												<div
+													className={`set-row${rule.enabled ? "" : " rule-row-disabled"}`}
+													key={rule.id}
+													style={{ alignItems: "flex-start", padding: "12px 0" }}
+												>
+													<div className="set-row-info">
+														<div
+															className="set-row-name"
+															style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6 }}
+														>
+															<span className={`rule-badge ${rule.action}`}>
+																{rule.action === "deny"
+																	? t("approvalRuleActionDeny")
+																	: rule.action === "allow"
+																		? t("approvalRuleActionAllow")
+																		: t("approvalRuleActionAsk")}
+															</span>
+															<strong style={{ fontSize: 13 }}>
+																{locale === "zh" ? rule.label : rule.labelEn || rule.label}
+															</strong>
+															{isBuiltin && <span className="tpl-badge">{t("approvalRuleBuiltin")}</span>}
+															<span className="rule-meta-code">{rule.tools.join(", ")}</span>
+														</div>
+														<div
+															className="set-hint"
+															style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 3 }}
+														>
+															<div style={{ display: "flex", alignItems: "baseline", gap: 6, flexWrap: "wrap" }}>
+																<span style={{ opacity: 0.85, fontSize: 11, fontFamily: "var(--mono)" }}>
+																	[{rule.field} · {rule.match}]
+																</span>
+																{rule.match !== "outside_workspace" && (
+																	<code className="rule-pattern-code">{rule.value}</code>
+																)}
+															</div>
+															{(rule.reason || rule.reasonEn) && (
+																<div style={{ opacity: 0.75, fontSize: 11 }}>
+																	{locale === "zh" ? rule.reason : rule.reasonEn || rule.reason}
+																</div>
+															)}
+														</div>
+													</div>
+													<div className="set-row-actions" style={{ marginLeft: 12, flexShrink: 0 }}>
+														{/* 启用/停用开关 */}
+														<button
+															type="button"
+															className={`set-switch${rule.enabled ? " on" : ""}`}
+															role="switch"
+															aria-checked={rule.enabled}
+															title={rule.enabled ? t("settingsEnabled") : t("settingsDisabled")}
+															onClick={() =>
+																appSend({
+																	type: "save_approval_rule",
+																	rule: { ...rule, enabled: !rule.enabled },
+																})
+															}
+														>
+															<span className="set-switch-knob" />
+														</button>
+														{/* 排序上移下移（自定义规则） */}
+														{!isBuiltin && idx > 0 && (
+															<button
+																type="button"
+																className="set-icon-btn"
+																title={t("approvalRuleMoveUp")}
+																onClick={() => {
+																	const list = [...(settings.approvalRules ?? [])];
+																	const temp = list[idx - 1];
+																	list[idx - 1] = list[idx];
+																	list[idx] = temp;
+																	appSend({ type: "save_approval_rules", rules: list });
+																}}
+															>
+																<FiChevronUp />
+															</button>
+														)}
+														{!isBuiltin && idx < (settings.approvalRules?.length ?? 0) - 1 && (
+															<button
+																type="button"
+																className="set-icon-btn"
+																title={t("approvalRuleMoveDown")}
+																onClick={() => {
+																	const list = [...(settings.approvalRules ?? [])];
+																	const temp = list[idx + 1];
+																	list[idx + 1] = list[idx];
+																	list[idx] = temp;
+																	appSend({ type: "save_approval_rules", rules: list });
+																}}
+															>
+																<FiChevronDown />
+															</button>
+														)}
+														{isBuiltin &&
+															(confirmRuleReset === rule.id ? (
+																<button
+																	type="button"
+																	className="set-uninstall confirm"
+																	onClick={() => {
+																		appSend({ type: "reset_builtin_approval_rule", id: rule.id });
+																		setConfirmRuleReset(null);
+																	}}
+																>
+																	{t("uninstallConfirm")}
+																</button>
+															) : (
+																<button
+																	type="button"
+																	className="set-icon-btn"
+																	title={t("approvalRuleReset")}
+																	onClick={() => setConfirmRuleReset(rule.id)}
+																>
+																	<FiRefreshCw />
+																</button>
+															))}
+														<button
+															type="button"
+															className="set-icon-btn"
+															title={t("approvalRuleEdit")}
+															onClick={() => {
+																setRuleDraft({ ...rule });
+																setRuleToolsText(rule.tools.join(", "));
+																setRuleIsNew(false);
+																setRuleError(null);
+															}}
+														>
+															<FiEdit3 />
+														</button>
+														{!isBuiltin &&
+															(confirmRuleDelete === rule.id ? (
+																<button
+																	type="button"
+																	className="set-uninstall confirm"
+																	onClick={() => {
+																		appSend({ type: "delete_approval_rule", id: rule.id });
+																		setConfirmRuleDelete(null);
+																	}}
+																>
+																	{t("uninstallConfirm")}
+																</button>
+															) : (
+																<button
+																	type="button"
+																	className="set-icon-btn danger"
+																	title={t("approvalRuleDelete")}
+																	onClick={() => setConfirmRuleDelete(rule.id)}
+																>
+																	<FiTrash2 />
+																</button>
+															))}
+													</div>
+												</div>
+											);
+										})}
 									</div>
 								)}
 							</div>

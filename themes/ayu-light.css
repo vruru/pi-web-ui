@@ -62,12 +62,12 @@
 	--auth-green: #18a97c;
 	--scroll-thumb: #d8dade;
 	--scroll-thumb-hover: #b9bcc2;
-	--notice-err-bg: #401d23;
-	--notice-warn-bg: #38251f;
-	--notice-info-bg: #1b2544;
-	--notice-err-border: #ef4444;
-	--notice-warn-border: #f59e0b;
-	--notice-info-border: #3b82f6;
+	--notice-err-bg: color-mix(in srgb, var(--bg-elev) 90%, var(--red));
+	--notice-warn-bg: color-mix(in srgb, var(--bg-elev) 90%, var(--amber));
+	--notice-info-bg: color-mix(in srgb, var(--bg) 95%, var(--info-blue));
+	--notice-err-border: var(--red);
+	--notice-warn-border: var(--amber);
+	--notice-info-border: var(--info-blue);
 	--send-blue: #f29718;
 	--send-blue-hover: #e08a0d;
 	--stop-red: #ef4444;

@@ -30,6 +30,8 @@ interface DropdownProps {
 	menuClassName?: string;
 	/** Ref to the menu panel (for measuring/sizing it). */
 	menuRef?: Ref<HTMLDivElement>;
+	/** Custom class for the trigger button (default "chip"). */
+	triggerClassName?: string;
 	/** Inline style for the menu panel — used to LOCK a measured width/height
 	 * so the panel doesn't resize as its content changes (e.g. filtering). */
 	menuStyle?: CSSProperties;
@@ -77,6 +79,7 @@ export function Dropdown({
 	direction = "down",
 	tip,
 	menuClassName,
+	triggerClassName,
 	menuRef,
 	menuStyle,
 }: DropdownProps) {
@@ -144,7 +147,13 @@ export function Dropdown({
 
 	return (
 		<div className={`dropdown ${align} ${fit ? "fit" : ""} ${direction === "up" ? "dd-up" : ""}`} ref={ref}>
-			<button type="button" className="chip" onClick={() => onOpenChange(!open)} aria-expanded={open} data-tip={tip}>
+			<button
+				type="button"
+				className={triggerClassName ?? "chip"}
+				onClick={() => onOpenChange(!open)}
+				aria-expanded={open}
+				data-tip={tip}
+			>
 				{trigger}
 				<FiChevronDown className={`dd-caret ${open ? "up" : ""}`} />
 			</button>

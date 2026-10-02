@@ -30,6 +30,23 @@
 原独立的 ssh 插件已合并进来：旧 `<pluginDir>/ssh-hosts.json` 主机配置在首次
 激活时自动迁移，无需手工搬。
 
+## SSH config 自动加载（与 VSCode Remote-SSH 同源）
+
+- **免导入直连**：SSH 面板顶部「⚙ ssh config（自动加载）」区直接列出
+  `~/.ssh/config` 里的所有主机，点别名即连——VSCode 里能连的这里也能连，
+  改完 config 点 ⟳ 刷新即生效，无需导入到手动主机。
+- **写法完全一样**：就是 OpenSSH config 语法。`Host` / `HostName` / `User` /
+  `Port` / `IdentityFile`（多个全试）/ `ProxyJump`（多跳逗号分隔）/
+  `ProxyCommand`（`%h`/`%p` 展开）/ `ForwardAgent` 全支持；`Host *` 通配块作
+  默认值继承（`ssh -G` 语义：首值优先）；`Include` 递归展开（含 glob，
+  相对 `~/.ssh/` 解析）——VSCode 的 `Remote-SSH: Open Configuration File`
+  改的同一个文件，面板 ✎ 可直接编辑（保存自动备份 `config.bak`）。
+- **认证同 ssh 命令**：IdentityFile 全部试读（`~` 展开）→ 本机默认私钥
+  （`~/.ssh/id_ed25519` / `id_ecdsa` / `id_rsa`）→ `SSH_AUTH_SOCK`；
+  config 里没有密码字段（和 VSCode 一样），要用密码登录的请用「🏠 手动主机」。
+- 手动主机（`ssh-hosts.json`，密码/私钥进加密存储）与批量导入保留，AI 的
+  `vsc_ssh_connect` 传 `alias` 参数可直连 config 主机。
+
 ## 文件树交互
 
 - **原地展开/收起**：点文件夹只加载该目录子列表（带「⏳ 加载中」占位），

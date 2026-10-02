@@ -74,6 +74,30 @@ describe("makeAskUserQuestionTool", () => {
 			"requires at least one question",
 		);
 	});
+
+	it("提问超过 3 个问题 → 报错阻断（防提问发散与问卷轰炸）", async () => {
+		const session = mockSession(async () => []);
+		const tool = makeAskUserQuestionTool(session);
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const ctx = {} as any;
+		const fourQuestions: UiQuestion[] = [
+			{ id: "q1", question: "Q1" },
+			{ id: "q2", question: "Q2" },
+			{ id: "q3", question: "Q3" },
+			{ id: "q4", question: "Q4" },
+		];
+		await expect(tool.execute("t4", { questions: fourQuestions }, undefined, undefined, ctx)).rejects.toThrow(
+			"at most 3 questions",
+		);
+	});
+
+	it("包含收敛型澄清提问 promptGuidelines 与推荐置顶约束", () => {
+		const tool = makeAskUserQuestionTool(mockSession(async () => []));
+		const guidelines = (tool.promptGuidelines as string[]).join("\n");
+		expect(guidelines).toContain("1 to 3 focused questions");
+		expect(guidelines).toContain("recommended option first");
+		expect(guidelines).toContain("impact/tradeoff");
+	});
 });
 
 describe("shouldPopQuestion", () => {

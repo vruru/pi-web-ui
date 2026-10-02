@@ -18,6 +18,8 @@ import {
 	createPluginUpdateChecker,
 	createTreeResolver,
 	parseUpdateSource,
+	isBuiltinPlugin,
+	compareVersions,
 	execGit,
 	BACKUP_KEEP,
 	type Exec,
@@ -159,6 +161,42 @@ describe("checkPluginUpdates", () => {
 	it("真实 git 命令可用性（execGit 是函数）", () => {
 		expect(typeof execGit).toBe("function");
 	});
+
+	it("内置插件判定（source 包含官方仓库或 catalog.json 存在条目）", () => {
+		const catPath = join(dataDir, "catalog.json");
+		writeFileSync(catPath, JSON.stringify([{ id: "webmail" }]));
+		expect(isBuiltinPlugin("webmail", "x/webmail", catPath)).toBe(true);
+		expect(isBuiltinPlugin("custom", "xing-shuyin/pi-web-ui/plugins/custom", catPath)).toBe(true);
+		expect(isBuiltinPlugin("other", "someone/other", catPath)).toBe(false);
+	});
+
+	it("远端最新版本号高于本地版本时判为可更新 (updatable: true)", async () => {
+		installPlugin("builtin-a", "0.1.0", "xing-shuyin/pi-web-ui/plugins/builtin-a");
+		writeFileSync(join(dataDir, "plugins", "builtin-a", ".pi-git-sha"), "111111111111");
+		const fakeFetcher = async (url: string) => {
+			if (url.includes("builtin-a")) {
+				return {
+					ok: true,
+					json: async () => ({ version: "0.2.0" }),
+				};
+			}
+			return { ok: false, json: async () => ({}) };
+		};
+		const res = await checkPluginUpdates(
+			dataDir,
+			fakeExec({
+				"https://github.com/xing-shuyin/pi-web-ui.git": "1111111111111111111111111111111111111111",
+			}),
+			undefined,
+			{ fetcher: fakeFetcher },
+		);
+		const p = res.find((r) => r.id === "builtin-a");
+		expect(p).toBeTruthy();
+		expect(p?.builtin).toBe(true);
+		expect(p?.version).toBe("0.1.0");
+		expect(p?.latestVersion).toBe("0.2.0");
+		expect(p?.updatable).toBe(true);
+	});
 });
 
 describe("verified marketplace updates", () => {
@@ -193,6 +231,24 @@ describe("verified marketplace updates", () => {
 			)[0].updatable,
 		).toBe(false);
 	});
+	it("local source revision changes never request GitHub directory trees", async () => {
+		const source = join(dataDir, "upstream");
+		mkdirSync(source);
+		const dir = installPlugin("local", "1.0.0", source);
+		writeFileSync(join(dir, ".pi-git-sha"), "1".repeat(12));
+		let treeCalls = 0;
+		const result = await checkPluginUpdates(dataDir, fakeExec({ [source]: "2".repeat(40) }), undefined, {
+			fetcher: async () => ({ ok: false, json: async () => ({}) }),
+			resolveTree: async () => {
+				treeCalls++;
+				throw Error("local source must not reach GitHub");
+			},
+		});
+		expect(result[0].updatable).toBe(true);
+		expect(result[0].error).toBeUndefined();
+		expect(treeCalls).toBe(0);
+	});
+
 	it("full and abbreviated equal commit ids do not indicate an update", async () => {
 		const d = installPlugin("p", "1", "o/r");
 		writeFileSync(join(d, ".pi-git-sha"), "a".repeat(40));

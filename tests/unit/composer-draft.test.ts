@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+	advanceComposerSession,
 	appendDraftAttachments,
 	mergeRecalledDraft,
 	selectDraftToRestore,
+	shouldCarryOverDraft,
 	type DraftAttachment,
 } from "../../web/src/composer-draft.js";
 
@@ -149,5 +151,52 @@ describe("selectDraftToRestore", () => {
 			text: "新打的字",
 			ts: 1_000_500,
 		});
+	});
+});
+
+describe("advanceComposerSession（待发附件的会话闸门）", () => {
+	it("首次就绪（prev 为空）→ 不清，只记下水位", () => {
+		expect(advanceComposerSession("", "s1")).toEqual({ key: "s1", clear: false });
+	});
+
+	it("同一个会话的后续快照 → 不清（快照刷新不会误清）", () => {
+		expect(advanceComposerSession("s1", "s1")).toEqual({ key: "s1", clear: false });
+	});
+
+	it("会话换了（新建对话 / 切对话 / 过户 / 切项目）→ 清空待发附件", () => {
+		expect(advanceComposerSession("s1", "s2")).toEqual({ key: "s2", clear: true });
+	});
+
+	it("空 sessionId 的瞬时态（断线重连 / 会话未就绪）→ 不动水位也不清", () => {
+		expect(advanceComposerSession("s1", "")).toEqual({ key: "s1", clear: false });
+		// 瞬时态后再回到同一会话：仍不清（水位没被空值冲掉）
+		const afterGap = advanceComposerSession(advanceComposerSession("s1", "").key, "s1");
+		expect(afterGap).toEqual({ key: "s1", clear: false });
+	});
+
+	it("先空后换：瞬时态不污染比较，真换会话照样清", () => {
+		const gap = advanceComposerSession("s1", "");
+		expect(advanceComposerSession(gap.key, "s2")).toEqual({ key: "s2", clear: true });
+	});
+});
+
+describe("shouldCarryOverDraft", () => {
+	it("全新空白对话且无既有草稿 → 承接正在输入的文本", () => {
+		expect(shouldCarryOverDraft("/skill:do-task-workflow RJC-204", 0, false)).toBe(true);
+	});
+
+	it("待结转文本为空或仅空白 → 不承接", () => {
+		expect(shouldCarryOverDraft("", 0, false)).toBe(false);
+		expect(shouldCarryOverDraft("   ", 0, false)).toBe(false);
+		expect(shouldCarryOverDraft(null, 0, false)).toBe(false);
+		expect(shouldCarryOverDraft(undefined, 0, false)).toBe(false);
+	});
+
+	it("目标对话已有历史消息（已有对话） → 不承接，避免污染旧对话", () => {
+		expect(shouldCarryOverDraft("some text", 5, false)).toBe(false);
+	});
+
+	it("目标对话自身已有草稿 → 不承接，优先显示目标对话的草稿", () => {
+		expect(shouldCarryOverDraft("some text", 0, true)).toBe(false);
 	});
 });

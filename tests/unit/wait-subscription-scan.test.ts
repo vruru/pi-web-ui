@@ -176,7 +176,6 @@ describe("hasActiveSubagentRun（pi-web-ui #52：活跃异步 run 保留证据�
 			hasActiveSubagentRun({
 				asyncRunsDir: path.join(makeDir(), "missing", "async-subagent-runs"),
 				sessionId: SESSION_FILE,
-				now: () => NOW,
 			}),
 		).toBe(false);
 	});
@@ -186,7 +185,6 @@ describe("hasActiveSubagentRun（pi-web-ui #52：活跃异步 run 保留证据�
 			hasActiveSubagentRun({
 				asyncRunsDir: path.join(makeDir(), "async-subagent-runs"),
 				sessionId: SESSION_FILE,
-				now: () => NOW,
 			}),
 		).toBe(false);
 	});
@@ -194,52 +192,59 @@ describe("hasActiveSubagentRun（pi-web-ui #52：活跃异步 run 保留证据�
 	it("匹配会话 + running → 有活跃 run（保留会话）", () => {
 		const dir = makeDir();
 		const runsDir = makeRunLayout(dir, "run-1", runStatus());
-		expect(hasActiveSubagentRun({ asyncRunsDir: runsDir, sessionId: SESSION_FILE, now: () => NOW })).toBe(true);
+		expect(hasActiveSubagentRun({ asyncRunsDir: runsDir, sessionId: SESSION_FILE })).toBe(true);
 	});
 
 	it("匹配会话 + queued → 有活跃 run", () => {
 		const dir = makeDir();
 		const runsDir = makeRunLayout(dir, "run-1", runStatus({ state: "queued" }));
-		expect(hasActiveSubagentRun({ asyncRunsDir: runsDir, sessionId: SESSION_FILE, now: () => NOW })).toBe(true);
+		expect(hasActiveSubagentRun({ asyncRunsDir: runsDir, sessionId: SESSION_FILE })).toBe(true);
 	});
 
 	it("run 已结束（complete/failed/stopped）→ 无活跃 run", () => {
 		for (const state of ["complete", "failed", "partial", "stopped", "rejected", "paused"]) {
 			const dir = makeDir();
 			const runsDir = makeRunLayout(dir, "run-1", runStatus({ state }));
-			expect(hasActiveSubagentRun({ asyncRunsDir: runsDir, sessionId: SESSION_FILE, now: () => NOW }), state).toBe(
-				false,
-			);
+			expect(hasActiveSubagentRun({ asyncRunsDir: runsDir, sessionId: SESSION_FILE }), state).toBe(false);
 		}
 	});
 
 	it("其它会话的活跃 run → 无证据", () => {
 		const dir = makeDir();
 		const runsDir = makeRunLayout(dir, "run-1", runStatus({ sessionId: "/other/session.jsonl" }));
-		expect(hasActiveSubagentRun({ asyncRunsDir: runsDir, sessionId: SESSION_FILE, now: () => NOW })).toBe(false);
+		expect(hasActiveSubagentRun({ asyncRunsDir: runsDir, sessionId: SESSION_FILE })).toBe(false);
 	});
 
 	it("多个 run：任一本会话活跃即命中（workflow 的 lane/子 run 也计入）", () => {
 		const dir = makeDir();
 		const runsDir = makeRunLayout(dir, "run-a", runStatus({ runId: "run-a", sessionId: "/other/session.jsonl" }));
 		makeRunLayout(dir, "run-b", runStatus({ runId: "run-b" }));
-		expect(hasActiveSubagentRun({ asyncRunsDir: runsDir, sessionId: SESSION_FILE, now: () => NOW })).toBe(true);
+		expect(hasActiveSubagentRun({ asyncRunsDir: runsDir, sessionId: SESSION_FILE })).toBe(true);
 	});
 
 	it("status.json 缺失 / 损坏 → 无证据（fail-open）", () => {
 		const dir = makeDir();
 		const runsDir = makeRunLayout(dir, "run-1", runStatus());
 		writeFileSync(path.join(runsDir, "run-1", "status.json"), "{ not json !!!");
-		expect(hasActiveSubagentRun({ asyncRunsDir: runsDir, sessionId: SESSION_FILE, now: () => NOW })).toBe(false);
+		expect(hasActiveSubagentRun({ asyncRunsDir: runsDir, sessionId: SESSION_FILE })).toBe(false);
 	});
 
-	it("marker 过期（崩溃遗留孤儿，超过 24h）→ 无证据（保留自限）", () => {
+	it("marker 超过 24h 但 status 仍 running（超长 run）→ 仍算活跃证据（不按 mtime 误杀）", () => {
 		const dir = makeDir();
 		const runsDir = makeRunLayout(dir, "run-1", runStatus());
 		const marker = path.join(runsDir, ".active-runs", "run-1");
 		const past = NOW - STALE - 60_000;
 		utimesSync(marker, new Date(past), new Date(past));
-		expect(hasActiveSubagentRun({ asyncRunsDir: runsDir, sessionId: SESSION_FILE, now: () => NOW })).toBe(false);
+		expect(hasActiveSubagentRun({ asyncRunsDir: runsDir, sessionId: SESSION_FILE })).toBe(true);
+	});
+
+	it("marker 超过 24h 且 status 已终结 → 无证据（孤儿清理只作用于已终结 run）", () => {
+		const dir = makeDir();
+		const runsDir = makeRunLayout(dir, "run-1", runStatus({ state: "complete" }));
+		const marker = path.join(runsDir, ".active-runs", "run-1");
+		const past = NOW - STALE - 60_000;
+		utimesSync(marker, new Date(past), new Date(past));
+		expect(hasActiveSubagentRun({ asyncRunsDir: runsDir, sessionId: SESSION_FILE })).toBe(false);
 	});
 
 	it("marker 新鲜但 status 实体缺失 → marker 虽在，status 读不到仍无证据", () => {
@@ -248,7 +253,7 @@ describe("hasActiveSubagentRun（pi-web-ui #52：活跃异步 run 保留证据�
 		const marker = path.join(runsDir, ".active-runs", "orphan");
 		mkdirSync(path.dirname(marker), { recursive: true });
 		writeFileSync(marker, "");
-		expect(hasActiveSubagentRun({ asyncRunsDir: runsDir, sessionId: SESSION_FILE, now: () => NOW })).toBe(false);
+		expect(hasActiveSubagentRun({ asyncRunsDir: runsDir, sessionId: SESSION_FILE })).toBe(false);
 	});
 
 	it("隐藏文件 / .json 后缀的文件不当作 run 证据", () => {
@@ -256,7 +261,7 @@ describe("hasActiveSubagentRun（pi-web-ui #52：活跃异步 run 保留证据�
 		const runsDir = path.join(dir, "async-subagent-runs");
 		mkdirSync(path.join(runsDir, ".active-runs"), { recursive: true });
 		writeFileSync(path.join(runsDir, ".active-runs", ".stale-tmp"), "");
-		expect(hasActiveSubagentRun({ asyncRunsDir: runsDir, sessionId: SESSION_FILE, now: () => NOW })).toBe(false);
+		expect(hasActiveSubagentRun({ asyncRunsDir: runsDir, sessionId: SESSION_FILE })).toBe(false);
 	});
 });
 
@@ -283,6 +288,25 @@ describe("shouldRetainActive（置换决策）", () => {
 		expect(shouldRetainActive({ ...base, openTerminals: 1 })).toBe(true);
 	});
 
+	it("prompt 投递中（未落盘、未 streaming）→ 保留", () => {
+		expect(shouldRetainActive({ ...base, promptInFlight: true })).toBe(true);
+	});
+
+	it("prompt 投递中短路：不求值后台任务 thunk", () => {
+		expect(
+			shouldRetainActive({
+				...base,
+				promptInFlight: true,
+				hasActiveSubagentRun: () => {
+					throw new Error("must not be evaluated");
+				},
+				hasPendingWake: () => {
+					throw new Error("must not be evaluated");
+				},
+			}),
+		).toBe(true);
+	});
+
 	it("compacting → 保留（切走不再 abort 压缩）", () => {
 		expect(shouldRetainActive({ ...base, compacting: true })).toBe(true);
 	});
@@ -297,6 +321,41 @@ describe("shouldRetainActive（置换决策）", () => {
 
 	it("有活跃 subagent run → 保留（pi-web-ui #52）", () => {
 		expect(shouldRetainActive({ ...base, hasActiveSubagentRun: true })).toBe(true);
+	});
+
+	it("pinned → 无条件保留（空闲无终端也不释放）", () => {
+		expect(shouldRetainActive({ ...base, pinned: true })).toBe(true);
+		// 其余判据全关掉的最苛刻情形下仍然保留
+		expect(
+			shouldRetainActive({
+				...base,
+				pinned: true,
+				listed: false,
+				promptedSinceActive: false,
+				hasActiveSubagentRun: false,
+				hasPendingWake: false,
+			}),
+		).toBe(true);
+	});
+
+	it("pinned 优先于磁盘扫描：thunk 不求值即返回", () => {
+		expect(
+			shouldRetainActive({
+				...base,
+				pinned: true,
+				hasActiveSubagentRun: () => {
+					throw new Error("must not be evaluated");
+				},
+				hasPendingWake: () => {
+					throw new Error("must not be evaluated");
+				},
+			}),
+		).toBe(true);
+	});
+
+	it("未钉住 → 维持原置换口径（pinned 缺省不影响其他规则）", () => {
+		expect(shouldRetainActive({ ...base, pinned: false })).toBe(false);
+		expect(shouldRetainActive({ ...base, pinned: undefined })).toBe(false);
 	});
 
 	it("active-run thunk 在 wake thunk 之前求值：命中 active 时 wake 不求值", () => {

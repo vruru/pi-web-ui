@@ -56,6 +56,19 @@ describe("buildUpdateCommand", () => {
 		);
 	});
 
+	it("plugin (UI plugin) → pi-web-ui install <source> --name <id> --force", () => {
+		expect(
+			buildUpdateCommand([
+				{
+					name: "webmail",
+					kind: "plugin",
+					source: "xing-shuyin/pi-web-ui/plugins/webmail",
+					pluginId: "webmail",
+				},
+			]),
+		).toBe("pi-web-ui install xing-shuyin/pi-web-ui/plugins/webmail --name webmail --force");
+	});
+
 	it("chains mixed npm + git targets with `;`", () => {
 		expect(
 			buildUpdateCommand([

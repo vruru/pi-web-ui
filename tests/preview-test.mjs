@@ -18,7 +18,7 @@ const isolated = isolatedTestEnv("preview-test");
 process.once("exit", isolated.cleanup);
 const REPO_ROOT = fileURLToPath(new globalThis.URL("../", import.meta.url));
 
-const PORT = 18997;
+const PORT = Number(process.argv[2] || 18997);
 const PROJ = REPO_ROOT;
 const WS = mkdtempSync(join(tmpdir(), "pi-prev-"));
 writeFileSync(join(WS, "notes.weird"), "hello from an unknown extension\nline2\n");

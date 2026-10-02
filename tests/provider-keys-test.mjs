@@ -29,6 +29,11 @@ mkdirSync(dataDir, { recursive: true });
 mkdirSync(agentDir, { recursive: true });
 
 const NODE = realpathSync(process.execPath);
+// 遗留迁移场景：provider-keys.json 尚不存在的旧配置升级 —— auth.json 必须在
+// 服务启动【前】就位（listProviderKeys 只在文件不存在时做引导补种并落盘；
+// 文件存在后绝不整份写回，防止竞态把密钥覆盖掉）。
+const authPath = join(agentDir, "auth.json");
+writeFileSync(authPath, JSON.stringify({ anthropic: { type: "api_key", key: "sk-legacy-a" } }, null, 2) + "\n");
 const server = spawn(NODE, ["dist/server/index.js"], {
 	env: {
 		...process.env,
@@ -111,7 +116,6 @@ async function connect() {
 	throw new Error("server not ready");
 }
 
-const authPath = join(agentDir, "auth.json");
 const readAuth = () => {
 	try {
 		return JSON.parse(readFileSync(authPath, "utf8"));
@@ -147,9 +151,9 @@ try {
 	await c.waitForNotice("", 1).catch(() => {});
 
 	// 0) legacy migration: a provider configured in auth.json BEFORE the
-	// multi-key store existed must be seeded (listed as the active key), and
+	// multi-key store existed (auth.json was written before server boot, see
+	// spawn above) must be seeded at bootstrap (listed as the active key), and
 	// adding a second key must stack it (inactive) instead of replacing it.
-	writeFileSync(authPath, JSON.stringify({ anthropic: { type: "api_key", key: "sk-legacy-a" } }, null, 2) + "\n");
 	c.send({ type: "list_provider_keys" });
 	let legacy = await c.waitProviderKeys("anthropic", 1);
 	check(

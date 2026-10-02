@@ -1,4 +1,5 @@
 import { Fragment, type ReactNode } from "react";
+import { SlotErrorBoundary } from "./components/SlotErrorBoundary";
 import type { UiSlotEntry } from "./ui-slots";
 
 /** 工具条槽位通用渲染（terminal.toolbar / scm.toolbar / goalbar.actions / chat.header /
@@ -16,7 +17,20 @@ export function renderSlotToolbar(
 	onUiAction: ((item: UiSlotEntry, value?: string) => void) | undefined,
 ) {
 	if (!entries || entries.length === 0) return null;
-	return <span className="slot-toolbar">{entries.map((entry, i) => renderSlotEntry(entry, i, onUiAction))}</span>;
+	return (
+		<span className="slot-toolbar">
+			{entries.map((entry, i) => (
+				<SlotErrorBoundary
+					key={`${entry.id}#${i}`}
+					label={entry.label || entry.id}
+					slot={entry.slot}
+					entryId={entry.id}
+				>
+					{renderSlotEntry(entry, i, onUiAction)}
+				</SlotErrorBoundary>
+			))}
+		</span>
+	);
 }
 
 /** 单条目渲染（renderSlotToolbar 的每项逻辑抽出，供合并渲染复用，输出一字不差）。 */
@@ -123,7 +137,11 @@ export function renderMergedToolbar(
 		visible = true;
 		out.push(
 			<span key={key} className="slot-toolbar">
-				{run.map((e, i) => renderSlotEntry(e, i, onUiAction))}
+				{run.map((e, i) => (
+					<SlotErrorBoundary key={`${e.id}#${i}`} label={e.label || e.id} slot={e.slot} entryId={e.id}>
+						{renderSlotEntry(e, i, onUiAction)}
+					</SlotErrorBoundary>
+				))}
 			</span>,
 		);
 		run = [];

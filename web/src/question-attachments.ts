@@ -131,11 +131,13 @@ export function collectQuestionAttachments(
 				}
 				continue;
 			}
-			// 4) Workspace-path attachment (inline / reference / lines / folder)
+			// 4) Workspace-path attachment (reference / lines / folder)
 			//    — the relative path stays valid on the new branch, so a path +
-			//    mode spec is enough to re-attach it.
+			//    mode spec is enough to re-attach it. A legacy "inline" mode (old
+			//    sessions persisted before content injection was removed) is
+			//    downgraded to a plain path reference.
 			if (details.path && details.mode) {
-				const mode = details.mode === "inline" || details.mode === "lines" ? details.mode : "reference";
+				const mode = details.mode === "lines" ? "lines" : "reference";
 				const att: EditPromptAttachment = { path: details.path, mode };
 				if (details.mode === "lines" && typeof details.startLine === "number" && typeof details.endLine === "number") {
 					att.lines = { start: details.startLine, end: details.endLine };

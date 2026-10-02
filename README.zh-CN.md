@@ -39,7 +39,7 @@ QQ群 1126050727
 - **提示词模板** —— 空对话状态展示一键模板库（仓库初始化、代码审查、调研、合并冲突……）；点卡片即填入输入框，也可把当前草稿存成自己的模板。
 - **模型报错自动重试** —— 按对话可配置重试次数（默认 6，`0` = 失败即停）；次数用完则失败轮次标红，红色报错旁有一键「重试」按钮。
 - **排队可控** —— 排队/插队的气泡可以 ✕ 移除，也可以 ↩ **撤回**：文字落回输入框（输入框非空时另起一行追加，绝不覆盖正在打的字）。
-- **消息自带信息** —— 每条消息头部显示角色、产出它的模型和本地 `HH:MM` 时间，每段文本都有复制按钮。附件渲染为独立可折叠卡片（模式徽章 `lines`/`ref`/`bridged`/`inline n lines` + 复制按钮 + 视觉桥「已转写」说明），技能调用渲染为技能卡（展开可见完整 `SKILL.md`），你输入的参数单独成气泡。
+- **消息自带信息** —— 每条消息头部显示角色、产出它的模型和本地 `HH:MM` 时间，每段文本都有复制按钮。附件渲染为独立可折叠卡片（模式徽章 `lines`/`ref`/`bridged` + 复制按钮 + 视觉桥「已转写」说明），技能调用渲染为技能卡（展开可见完整 `SKILL.md`），你输入的参数单独成气泡。
 - **压缩看得见** —— 上下文压缩显示为一张卡片（「已压缩 N tokens」），到货时自动展开并跳转；压缩进行中横幅实时计数（「正在压缩 · 12s」）并标明触发原因（手动 / 阈值 / 溢出）。
 
 **项目与会话**
@@ -69,14 +69,14 @@ QQ群 1126050727
 
 **文件、图片与附件**
 
-- 三种附件模式：`inline`（≤12KB 内联）、`reference`（仅路径引用）、`lines`（选中行），超限自动降级。
+- 一律只给路径引用：`reference`（仅路径）/ `lines`（选中行范围，引用上带行号），**文件内容永不注入 prompt**——模型用自己的 read 工具按需读（旧版 `inline` 全文注入已移除，旧客户端/旧草稿发来的 `inline` 按 `reference` 处理）。
 - 粘贴 / 拖拽 / 上传图片 —— 浏览器端自动缩放，模型支持识图时作为图片内容发送（不支持时提示警告）。
 - **视觉桥** —— 当前模型不支持识图时，把图片交给自动发现的视觉模型转写成文字证据（按批次缓存，可在设置里指定模型/开关）。
-- 免工作区路径附加任意文件 —— 存入全局上传目录，小文件内联，其余以绝对路径引用。
+- 免工作区路径附加任意文件 —— 存入全局上传目录，以绝对路径引用（内容不注入）。
 - 文件预览 —— 行号、点选/拖拽/Shift 选区（可添加到对话为 lines 附件）、GBK 回退解码、二进制十六进制视图、媒体 HTTP 预览（支持 Range）、下载按钮。
 - 实时文件树 —— 服务端对当前列出目录 fs.watch，改动即静默重列；超大目录显示截断提示。
 - **能浏览到工作区之外** —— 文件树可以越过工作区根到 💻「此电脑」层，列出所有盘符（POSIX 下是 `/`）；面包屑可直接跳到任意层级，`..` 回上级；目录被删/改名/无权限时降级为空列表 + 提示，而不是报错页。
-- **行内操作** —— 悬停文件：下载 / 内联附件（＋）/ 引用附件（🔗）/ 复制名称 / 复制路径；悬停文件夹：引用附件、复制名称、复制路径（纯 HTTP 环境下剪贴板不可用时自动走兜底实现）。
+- **行内操作** —— 悬停文件：下载 / 引用附件（🔗）/ 复制名称 / 复制路径；悬停文件夹：引用附件、复制名称、复制路径（纯 HTTP 环境下剪贴板不可用时自动走兜底实现）。
 - **从文件树上传** —— 右键**文件夹行** →「上传文件到此文件夹」（同一菜单里还有「以项目打开」）；右键文件行或面板空白 →「上传文件到当前目录」（你正在浏览的那一层）。把系统文件拖到文件夹行上就上传到那一个文件夹（该行高亮），拖到面板则上传到当前目录；拖入的是**文件夹**会明确提示不支持，而不是静默没反应。单文件上限 100MB，空文件会被拒绝，文件名只取 basename 并替换 Windows 非法字符（限 200 字），目标目录不存在会自动创建，上传完成后列表会刷新——哪怕你当时正浏览别的地方。
 - **列表状态的边界** —— Windows/macOS 用工作区根的递归监听，**任何**子目录的改动都会刷新（400ms 防抖）；不支持监听的网络盘回退为 10 秒轮询（每个工作区只提示一次）；POSIX 隐藏构建噪声（`node_modules`、`.git`、`dist`、`.venv` ……）且最多 500 条，Windows 只隐藏依赖/VCS/数据目录且最多 2000 条，两者被截断时都会明说。
 - **预览也是编辑器** —— 文本文件可直接改并用 Ctrl/Cmd+S 保存（限 2MB、未改动时保存置灰、带未保存改动关闭会先确认）；Markdown 可切渲染/原文；HTML 在沙箱 iframe 里渲染，走目录映射 URL 让相对 CSS/图片正常加载（「启用脚本」是逐文件开关，且永不开同源）；图片/视频走 HTTP Range 流式；二进制给十六进制视图；文本支持行号、点选/拖拽/Shift 选区（作为 `lines` 附件添加）、50–200% 缩放、自动换行开关与全屏。
@@ -257,6 +257,31 @@ node-pty 是原生模块，需要放行其脚本（其余两个包只是 no-op/�
 ```bash
 npm i -g --allow-scripts=node-pty,@google/genai,protobufjs pi-web-ui@latest
 ```
+
+### 🐧 Linux：安装前的编译依赖
+
+内置终端依赖的 `node-pty` 只发布 macOS / Windows 的预编译产物，Linux 上
+`npm install` 一律回退到 `node-gyp` 源码编译。请在安装 pi-web-ui **之前**装好 C/C++ 工具链：
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install -y build-essential python3
+# Fedora / RHEL
+sudo dnf install -y python3 make gcc-c++
+# Arch
+sudo pacman -S --needed base-devel python
+```
+
+缺少时会整体安装失败：
+
+```
+npm error path .../node_modules/node-pty
+npm error command sh -c node scripts/prebuild.js || node-gyp rebuild
+npm error > Rebuilding because directory .../node_modules/node-pty/prebuilds/linux-x64 does not exist
+npm error make: g++: No such file or directory
+```
+
+Android / Termux 是特殊情况，见 [Termux（Android）](#termuxandroid)。
 
 ### Termux（Android）
 
@@ -589,7 +614,6 @@ pi-web-ui uninstall <id>      # 卸载插件
 | `PI_WEB_STALL_NOTIFY_MS`       | `180000`（3 分）   | 流式运行完全没事件时给警告（不中止）；`0` = 关。                                                                                                                                                               |
 | `PI_WEB_TERMINAL_IDLE_MS`      | `15000`            | AI 开过的终端静默这么久就催它去看一眼；`0` = 关。                                                                                                                                                              |
 | `PI_WEB_TERMINAL_IDLE_LINES`   | `10`               | 该催命消息回送的终端尾部行数（1–500）。                                                                                                                                                                        |
-| `PI_WEB_INLINE_FILE_MAX`       | `12288`（12KB）    | 小于它且无工作区归属的上传文件被内联而不是只给路径。                                                                                                                                                           |
 | `PI_WEB_VISION_TIMEOUT_MS`     | `90000`            | 视觉桥整批转写的超时。                                                                                                                                                                                         |
 | `PI_WEB_UPLOAD_RETENTION_DAYS` | `14`               | `<dataDir>/uploads/` 保留天数；`0` = 不清理。                                                                                                                                                                  |
 | `PI_WEB_SHELL`                 | 自动               | 仅 Windows：node-pty 用哪个 shell（自动顺序：`PI_WEB_SHELL` → `$SHELL` → Git Bash → 随包 busybox → `%COMSPEC%` → PowerShell）。                                                                                |

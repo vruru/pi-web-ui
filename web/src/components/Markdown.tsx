@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { JSX } from "react";
 import ReactMarkdown from "react-markdown";
 import type { PluggableList } from "unified";
@@ -8,6 +8,7 @@ import remarkMath from "remark-math";
 import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import "katex/dist/katex.min.css";
 import { CopyButton } from "./copy-button";
 import { splitCodeLines } from "../code-lines";
@@ -22,6 +23,7 @@ import {
 } from "../plugin-fence";
 import type { FenceRenderContext } from "../plugin-loader";
 import { PluginFenceBlock } from "./PluginFenceBlock";
+import { openFilePreview } from "../file-preview-bridge";
 
 interface MarkdownProps {
 	text: string;
@@ -49,6 +51,26 @@ export const rehypePlugins: PluggableList = [
 	[rehypeHighlight, { detect: true, ignoreMissing: true }],
 ];
 
+/**
+ * 把正文中的 @file.ext 提及安全转换为 pi-file:// 链接，供 MdLink 渲染为小药丸微标。
+ * - 仅在非代码段生效（严格跳过 ``` 代码围栏与 ` 行内代码）；
+ * - 排除邮箱（a@b.com）与推特类无扩展名用户名（@alice）；
+ * - 支持工作区相对路径，如 @src/App.tsx、@package.json。
+ */
+export function linkifyFileMentions(text: string): string {
+	if (!text || !text.includes("@")) return text;
+	const segments = text.split(new RegExp("(```[\\s\\S]*?```|`[^`\\r\\n]+`)", "g"));
+	const fileRegex = /(^|[\s(（“"'[])@((?:[\w.-]+\/)*[\w.-]+\.(?:[a-zA-Z0-9]{1,10}))(?=[)\s\],.;:!?，。！？’”"']|$)/g;
+	for (let i = 0; i < segments.length; i += 2) {
+		if (segments[i]) {
+			segments[i] = segments[i].replace(fileRegex, (match, prefix, path) => {
+				return prefix + "[" + "@" + path + "](pi-file://" + encodeURIComponent(path) + ")";
+			});
+		}
+	}
+	return segments.join("");
+}
+
 export function MarkdownBody({
 	text,
 	rawHtml = false,
@@ -60,14 +82,20 @@ export function MarkdownBody({
 }) {
 	// rawHtml 时在 highlight 之前插入 rehype-raw：先把它内嵌的原始 HTML 解析成
 	// hast 节点，再统一交给 highlight 做代码高亮，顺序不可颠倒。
-	const rh: PluggableList = rawHtml ? [rehypeRaw, ...rehypePlugins] : rehypePlugins;
+	// rehype-raw 之后紧接 rehype-sanitize（GitHub 式默认白名单）：rawHtml 的来源
+	// （提问对话框等）信任模型再宽也是"模型输出"，script/事件属性/iframe 一律剥掉，
+	// 常用标签与 markdown 生成的结构（含 language-* 类名，KaTeX 的 language-math
+	// 走同一前缀）保留。sanitize 必须在 katex/highlight 之前：它们后续添加的
+	// class/元素不会被白名单误伤。非 rawHtml 路径本来就没有原始 HTML，不接 sanitize。
+	const rh: PluggableList = rawHtml ? [rehypeRaw, rehypeSanitize, ...rehypePlugins] : rehypePlugins;
+	const processedText = useMemo(() => linkifyFileMentions(text), [text]);
 	return (
 		<ReactMarkdown
 			remarkPlugins={hardBreaks ? remarkPluginsHardBreaks : remarkPlugins}
 			rehypePlugins={rh}
 			components={{ pre: PreWithCopy, a: MdLink }}
 		>
-			{text}
+			{processedText}
 		</ReactMarkdown>
 	);
 }
@@ -88,8 +116,38 @@ export const Markdown = memo(function Markdown({ text, rawHtml = false, hardBrea
  * 转给系统浏览器 —— 而裸 `href` 会触发同帧导航把应用窗口带走（issue #154，
  * 桌面壳另有 `will-navigate` 守卫兜底脚本发起的跳转）。站内锚点（`#…`）与相对
  * 路径不动：它们本来就是应用内导航。 */
-function MdLink({ href, children, ...rest }: JSX.IntrinsicElements["a"]) {
+function MdLink({ node: _node, href, children, ...rest }: JSX.IntrinsicElements["a"] & { node?: unknown }) {
+	// node 是 react-markdown 塞进 props 的内部 hast 节点（运行时存在、类型里没有），
+	// 必须在这里截下：透传给 <a> 会渲染成 node="[object Object]" 垃圾属性。
 	const target = String(href ?? "");
+	if (target.startsWith("pi-file://")) {
+		const rawPath = target.slice("pi-file://".length);
+		let filePath = rawPath;
+		try {
+			filePath = decodeURIComponent(rawPath);
+		} catch {
+			filePath = rawPath;
+		}
+		const fileName =
+			typeof children === "string" && children.trim() ? children.trim() : (filePath.split("/").pop() ?? filePath);
+		return (
+			<button
+				type="button"
+				className="file-pill"
+				title={"点击预览文件: " + filePath}
+				onClick={(e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					openFilePreview({ path: filePath, name: fileName.replace(/^@/, "") });
+				}}
+			>
+				<span className="file-pill-icon" aria-hidden="true">
+					📄
+				</span>
+				<span className="file-pill-name">{fileName}</span>
+			</button>
+		);
+	}
 	if (!/^(https?:|mailto:|tel:)/i.test(target)) {
 		return (
 			<a href={href} {...rest}>
@@ -98,7 +156,10 @@ function MdLink({ href, children, ...rest }: JSX.IntrinsicElements["a"]) {
 		);
 	}
 	return (
-		<a href={href} target="_blank" rel="noreferrer noopener" {...rest}>
+		// {...rest} 放在安全默认之前：rest 来自渲染内容（rawHtml 时是模型给的
+		// 属性），不可信 —— target/rel 后置才能保证 `_blank` + noreferrer noopener
+		// 不会被 `<a target="_self">` 之类的输入覆盖掉。
+		<a {...rest} href={href} target="_blank" rel="noreferrer noopener">
 			{children}
 		</a>
 	);

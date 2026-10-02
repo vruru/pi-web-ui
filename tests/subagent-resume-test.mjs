@@ -71,11 +71,11 @@ const mock = createServer(async (req, res) => {
 	const lastText = textOf(last ?? {});
 
 	if (last?.role === "user" && lastText.startsWith("PARENT-"))
-		return tool(res, p.model, "subagent_spawn", { prompt: lastText.replace("PARENT-", "CHILD-") });
+		return tool(res, p.model, "subagent", { action: "spawn", prompt: lastText.replace("PARENT-", "CHILD-") });
 	if (last?.role === "tool" && lastText.includes("Subagent started")) {
 		if (task === "PARENT-WAIT") {
 			const runId = lastText.match(/sa-[a-z0-9]+/)?.[0];
-			return tool(res, p.model, "subagent_wait_all", { runIds: [runId], timeoutSeconds: 10 });
+			return tool(res, p.model, "subagent", { action: "wait_all", runIds: [runId], timeoutSeconds: 10 });
 		}
 		return sse(res, [delta(p.model, { content: "WAITING-FOR-CHILD" }), delta(p.model, {}, "stop")]);
 	}
@@ -105,7 +105,9 @@ writeFileSync(
 );
 
 const repoRoot = realpathSync(new URL("../", import.meta.url));
-const server = spawn(process.execPath, ["dist/server/index.js"], {
+// PI_QUEUE_SDK_HOOK（可选）：换一份 pi SDK 跑同一脚本（与 queued-attachments-test 同一约定）。
+const sdkHook = process.env.PI_QUEUE_SDK_HOOK ? ["--import", process.env.PI_QUEUE_SDK_HOOK] : [];
+const server = spawn(process.execPath, [...sdkHook, "dist/server/index.js"], {
 	cwd: repoRoot,
 	env: {
 		...process.env,

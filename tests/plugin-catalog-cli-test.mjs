@@ -2,13 +2,14 @@
  * issue #165 E2E（零网络、自包含、独立临时目录）：
  * 走真实 CLI（node bin/pi-web-ui.mjs）全链路，本地目录源（离线）：
  *
- *   1. --build 自动推断：只有源码（manifest.build 声明、无产物）时，不加 --build
- *      也会自动构建（输出里有“自动推断”），产物齐全；
+ *   1. --build 自动推断收紧（审计修复）：只有源码（manifest.build 声明、无产物）时，
+ *      不加 --build 且非交互（子进程 stdin 非 TTY）→ 跳过构建并警告，装出无产物目录，
+ *      退出码 0；显式 --build 照常构建、产物齐全；
  *   2. --no-build：同样源码，装出无产物的目录（不构建），退出码 0；
  *   3. --build + --no-build 同用 → 报错退出（互斥）；
  *   4. 产物已提交的仓库：即使构建脚本必失败，不加 --build 也不跑构建（原样安装）；
  *   5. install --catalog <本地文档>：读文档 → 校验（非法条目丢弃计数）→ 原子写盘
- *      （默认按 id 合并）→ 逐条安装（源码条目走自动推断）；已安装条目默认跳过，
+ *      （默认按 id 合并）→ 逐条安装（源码条目配 --build 显式构建）；已安装条目默认跳过，
  *      --force 更新，--replace 整体替换。
  *
  * 构建 fixtures 全离线：install 步用 `node --version`（无依赖可装），command 用
@@ -23,8 +24,12 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BIN = resolve(__dirname, "../bin/pi-web-ui.mjs");
 
+// The CLI picks zh/en from LC_ALL/LC_MESSAGES/LANG; the assertions below match the Chinese output.
+const { LC_ALL: _lcAll, LC_MESSAGES: _lcMessages, ...baseEnv } = process.env;
+const ZH_ENV = { ...baseEnv, LANG: "zh_CN.UTF-8" };
+
 function cli(args) {
-	const r = spawnSync(process.execPath, [BIN, ...args], { encoding: "utf8" });
+	const r = spawnSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: ZH_ENV });
 	return { status: r.status ?? 1, out: (r.stdout ?? "") + (r.stderr ?? "") };
 }
 function must(cond, msg) {
@@ -53,17 +58,21 @@ function main() {
 	const root = mkdtempSync(join(tmpdir(), "plugin-catalog-cli-"));
 	const dataDir = join(root, "data");
 	try {
-		// —— 1. 自动推断：不加 --build 也构建 ——
+		// —— 1. 自动推断收紧：非交互（无 TTY）不加 --build → 跳过构建并警告 ——
 		const src1 = join(root, "src1");
 		writeSourceOnly(src1, "auto1");
 		let r = cli(["install", src1, "--data-dir", dataDir]);
-		must(r.status === 0, `1. 源码插件不加 flag 自动构建安装 (exit=${r.status}): ${r.out.slice(0, 200)}`);
-		must(/自动推断/.test(r.out), "1. 输出说明是自动推断的构建");
+		must(r.status === 0, `1. 源码插件不加 flag 仍安装成功 (exit=${r.status}): ${r.out.slice(0, 200)}`);
+		must(/未授权执行/.test(r.out), "1. 输出警告构建命令未授权执行");
+		must(!existsSync(join(dataDir, "plugins", "auto1", "index.mjs")), "1. 确实没有构建产物");
+		// 显式 --build 行为不变：构建执行、产物齐全
+		r = cli(["install", src1, "--build", "--force", "--data-dir", dataDir]);
+		must(r.status === 0, `1b. 显式 --build 照常构建安装 (exit=${r.status}): ${r.out.slice(0, 200)}`);
 		must(
 			readFileSync(join(dataDir, "plugins", "auto1", "index.mjs"), "utf8") === "// built auto1\n",
-			"1. 构建产物落盘",
+			"1b. 构建产物落盘",
 		);
-		must(existsSync(join(dataDir, "plugins", "auto1", "client", "entry.mjs")), "1. client 产物落盘");
+		must(existsSync(join(dataDir, "plugins", "auto1", "client", "entry.mjs")), "1b. client 产物落盘");
 
 		// —— 2. --no-build：装出无产物目录 ——
 		const src2 = join(root, "src2");
@@ -103,7 +112,8 @@ function main() {
 		};
 		const docPath = join(root, "catalog.json");
 		writeFileSync(docPath, JSON.stringify(doc));
-		r = cli(["install", "--catalog", docPath, "--data-dir", dataDir]);
+		// 目录里的源码条目同样受授权把关：显式 --build 让 catbuilt 构建出产物。
+		r = cli(["install", "--catalog", docPath, "--build", "--data-dir", dataDir]);
 		must(r.status === 0, `5. --catalog 同步+安装成功 (exit=${r.status}): ${r.out.slice(-300)}`);
 		must(/丢弃 1 条非法/.test(r.out), "5. 非法条目被丢弃并计数");
 		must(/2 成功/.test(r.out), "5. 两条合法全部安装成功");
@@ -111,7 +121,7 @@ function main() {
 		must(Array.isArray(written.entries) && written.entries.some((e) => e.id === "catbuilt"), "5. 可安装列表原子写盘");
 		must(
 			readFileSync(join(dataDir, "plugins", "catbuilt", "index.mjs"), "utf8") === "// built catbuilt\n",
-			"5. 目录里的源码条目同样走自动推断构建",
+			"5. 目录里的源码条目随 --build 显式构建",
 		);
 
 		// —— 6. 已安装默认跳过；--force 更新；--replace 整体替换 ——

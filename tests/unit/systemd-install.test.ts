@@ -32,60 +32,77 @@ interface Invocation {
 interface Cli {
 	installSystemd(opts: Options): void;
 	buildUnit(cwd: string, env: Record<string, string>): string;
+	serviceName(opts: { name?: string }): string;
 }
-function harness(env: Env = {}, uid = 1000, failure?: { status: number | null; error?: Error }) {
+function harness(
+	env: Env = {},
+	uid = 1000,
+	failure?: { status: number | null; error?: Error },
+	missing: string[] = [],
+) {
 	const calls: Invocation[] = [];
 	const output: string[] = [];
+	const mkdirCalls: Array<[string, unknown]> = [];
 	const writtenFiles = new Map<string, { content: string; options?: unknown }>();
 	const removedFiles: string[] = [];
 	const names = [
+		"isZhLang",
 		"systemdQuote",
 		"systemdPath",
 		"buildUnit",
 		"systemdUnitPath",
 		"effectivePort",
+		"serviceName",
 		"serviceOptions",
 		"serviceEnv",
 		"runSystemdRoot",
 		"installSystemd",
 	];
-	const cli = runInNewContext(`${names.map(functionSource).join("\n")}\n({ installSystemd, buildUnit })`, {
-		process: {
-			env: { PATH: "/home/installer/bin:/usr/bin", LANG: "C.UTF-8", ...env },
-			pid: 1000,
-			getuid: () => uid,
-			exit: (code: number) => {
-				throw new Error(`exit:${code}`);
+	const cli = runInNewContext(
+		`${names.map(functionSource).join("\n")}\nconst ZH = isZhLang();
+({ installSystemd, buildUnit, serviceName })`,
+		{
+			process: {
+				env: { PATH: "/home/installer/bin:/usr/bin", LANG: "C.UTF-8", ...env },
+				pid: 1000,
+				getuid: () => uid,
+				exit: (code: number) => {
+					throw new Error(`exit:${code}`);
+				},
+			},
+			userInfo: () => ({ username: uid === 0 ? "root" : "installer" }),
+			homedir: () => "/home/installer",
+			tmpdir: () => "/tmp",
+			join: posix.join,
+			writeFileSync: (path: string, content: string, options?: unknown) => {
+				writtenFiles.set(path, { content, options });
+			},
+			rmSync: (path: string) => {
+				removedFiles.push(path);
+			},
+			resolve: posix.resolve,
+			existsSync: (p: string) => !missing.includes(p),
+			mkdirSync: (p: string, opts?: unknown) => {
+				mkdirCalls.push([p, opts]);
+			},
+			isWin: false,
+			isMac: false,
+			NODE: "/home/installer/node/bin/node",
+			SERVER_ENTRY: "/home/installer/pkg/dist/server/index.js",
+			// 「优先用全局 pi SDK」钩子（issue #260）——buildUnit 会把它当 --import 写进 ExecStart。
+			SDK_HOOK: "/home/installer/pkg/dist/server/resolve-global-sdk.js",
+			HAS_SDK_HOOK: true,
+			console: { log: (value: string) => output.push(value) },
+			fail: (message: string) => {
+				throw new Error(message);
+			},
+			spawnSync: (command: string, args: string[], options: Invocation["options"]) => {
+				calls.push({ command, args: Array.from(args), options });
+				return failure ?? { status: 0 };
 			},
 		},
-		userInfo: () => ({ username: uid === 0 ? "root" : "installer" }),
-		homedir: () => "/home/installer",
-		tmpdir: () => "/tmp",
-		join: posix.join,
-		writeFileSync: (path: string, content: string, options?: unknown) => {
-			writtenFiles.set(path, { content, options });
-		},
-		rmSync: (path: string) => {
-			removedFiles.push(path);
-		},
-		resolve: posix.resolve,
-		existsSync: () => true,
-		isWin: false,
-		NODE: "/home/installer/node/bin/node",
-		SERVER_ENTRY: "/home/installer/pkg/dist/server/index.js",
-		// 「优先用全局 pi SDK」钩子（issue #260）——buildUnit 会把它当 --import 写进 ExecStart。
-		SDK_HOOK: "/home/installer/pkg/dist/server/resolve-global-sdk.js",
-		HAS_SDK_HOOK: true,
-		console: { log: (value: string) => output.push(value) },
-		fail: (message: string) => {
-			throw new Error(message);
-		},
-		spawnSync: (command: string, args: string[], options: Invocation["options"]) => {
-			calls.push({ command, args: Array.from(args), options });
-			return failure ?? { status: 0 };
-		},
-	}) as Cli;
-	return { cli, calls, output, writtenFiles, removedFiles };
+	) as Cli;
+	return { cli, calls, output, writtenFiles, removedFiles, mkdirCalls };
 }
 
 function environment(unit: string): Record<string, string> {
@@ -150,7 +167,9 @@ describe("Linux systemd installation", () => {
 			PI_WEB_PORT: port,
 			PI_WEB_HOST: "0.0.0.0",
 			PI_WEB_TOKEN: "test-only-token",
-			PI_WEB_CWD: "/home/installer",
+			// issue #295：服务默认工作区不再是家目录本身（同步扫描落在 $HOME 上会被
+			// 坏挂载挂起整个事件循环），而是干净的 ~/pi-web-ui 子目录。
+			PI_WEB_CWD: "/home/installer/pi-web-ui",
 		});
 		expect(h.calls).toEqual([]); // --print never elevates or changes a service.
 	});
@@ -160,6 +179,19 @@ describe("Linux systemd installation", () => {
 		expect(h.output[0]).not.toContain("Capabilities=");
 		expect(h.output[0]).not.toContain("CapabilityBoundingSet=");
 		expect(environment(h.output[0])).not.toHaveProperty("PI_WEB_TOKEN");
+	});
+	it("默认工作区为 ~/pi-web-ui 且不存在即建（issue #295）", () => {
+		const h = harness({}, 1000, undefined, ["/home/installer/pi-web-ui"]);
+		h.cli.installSystemd({ print: true });
+		expect(environment(h.output[0])).toMatchObject({ PI_WEB_CWD: "/home/installer/pi-web-ui" });
+		expect(h.mkdirCalls).toEqual([["/home/installer/pi-web-ui", { recursive: true }]]);
+	});
+	it("显式 --cwd 不存在则报错、不建目录（issue #295）", () => {
+		const h = harness({}, 1000, undefined, ["/srv/nowhere"]);
+		expect(() => h.cli.installSystemd({ print: true, cwd: "/srv/nowhere" })).toThrow(
+			/工作目录不存在|Working directory does not exist/,
+		);
+		expect(h.mkdirCalls).toEqual([]);
 	});
 	it("honors flags over environment values", () => {
 		const h = harness({ PI_WEB_PORT: "80", PI_WEB_HOST: "0.0.0.0" });
@@ -247,5 +279,29 @@ describe("Linux systemd installation", () => {
 		const h = harness({}, 1000, { status: null, error: new Error("ENOENT") });
 		expect(() => h.cli.installSystemd({})).toThrow("ENOENT");
 		expect(h.calls).toHaveLength(1);
+	});
+});
+
+describe("service name validation (--name)", () => {
+	it("defaults to pi-web-ui and accepts alphanumeric/dash/underscore names up to 64 chars", () => {
+		const h = harness();
+		expect(h.cli.serviceName({})).toBe("pi-web-ui");
+		expect(h.cli.serviceName({ name: "custom" })).toBe("custom");
+		expect(h.cli.serviceName({ name: "A-1_z" })).toBe("A-1_z");
+		expect(h.cli.serviceName({ name: "a".repeat(64) })).toBe("a".repeat(64));
+	});
+	// name 被拼进 systemd unit 文件名 / Windows 脚本路径 / HKCU Run 键值名：
+	// 路径分隔符、引号、空白、越界长度都必须在入口被拒。
+	it.each(["", "-lead", "_lead", "has space", "has/slash", "..\\evil", 'q"uote', "a".repeat(65), "pi\nweb", "名前"])(
+		"rejects service name %j that could inject into unit paths or registry value names",
+		(bad) => {
+			const h = harness();
+			expect(() => h.cli.serviceName({ name: bad })).toThrow(/无效服务名|Invalid service name/);
+		},
+	);
+	it("refuses to install with an invalid name before running any privileged command", () => {
+		const h = harness();
+		expect(() => h.cli.installSystemd({ name: "../evil" })).toThrow(/无效服务名|Invalid service name/);
+		expect(h.calls).toEqual([]);
 	});
 });

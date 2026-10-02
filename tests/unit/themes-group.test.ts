@@ -36,6 +36,7 @@ describe("主题分组与现代经典主题测试", () => {
 		expect(builtinIds).toContain("sakura");
 		expect(builtinIds).toContain("cyberpunk");
 		expect(builtinIds).toContain("dazzle");
+		expect(builtinIds).toContain("aetheris");
 	});
 
 	it("resolveThemeFile 能解析新经典主题的 css 路径", () => {
@@ -78,6 +79,10 @@ describe("主题分组与现代经典主题测试", () => {
 		const fileAyu = resolveThemeFile(BUILTIN_DIR, USER_DIR, "ayu-light");
 		expect(fileAyu).toBeTruthy();
 		expect(fileAyu).toContain("ayu-light.css");
+
+		const fileAetheris = resolveThemeFile(BUILTIN_DIR, USER_DIR, "aetheris");
+		expect(fileAetheris).toBeTruthy();
+		expect(fileAetheris).toContain("aetheris.css");
 	});
 
 	it("解析 color-scheme 标注浅色/深色", () => {
@@ -98,6 +103,9 @@ describe("主题分组与现代经典主题测试", () => {
 		// 原生内置浅色/深色
 		expect(byId.get("paper")?.scheme).toBe("light");
 		expect(byId.get("cyberpunk")?.scheme).toBe("dark");
+		expect(byId.get("aetheris")?.scheme).toBe("dark");
+		expect(byId.get("aetheris")?.name).toBe("以太座舱");
+		expect(byId.get("aetheris")?.nameEn).toBe("Aetheris HUD");
 	});
 
 	it("暖纸主题 (paper.css) 已修复实底与高对比度弱文本", () => {

@@ -96,7 +96,13 @@ function connectWs(collect) {
 
 try {
 	proc = spawn(process.execPath, [join(repoRoot, "dist", "server", "index.js")], {
-		env: { ...process.env, PI_WEB_PORT: String(PORT), PI_WEB_DATA_DIR: dataDir, PI_WEB_CWD: repoRoot },
+		env: {
+			...process.env,
+			PI_WEB_PORT: String(PORT),
+			PI_WEB_DATA_DIR: dataDir,
+			PI_WEB_CWD: repoRoot,
+			PI_WEB_PLUGIN_CATALOG_URL: process.env.PI_WEB_PLUGIN_CATALOG_URL ?? "",
+		},
 		stdio: ["ignore", "pipe", "pipe"],
 	});
 	let stderr = "";

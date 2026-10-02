@@ -9,6 +9,8 @@ import { parseSkillBlock } from "../skill-block";
 interface CollapsedMessageProps {
 	message: UiMessage;
 	onExpand: (messageId: string) => void;
+	/** 调用方指定的摘要（不传则按旧口径取正文预览；目标审查回合的指令/结论用它）。 */
+	summary?: string;
 }
 
 /**
@@ -17,27 +19,30 @@ interface CollapsedMessageProps {
  * role label, a plain-text preview, and block-type counts. The full message is
  * only rendered after the user clicks to expand.
  */
-export const CollapsedMessage = memo(function CollapsedMessage({ message, onExpand }: CollapsedMessageProps) {
+export const CollapsedMessage = memo(function CollapsedMessage({ message, onExpand, summary }: CollapsedMessageProps) {
 	const t = useT();
 	const exportImage = useExportImage();
 	const exportable = isExportableMessage(message);
 	const exportSelected = exportImage.open && exportImage.selectedIds.includes(message.id);
 	const showExportCheck = exportImage.open && exportable;
 
+	// 调用方摘要优先（目标审查回合的指令/结论行）；否则按旧口径取正文预览。
 	// Plain-text preview (first text block, first line, ~90 chars — no Markdown).
-	let preview = "";
-	for (const b of message.content) {
-		const text = asText(b);
-		if (text && text.text.trim()) {
-			// Skill invocations collapse to a `skill:name · <args>` chip instead
-			// of the raw SKILL.md dump.
-			const sb = parseSkillBlock(text.text);
-			if (sb) {
-				preview = `skill:${sb.name}` + (sb.userMessage ? ` · ${sb.userMessage.replace(/\s+/g, " ").trim()}` : "");
-			} else {
-				preview = text.text.replace(/\s+/g, " ").trim();
+	let preview = summary ?? "";
+	if (!preview) {
+		for (const b of message.content) {
+			const text = asText(b);
+			if (text && text.text.trim()) {
+				// Skill invocations collapse to a `skill:name · <args>` chip instead
+				// of the raw SKILL.md dump.
+				const sb = parseSkillBlock(text.text);
+				if (sb) {
+					preview = `skill:${sb.name}` + (sb.userMessage ? ` · ${sb.userMessage.replace(/\s+/g, " ").trim()}` : "");
+				} else {
+					preview = text.text.replace(/\s+/g, " ").trim();
+				}
+				break;
 			}
-			break;
 		}
 	}
 	// Attached files get their name as the preview.

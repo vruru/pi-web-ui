@@ -153,6 +153,25 @@ describe("FooterBar 连接状态", () => {
 		expect(ctxWrapper?.title).toContain("300K");
 		expect(ctxWrapper?.title).toContain("1000K");
 	});
+
+	it("底栏 Cost 渲染带有 status-cost 类并展示格式化后的累计成本", () => {
+		const chat = makeChatState({
+			state: {
+				stats: {
+					tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					contextUsage: { tokens: 0, contextWindow: 8000, percent: 0, estimated: false },
+					cost: 0.0125,
+					totalMessages: 0,
+				},
+				queue: { steering: [], followUp: [] },
+			} as unknown as ChatState["state"],
+		});
+		const { container } = mountFooter(chat);
+		const costWrapper = container.querySelector(".status-cost");
+		expect(costWrapper).toBeTruthy();
+		expect(costWrapper?.textContent).toContain("$0.0125");
+		expect(costWrapper?.getAttribute("title")).toContain("累计成本");
+	});
 });
 
 describe("FooterBar generation speed", () => {

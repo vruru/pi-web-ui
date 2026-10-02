@@ -6861,10 +6861,27 @@ var require_request = __commonJS({
           return false;
         }
       }
-      onUpgrade(statusCode, headers, socket) {
+      /**
+       * @param {number} statusCode
+       * @param {Buffer[]|string[]} headers
+       * @param {import('node:stream').Duplex} socket
+       * @param {string} [statusText]
+       */
+      onUpgrade(statusCode, headers, socket, statusText = "") {
+        this.onFinally();
         assert(!this.aborted);
         assert(!this.completed);
-        return this[kHandler].onUpgrade(statusCode, headers, socket);
+        if (channels.headers.hasSubscribers) {
+          channels.headers.publish({ request: this, response: { statusCode, headers, statusText } });
+        }
+        const result = this[kHandler].onUpgrade(statusCode, headers, socket);
+        if (!this.aborted) {
+          this.completed = true;
+          if (channels.trailers.hasSubscribers) {
+            channels.trailers.publish({ request: this, trailers: [] });
+          }
+        }
+        return result;
       }
       onComplete(trailers) {
         this.onFinally();
@@ -11161,7 +11178,13 @@ var require_client_h1 = __commonJS({
     function lazyllhttp() {
       const llhttpWasmData = process.env.JEST_WORKER_ID ? require_llhttp_wasm() : void 0;
       let mod;
-      let useWasmSIMD = process.arch !== "ppc64";
+      let useWasmSIMD = true;
+      if (process.arch === "ppc64") {
+        const [major, minor] = process.versions.node.split(".").map((n) => parseInt(n, 10));
+        if (major < 24 || major === 24 && minor < 12) {
+          useWasmSIMD = false;
+        }
+      }
       if (process.env.UNDICI_NO_WASM_SIMD === "1") {
         useWasmSIMD = false;
       } else if (process.env.UNDICI_NO_WASM_SIMD === "0") {
@@ -11515,7 +11538,7 @@ var require_client_h1 = __commonJS({
        * @param {Buffer} head
        */
       onUpgrade(head) {
-        const { upgrade, client, socket, headers, statusCode } = this;
+        const { upgrade, client, socket, headers, statusCode, statusText } = this;
         assert(upgrade);
         assert(client[kSocket] === socket);
         assert(!socket.destroyed);
@@ -11540,8 +11563,9 @@ var require_client_h1 = __commonJS({
         client[kQueue][client[kRunningIdx]++] = null;
         client.emit("disconnect", client[kUrl], [client], new InformationalError("upgrade"));
         try {
-          request.onUpgrade(statusCode, headers, socket);
+          request.onUpgrade(statusCode, headers, socket, statusText);
         } catch (err) {
+          util.errorRequest(client, request, err);
           util.destroy(socket, err);
         }
         client[kResume]();
@@ -12773,10 +12797,15 @@ var require_client_h2 = __commonJS({
           }
           stream = session.request(headers, { endStream: false, signal });
           stream[kHTTP2Stream] = true;
+          ++session[kOpenStreams];
           stream.once("response", (headers2, _flags) => {
             const { [HTTP2_HEADER_STATUS]: statusCode, ...realHeaders } = headers2;
-            request.onUpgrade(statusCode, parseH2Headers(realHeaders), stream);
-            ++session[kOpenStreams];
+            try {
+              request.onUpgrade(statusCode, parseH2Headers(realHeaders), stream);
+            } catch (err) {
+              abort(err);
+              return;
+            }
             completeRequest(client, request);
           });
           stream.on("error", () => {
@@ -12793,10 +12822,15 @@ var require_client_h2 = __commonJS({
         }
         stream = session.request(headers, { endStream: false, signal });
         stream[kHTTP2Stream] = true;
+        ++session[kOpenStreams];
         stream.on("response", (headers2) => {
           const { [HTTP2_HEADER_STATUS]: statusCode, ...realHeaders } = headers2;
-          request.onUpgrade(statusCode, parseH2Headers(realHeaders), stream);
-          ++session[kOpenStreams];
+          try {
+            request.onUpgrade(statusCode, parseH2Headers(realHeaders), stream);
+          } catch (err) {
+            abort(err);
+            return;
+          }
           completeRequest(client, request);
         });
         stream.on("error", abort);
@@ -15512,6 +15546,55 @@ var require_retry_handler = __commonJS({
         });
       }
     }
+    var RetryController = class {
+      #paused = false;
+      #target = null;
+      set target(target) {
+        this.#target = target;
+        if (this.#paused) {
+          target?.pause();
+        }
+      }
+      get target() {
+        return this.#target;
+      }
+      pause() {
+        this.#paused = true;
+        this.#target?.pause();
+      }
+      resume() {
+        this.#paused = false;
+        this.#target?.resume();
+      }
+      abort(reason) {
+        this.#target?.abort(reason);
+      }
+      get paused() {
+        return this.#paused || (this.#target?.paused ?? false);
+      }
+      get aborted() {
+        return this.#target?.aborted ?? false;
+      }
+      get reason() {
+        return this.#target?.reason ?? null;
+      }
+      get rawHeaders() {
+        return this.#target?.rawHeaders ?? null;
+      }
+      set rawHeaders(value) {
+        if (this.#target) {
+          this.#target.rawHeaders = value;
+        }
+      }
+      get rawTrailers() {
+        return this.#target?.rawTrailers ?? null;
+      }
+      set rawTrailers(value) {
+        if (this.#target) {
+          this.#target.rawTrailers = value;
+        }
+      }
+    };
     var RetryHandler = class _RetryHandler {
       constructor(opts, { dispatch, handler }) {
         const { retryOptions, ...dispatchOpts } = opts;
@@ -15566,16 +15649,17 @@ var require_retry_handler = __commonJS({
         this.start = 0;
         this.end = null;
         this.etag = null;
+        this.controllerProxy = new RetryController();
       }
       onResponseStartWithRetry(controller, statusCode, headers, statusMessage, err) {
         if (this.retryOpts.throwOnError) {
           if (this.retryOpts.statusCodes.includes(statusCode) === false) {
             if (this.headersSent) {
-              this.handler.onResponseError?.(controller, err);
+              this.handler.onResponseError?.(this.controllerProxy, err);
             } else {
               this.headersSent = true;
               this.checkpointResponseEnd(headers);
-              this.handler.onResponseStart?.(controller, statusCode, headers, statusMessage);
+              this.handler.onResponseStart?.(this.controllerProxy, statusCode, headers, statusMessage);
             }
           } else {
             this.error = err;
@@ -15585,17 +15669,17 @@ var require_retry_handler = __commonJS({
         if (isDisturbed(this.opts.body)) {
           this.headersSent = true;
           this.checkpointResponseEnd(headers);
-          this.handler.onResponseStart?.(controller, statusCode, headers, statusMessage);
+          this.handler.onResponseStart?.(this.controllerProxy, statusCode, headers, statusMessage);
           return;
         }
         function shouldRetry(passedErr) {
           if (passedErr) {
             if (this.headersSent) {
-              this.handler.onResponseError?.(controller, passedErr);
+              this.handler.onResponseError?.(this.controllerProxy, passedErr);
             } else {
               this.headersSent = true;
               this.checkpointResponseEnd(headers);
-              this.handler.onResponseStart?.(controller, statusCode, headers, statusMessage);
+              this.handler.onResponseStart?.(this.controllerProxy, statusCode, headers, statusMessage);
             }
             controller.resume();
             return;
@@ -15625,12 +15709,13 @@ var require_retry_handler = __commonJS({
         }
       }
       onRequestStart(controller, context) {
+        this.controllerProxy.target = controller;
         if (!this.headersSent) {
-          this.handler.onRequestStart?.(controller, context);
+          this.handler.onRequestStart?.(this.controllerProxy, context);
         }
       }
-      onRequestUpgrade(controller, statusCode, headers, socket) {
-        this.handler.onRequestUpgrade?.(controller, statusCode, headers, socket);
+      onRequestUpgrade(_controller, statusCode, headers, socket) {
+        this.handler.onRequestUpgrade?.(this.controllerProxy, statusCode, headers, socket);
       }
       static [kRetryHandlerDefaultRetry](err, { state, opts }, cb) {
         const { statusCode, code, headers } = err;
@@ -15718,7 +15803,7 @@ var require_retry_handler = __commonJS({
             if (range == null) {
               this.headersSent = true;
               this.handler.onResponseStart?.(
-                controller,
+                this.controllerProxy,
                 statusCode,
                 headers,
                 statusMessage
@@ -15751,7 +15836,7 @@ var require_retry_handler = __commonJS({
           }
           this.headersSent = true;
           this.handler.onResponseStart?.(
-            controller,
+            this.controllerProxy,
             statusCode,
             headers,
             statusMessage
@@ -15763,24 +15848,24 @@ var require_retry_handler = __commonJS({
           });
         }
       }
-      onResponseData(controller, chunk) {
+      onResponseData(_controller, chunk) {
         if (this.error) {
           return;
         }
         this.start += chunk.length;
-        this.handler.onResponseData?.(controller, chunk);
+        this.handler.onResponseData?.(this.controllerProxy, chunk);
       }
-      onResponseEnd(controller, trailers) {
+      onResponseEnd(_controller, trailers) {
         if (this.error && this.retryOpts.throwOnError) {
           throw this.error;
         }
         if (!this.error) {
           this.retryCount = 0;
-          return this.handler.onResponseEnd?.(controller, trailers);
+          return this.handler.onResponseEnd?.(this.controllerProxy, trailers);
         }
-        this.retry(controller);
+        this.retry();
       }
-      retry(controller) {
+      retry() {
         if (this.start !== 0) {
           const headers = { range: `bytes=${this.start}-${this.end ?? ""}` };
           if (this.etag != null) {
@@ -15798,20 +15883,20 @@ var require_retry_handler = __commonJS({
           this.retryCountCheckpoint = this.retryCount;
           this.dispatch(this.opts, this);
         } catch (err) {
-          this.handler.onResponseError?.(controller, err);
+          this.handler.onResponseError?.(this.controllerProxy, err);
         }
       }
       onResponseError(controller, err) {
         if (controller?.aborted || isDisturbed(this.opts.body) || this.headersSent && !this.resume) {
-          this.handler.onResponseError?.(controller, err);
+          this.handler.onResponseError?.(this.controllerProxy, err);
           return;
         }
         function shouldRetry(returnedErr) {
           if (!returnedErr) {
-            this.retry(controller);
+            this.retry();
             return;
           }
-          this.handler?.onResponseError?.(controller, returnedErr);
+          this.handler?.onResponseError?.(this.controllerProxy, returnedErr);
         }
         if (this.retryCount - this.retryCountCheckpoint > 0) {
           this.retryCount = this.retryCountCheckpoint + (this.retryCount - this.retryCountCheckpoint);
@@ -22145,6 +22230,61 @@ var require_decompress = __commonJS({
     var { InvalidArgumentError, ResponseExceededMaxSizeError } = require_errors();
     var DecoratorHandler = require_decorator_handler();
     var { runtimeFeatures } = require_runtime_features();
+    var DecompressController = class {
+      #onPause;
+      #onResume;
+      #onAbort;
+      #paused = false;
+      constructor(onPause, onResume, onAbort) {
+        this.#onPause = onPause;
+        this.#onResume = onResume;
+        this.#onAbort = onAbort;
+        this.target = null;
+      }
+      pause() {
+        if (this.#paused) {
+          return;
+        }
+        this.#paused = true;
+        this.#onPause();
+      }
+      resume() {
+        if (!this.#paused) {
+          return;
+        }
+        this.#paused = false;
+        this.#onResume();
+      }
+      abort(reason) {
+        this.target?.abort(reason);
+        this.#onAbort(reason);
+      }
+      get paused() {
+        return this.#paused;
+      }
+      get aborted() {
+        return this.target?.aborted ?? false;
+      }
+      get reason() {
+        return this.target?.reason ?? null;
+      }
+      get rawHeaders() {
+        return this.target?.rawHeaders ?? null;
+      }
+      set rawHeaders(value) {
+        if (this.target) {
+          this.target.rawHeaders = value;
+        }
+      }
+      get rawTrailers() {
+        return this.target?.rawTrailers ?? null;
+      }
+      set rawTrailers(value) {
+        if (this.target) {
+          this.target.rawTrailers = value;
+        }
+      }
+    };
     var supportedEncodings = {
       gzip: createGunzip,
       "x-gzip": createGunzip,
@@ -22158,7 +22298,7 @@ var require_decompress = __commonJS({
       /** @type {const} */
       [204, 304]
     );
-    var defaultMaxSize = 64 * 1024 * 1024;
+    var defaultMaxSize = 0;
     function createMaxSizeLimiter(maxSize) {
       let size = 0;
       return new TransformStream2({
@@ -22196,14 +22336,114 @@ var require_decompress = __commonJS({
       #terminated = false;
       /** @type {boolean} */
       #inputEnded = false;
+      /** @type {boolean} */
+      #inputBackpressured = false;
+      /** @type {boolean} */
+      #upstreamPaused = false;
+      /** @type {boolean} */
+      #draining = false;
+      /** @type {boolean} */
+      #drainRequested = false;
+      /** @type {boolean} */
+      #completionPending = false;
+      /** @type {DecompressorStream | undefined} */
+      #finalDecompressor;
+      /** @type {DecompressController} */
+      #controller;
       constructor(handler, { skipStatusCodes = defaultSkipStatusCodes, skipErrorResponses = true, maxSize = defaultMaxSize } = {}) {
-        if (!Number.isSafeInteger(maxSize) || maxSize < 1) {
-          throw new InvalidArgumentError("maxSize must be a positive integer");
+        if (!Number.isSafeInteger(maxSize) || maxSize < 0) {
+          throw new InvalidArgumentError("maxSize must be a non-negative integer");
         }
         super(handler);
         this.#skipStatusCodes = skipStatusCodes;
         this.#skipErrorResponses = skipErrorResponses;
         this.#maxSize = maxSize;
+        this.#controller = new DecompressController(
+          () => this.#onDownstreamPause(),
+          () => this.#onDownstreamResume(),
+          (reason) => {
+            if (this.#inputEnded && !this.#terminated) {
+              this.onResponseError(this.#controller, reason);
+            }
+          }
+        );
+      }
+      #onDownstreamPause() {
+        this.#pauseUpstream();
+      }
+      #onDownstreamResume() {
+        const drainWasDeferred = this.#draining;
+        this.#drainOutput();
+        if (!drainWasDeferred) {
+          this.#resumeUpstreamIfNeeded();
+          this.#finishIfReady();
+        }
+      }
+      #pauseUpstream() {
+        if (!this.#upstreamPaused && !this.#terminated) {
+          this.#upstreamPaused = true;
+          this.#controller.target?.pause();
+        }
+      }
+      #resumeUpstreamIfNeeded() {
+        if (this.#upstreamPaused && !this.#controller.paused && !this.#inputBackpressured) {
+          this.#upstreamPaused = false;
+          if (!this.#inputEnded) {
+            this.#controller.target?.resume();
+          }
+        }
+      }
+      #drainOutput() {
+        if (this.#terminated || this.#controller.paused || !this.#finalDecompressor) {
+          return;
+        }
+        if (this.#draining) {
+          this.#drainRequested = true;
+          return;
+        }
+        this.#draining = true;
+        try {
+          do {
+            this.#drainRequested = false;
+            let chunk;
+            while (!this.#terminated && !this.#controller.paused && (chunk = this.#finalDecompressor.read()) !== null) {
+              if (this.#maxSize > 0) {
+                const decompressedSize = this.#decompressedSize + chunk.length;
+                if (decompressedSize > this.#maxSize) {
+                  this.#fail(new ResponseExceededMaxSizeError(
+                    `Decompressed response size (${decompressedSize}) exceeded maxSize (${this.#maxSize})`
+                  ));
+                  return;
+                }
+                this.#decompressedSize = decompressedSize;
+              }
+              const result = super.onResponseData(this.#controller, chunk);
+              if (result === false && !this.#controller.paused) {
+                this.#controller.pause();
+              }
+            }
+          } while (this.#drainRequested && !this.#terminated && !this.#controller.paused);
+        } finally {
+          this.#draining = false;
+        }
+        this.#resumeUpstreamIfNeeded();
+        this.#finishIfReady();
+      }
+      #finishIfReady() {
+        if (this.#terminated || !this.#completionPending || this.#controller.paused || this.#draining) {
+          return;
+        }
+        this.#terminated = true;
+        this.#cleanupDecompressors();
+        super.onResponseEnd(this.#controller, this.#trailers);
+      }
+      #onDecompressionEnd() {
+        if (this.#terminated) {
+          return;
+        }
+        this.#completionPending = true;
+        this.#drainOutput();
+        this.#finishIfReady();
       }
       /**
        * Determines if decompression should be skipped based on encoding and status code
@@ -22246,7 +22486,7 @@ var require_decompress = __commonJS({
         const streams = [];
         for (let i = 0; i < decompressors.length; i++) {
           streams.push(decompressors[i]);
-          if (i < decompressors.length - 1) {
+          if (i < decompressors.length - 1 && this.#maxSize > 0) {
             streams.push(createMaxSizeLimiter(this.#maxSize));
           }
         }
@@ -22254,87 +22494,67 @@ var require_decompress = __commonJS({
       }
       /**
        * Stops decompression and reports an error.
-       * @param {Controller} controller - The controller to coordinate with
        * @param {Error} error - The decompression error
        * @returns {void}
        */
-      #fail(controller, error) {
+      #fail(error) {
         if (this.#terminated) {
           return;
         }
         if (this.#inputEnded) {
-          this.onResponseError(controller, error);
+          this.onResponseError(this.#controller, error);
         } else {
-          controller.abort(error);
+          this.#controller.abort(error);
         }
       }
       /**
-       * Sets up event handlers for a decompressor stream using readable events
+       * Sets up event handlers for the final decompressor stream.
        * @param {DecompressorStream} decompressor - The decompressor stream
-       * @param {Controller} controller - The controller to coordinate with
        * @returns {void}
        */
-      #setupDecompressorEvents(decompressor, controller) {
-        decompressor.on("readable", () => {
-          if (this.#terminated) {
-            return;
-          }
-          let chunk;
-          while ((chunk = decompressor.read()) !== null) {
-            const decompressedSize = this.#decompressedSize + chunk.length;
-            if (decompressedSize > this.#maxSize) {
-              this.#fail(controller, new ResponseExceededMaxSizeError(
-                `Decompressed response size (${decompressedSize}) exceeded maxSize (${this.#maxSize})`
-              ));
-              return;
-            }
-            this.#decompressedSize = decompressedSize;
-            const result = super.onResponseData(controller, chunk);
-            if (result === false) {
-              break;
-            }
-          }
-        });
-        decompressor.on("error", (error) => {
-          this.#fail(controller, error);
-        });
+      #setupDecompressorEvents(decompressor) {
+        this.#finalDecompressor = decompressor;
+        decompressor.on("readable", () => this.#drainOutput());
+        decompressor.on("error", (error) => this.#fail(error));
       }
       /**
        * Sets up event handling for a single decompressor
-       * @param {Controller} controller - The controller to handle events
        * @returns {void}
        */
-      #setupSingleDecompressor(controller) {
+      #setupSingleDecompressor() {
         const decompressor = this.#decompressors[0];
-        this.#setupDecompressorEvents(decompressor, controller);
-        decompressor.on("end", () => {
-          if (this.#terminated) {
-            return;
-          }
-          this.#terminated = true;
-          this.#cleanupDecompressors();
-          super.onResponseEnd(controller, this.#trailers);
-        });
+        this.#setupDecompressorEvents(decompressor);
+        decompressor.on("end", () => this.#onDecompressionEnd());
       }
       /**
        * Sets up event handling for multiple chained decompressors using pipeline
-       * @param {Controller} controller - The controller to handle events
        * @returns {void}
        */
-      #setupMultipleDecompressors(controller) {
+      #setupMultipleDecompressors() {
         const lastDecompressor = this.#decompressors[this.#decompressors.length - 1];
-        this.#setupDecompressorEvents(lastDecompressor, controller);
+        this.#setupDecompressorEvents(lastDecompressor);
         pipeline(this.#decompressors, (err) => {
           if (this.#terminated) {
             return;
           }
           if (err) {
-            this.#fail(controller, err);
+            this.#fail(err);
             return;
           }
-          this.#terminated = true;
-          this.#cleanupDecompressors();
-          super.onResponseEnd(controller, this.#trailers);
+          this.#onDecompressionEnd();
+        });
+      }
+      #setupInputBackpressure() {
+        const decompressor = this.#decompressors[0];
+        decompressor.on("drain", () => {
+          if (this.#terminated) {
+            return;
+          }
+          this.#inputBackpressured = false;
+          if (!this.#controller.paused) {
+            this.#drainOutput();
+            this.#resumeUpstreamIfNeeded();
+          }
         });
       }
       /**
@@ -22343,6 +22563,14 @@ var require_decompress = __commonJS({
        */
       #cleanupDecompressors() {
         this.#decompressors.length = 0;
+        this.#finalDecompressor = void 0;
+      }
+      onRequestStart(controller, context) {
+        this.#controller.target = controller;
+        return super.onRequestStart(this.#controller, context);
+      }
+      onRequestUpgrade(controller, statusCode, headers, socket) {
+        return super.onRequestUpgrade(this.#controller, statusCode, headers, socket);
       }
       /**
        * @param {Controller} controller
@@ -22354,17 +22582,17 @@ var require_decompress = __commonJS({
       onResponseStart(controller, statusCode, headers, statusMessage) {
         const contentEncoding = headers["content-encoding"];
         if (this.#shouldSkipDecompression(contentEncoding, statusCode)) {
-          return super.onResponseStart(controller, statusCode, headers, statusMessage);
+          return super.onResponseStart(this.#controller, statusCode, headers, statusMessage);
         }
         const decompressors = this.#createDecompressionChain(contentEncoding.toLowerCase());
         if (decompressors.length === 0) {
           this.#cleanupDecompressors();
-          return super.onResponseStart(controller, statusCode, headers, statusMessage);
+          return super.onResponseStart(this.#controller, statusCode, headers, statusMessage);
         }
         this.#decompressors = decompressors;
         const { "content-encoding": _, "content-length": __, ...newHeaders } = headers;
-        if (controller?.rawHeaders) {
-          const rawHeaders = controller.rawHeaders;
+        if (this.#controller.rawHeaders) {
+          const rawHeaders = this.#controller.rawHeaders;
           if (Array.isArray(rawHeaders)) {
             const filteredHeaders = [];
             for (let i = 0; i < rawHeaders.length; i += 2) {
@@ -22386,12 +22614,13 @@ var require_decompress = __commonJS({
             }
           }
         }
+        this.#setupInputBackpressure();
         if (this.#decompressors.length === 1) {
-          this.#setupSingleDecompressor(controller);
+          this.#setupSingleDecompressor();
         } else {
-          this.#setupMultipleDecompressors(controller);
+          this.#setupMultipleDecompressors();
         }
-        return super.onResponseStart(controller, statusCode, newHeaders, statusMessage);
+        return super.onResponseStart(this.#controller, statusCode, newHeaders, statusMessage);
       }
       /**
        * @param {Controller} controller
@@ -22400,10 +22629,13 @@ var require_decompress = __commonJS({
        */
       onResponseData(controller, chunk) {
         if (this.#decompressors.length > 0) {
-          this.#decompressors[0].write(chunk);
+          if (!this.#decompressors[0].write(chunk)) {
+            this.#inputBackpressured = true;
+            this.#pauseUpstream();
+          }
           return;
         }
-        super.onResponseData(controller, chunk);
+        return super.onResponseData(this.#controller, chunk);
       }
       /**
        * @param {Controller} controller
@@ -22417,7 +22649,7 @@ var require_decompress = __commonJS({
           this.#decompressors[0].end();
           return;
         }
-        super.onResponseEnd(controller, trailers);
+        return super.onResponseEnd(this.#controller, trailers);
       }
       /**
        * @param {Controller} controller
@@ -22433,7 +22665,7 @@ var require_decompress = __commonJS({
           decompressor.destroy();
         }
         this.#cleanupDecompressors();
-        super.onResponseError(controller, err);
+        super.onResponseError(this.#controller, err);
       }
     };
     function createDecompressInterceptor(options = {}) {
@@ -28020,11 +28252,11 @@ var require_connection = __commonJS({
         processResponse(response) {
           if (response.type === "error" || response.status !== 101) {
             if (response.socket?.session == null) {
-              failWebsocketConnection(handler, 1002, "Received network error or non-101 status code.", response.error);
+              failHandshake(handler, response, 1002, "Received network error or non-101 status code.", response.error);
               return;
             }
             if (response.status !== 200) {
-              failWebsocketConnection(handler, 1002, "Received network error or non-200 status code.", response.error);
+              failHandshake(handler, response, 1002, "Received network error or non-200 status code.", response.error);
               return;
             }
           }
@@ -28033,21 +28265,21 @@ var require_connection = __commonJS({
             warningEmitted = true;
           }
           if (protocols.length !== 0 && !response.headersList.get("Sec-WebSocket-Protocol")) {
-            failWebsocketConnection(handler, 1002, "Server did not respond with sent protocols.");
+            failHandshake(handler, response, 1002, "Server did not respond with sent protocols.");
             return;
           }
           if (response.socket.session == null && response.headersList.get("Upgrade")?.toLowerCase() !== "websocket") {
-            failWebsocketConnection(handler, 1002, 'Server did not set Upgrade header to "websocket".');
+            failHandshake(handler, response, 1002, 'Server did not set Upgrade header to "websocket".');
             return;
           }
           if (response.socket.session == null && response.headersList.get("Connection")?.toLowerCase() !== "upgrade") {
-            failWebsocketConnection(handler, 1002, 'Server did not set Connection header to "upgrade".');
+            failHandshake(handler, response, 1002, 'Server did not set Connection header to "upgrade".');
             return;
           }
           const secWSAccept = response.headersList.get("Sec-WebSocket-Accept");
           const digest = crypto.hash("sha1", keyValue + uid, "base64");
           if (secWSAccept !== digest) {
-            failWebsocketConnection(handler, 1002, "Incorrect hash received in Sec-WebSocket-Accept header.");
+            failHandshake(handler, response, 1002, "Incorrect hash received in Sec-WebSocket-Accept header.");
             return;
           }
           const secExtension = response.headersList.get("Sec-WebSocket-Extensions");
@@ -28055,7 +28287,7 @@ var require_connection = __commonJS({
           if (secExtension !== null) {
             extensions = parseExtensions(secExtension);
             if (!extensions.has("permessage-deflate")) {
-              failWebsocketConnection(handler, 1002, "Sec-WebSocket-Extensions header does not match.");
+              failHandshake(handler, response, 1002, "Sec-WebSocket-Extensions header does not match.");
               return;
             }
           }
@@ -28063,7 +28295,7 @@ var require_connection = __commonJS({
           if (secProtocol !== null) {
             const requestProtocols = getDecodeSplit("sec-websocket-protocol", request.headersList);
             if (requestProtocols === null || !requestProtocols.includes(secProtocol)) {
-              failWebsocketConnection(handler, 1002, "Protocol was not set in the opening handshake.");
+              failHandshake(handler, response, 1002, "Protocol was not set in the opening handshake.");
               return;
             }
           }
@@ -28108,6 +28340,12 @@ var require_connection = __commonJS({
       } else {
         object.readyState = states.CLOSING;
       }
+    }
+    function failHandshake(handler, response, code, reason, cause) {
+      if (response.socket?.session != null && !response.socket.destroyed) {
+        response.socket.destroy();
+      }
+      failWebsocketConnection(handler, code, reason, cause);
     }
     function failWebsocketConnection(handler, code, reason, cause) {
       if (isEstablished(handler.readyState)) {
@@ -57706,6 +57944,7 @@ function stripJsWrapper(code) {
   return body;
 }
 function syncProxy(target, method = "GET", headers = {}, body) {
+  checkRuleDeadline();
   const injected2 = getSyncTransport();
   if (injected2) return injected2(target, method, headers, body);
   const xhr = new XMLHttpRequest();
@@ -57950,6 +58189,16 @@ var JS_PARAMS = [
   "cache",
   "infoMap"
 ];
+var RULE_JS_BUDGET_MS = 3e3;
+var ruleDeadlineAt = 0;
+function ruleTimeoutError() {
+  const e = new Error(`\u89C4\u5219 JS \u6267\u884C\u8D85\u65F6\uFF08>${RULE_JS_BUDGET_MS / 1e3}s\uFF09\uFF0C\u5DF2\u4E2D\u6B62\u672C\u6B21\u6C42\u503C`);
+  e.name = "RuleJsTimeout";
+  return e;
+}
+function checkRuleDeadline() {
+  if (ruleDeadlineAt && Date.now() > ruleDeadlineAt) throw ruleTimeoutError();
+}
 var SANDBOX_RESERVED = /* @__PURE__ */ new Set([
   ...JS_PARAMS,
   "JSON",
@@ -57989,18 +58238,40 @@ var SANDBOX_RESERVED = /* @__PURE__ */ new Set([
 function makeSandbox(jsScope) {
   return new Proxy(jsScope, {
     // 只接管“非常规”名字；参数/内置对象/包装器自用变量一律放行，否则会遮住它们
-    has: (_t, k) => typeof k === "string" && !SANDBOX_RESERVED.has(k) && !k.startsWith("__legado_"),
-    get: (t, k) => k === Symbol.unscopables ? void 0 : t[k],
+    has: (_t, k) => {
+      checkRuleDeadline();
+      return typeof k === "string" && !SANDBOX_RESERVED.has(k) && !k.startsWith("__legado_");
+    },
+    get: (t, k) => {
+      checkRuleDeadline();
+      return k === Symbol.unscopables ? void 0 : t[k];
+    },
     set: (t, k, v) => {
-      ;
+      checkRuleDeadline();
       t[k] = v;
       return true;
     }
   });
 }
+function withRuleBudget(fn2) {
+  const nested = ruleDeadlineAt !== 0;
+  if (!nested) ruleDeadlineAt = Date.now() + RULE_JS_BUDGET_MS;
+  try {
+    return fn2();
+  } finally {
+    if (!nested) ruleDeadlineAt = 0;
+  }
+}
 function evalJsRule(code, ctx, scope) {
   const body = stripJsWrapper(code).trim();
   if (!body) return ctx.result ?? "";
+  return withRuleBudget(() => {
+    const v = evalJsRuleBody(body, ctx, scope);
+    checkRuleDeadline();
+    return v;
+  });
+}
+function evalJsRuleBody(body, ctx, scope) {
   const java2 = makeJava(scope, ctx);
   const cookie = { getCookie: (_t, _k) => readCache("cookie." + String(_t ?? "")) ?? "" };
   const cache = java2.cache;
@@ -58052,18 +58323,20 @@ function applyTemplate(tpl, ctx, scope, nested) {
       if (nv !== void 0) return nv;
     }
     try {
-      const java2 = scope ? makeJava(scope, ctx) : void 0;
-      const v = new Function(
-        "key",
-        "page",
-        "baseUrl",
-        "result",
-        "java",
-        "source",
-        "book",
-        `return (${e});`
-      )(ctx.key ?? "", ctx.page ?? 1, ctx.baseUrl ?? "", augmentInput(ctx.result ?? ""), java2, ctx.source ?? null, ctx.book ?? null);
-      return v == null ? "" : String(v);
+      return withRuleBudget(() => {
+        const java2 = scope ? makeJava(scope, ctx) : void 0;
+        const v = new Function(
+          "key",
+          "page",
+          "baseUrl",
+          "result",
+          "java",
+          "source",
+          "book",
+          `return (${e});`
+        )(ctx.key ?? "", ctx.page ?? 1, ctx.baseUrl ?? "", augmentInput(ctx.result ?? ""), java2, ctx.source ?? null, ctx.book ?? null);
+        return v == null ? "" : String(v);
+      });
     } catch {
       return "";
     }

@@ -40,7 +40,28 @@ export interface FenceRenderContext {
  *  消息流，不共享 React 实例。 */
 export type FenceRenderer = (code: string, ctx: FenceRenderContext) => HTMLElement | null | Promise<HTMLElement | null>;
 
-export interface PluginViewModule {
+export interface PluginFile {
+	path: string;
+	name: string;
+}
+
+export interface PluginFileHandlerContext extends PluginViewContext {
+	file: PluginFile;
+	/** 同源插件 API 基址（已包含应用子路径前缀）。 */
+	apiUrl: (path: string, params?: Record<string, string | number | boolean | undefined>) => string;
+}
+
+export interface PluginFileHandler {
+	/** 数组形态声明时用于和 manifest handler id 对应。对象形态可省略。 */
+	id?: string;
+	mount(container: HTMLElement, file: PluginFile, ctx: PluginFileHandlerContext): void | (() => void);
+}
+
+export interface PluginFileHandlerModule {
+	fileHandlers?: PluginFileHandler[] | Record<string, PluginFileHandler>;
+}
+
+export interface PluginViewModule extends PluginFileHandlerModule {
 	mount(container: HTMLElement, ctx: PluginViewContext): void | (() => void);
 	/** 可选：fenced-code 渲染器（manifest "renderers" 声明的语言）。 */
 	renderers?: Record<string, FenceRenderer>;
@@ -181,6 +202,19 @@ export function createScopedImporter(importFn: (url: string) => Promise<unknown>
 
 /** 本模块实际使用的导入器（动态 import；Vite 不要试图打包运行时 URL）。 */
 const importPluginBundle = createScopedImporter((url) => import(/* @vite-ignore */ url));
+
+export async function loadPluginBundleModule(p: UiPluginInfo, epoch: number): Promise<PluginFileHandlerModule | null> {
+	if (!p.hasClient || p.error) return null;
+	try {
+		const mod = (await importPluginBundle(p.id, pluginEntryUrl(p.id, epoch))) as {
+			default?: PluginFileHandlerModule;
+		};
+		return mod.default ?? null;
+	} catch (err) {
+		console.error(`[plugin:${p.id}] 客户端 bundle 加载失败:`, err);
+		return null;
+	}
+}
 
 async function loadOne(p: UiPluginInfo, epoch: number): Promise<boolean> {
 	try {

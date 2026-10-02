@@ -24,6 +24,9 @@ import { freePort } from "./lib/port-utils.mjs";
 
 import { buildFixPrompt, isAiFixMessage, normalizeFixContext } from "../plugins/legado-web/client/ai-fix.mjs";
 
+// 测试内假书源站监听 127.0.0.1，SSRF 防护对回环地址放行
+process.env.LEGADO_ALLOW_PRIVATE_HOSTS = process.env.LEGADO_ALLOW_PRIVATE_HOSTS ?? "127.0.0.1,localhost";
+
 const PORT = 8995;
 const BASE = `http://127.0.0.1:${PORT}`;
 const pluginDir = join(import.meta.dirname, "..", "plugins", "legado-web");

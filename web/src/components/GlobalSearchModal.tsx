@@ -317,7 +317,9 @@ export function GlobalSearchModal({
 				onClose();
 			} else if (e.key === "ArrowDown") {
 				e.preventDefault();
-				setActive((a) => Math.min(a + 1, navItems.length - 1));
+				// 审查 #14：空结果时长度为 0，min(a+1, -1) 会把 active 推成 -1 ——
+				// 下限钳到 0，保证 active 始终指向合法条目（空列表则停在 0）。
+				setActive((a) => Math.max(0, Math.min(a + 1, navItems.length - 1)));
 			} else if (e.key === "ArrowUp") {
 				e.preventDefault();
 				setActive((a) => Math.max(a - 1, 0));

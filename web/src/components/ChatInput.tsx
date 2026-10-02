@@ -1,17 +1,31 @@
 import { toUiZoomPixels } from "../ui-zoom";
 import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { FiList, FiSquare, FiPaperclip, FiArrowUp, FiGrid, FiMic, FiCamera } from "react-icons/fi";
+import { FiList, FiSquare, FiPaperclip, FiArrowUp, FiBookOpen, FiMic, FiCamera } from "react-icons/fi";
 import type { FileSearchResult, ModelInfo, ProviderKeyInfo, SlashCommandInfo, UiMessage, UiState } from "../types";
 import { useT, useI18n } from "../i18n";
 import { appSend, useAppField, useIsDsh } from "../app-globals";
-import { mergeRecalledDraft, selectDraftToRestore } from "../composer-draft";
-import { registerDraftSink, registerFocusSink } from "../composer-bridge";
+import { mergeRecalledDraft, selectDraftToRestore, shouldCarryOverDraft } from "../composer-draft";
+import {
+	registerDraftSink,
+	registerFocusSink,
+	registerInsertSink,
+	registerRemoveMentionSink,
+} from "../composer-bridge";
 import { caretVisualLineFlags } from "../caret-visual-line";
 import { isRasterImage } from "../image-paste";
+import { collectClipboardFiles } from "../clipboard-files";
 import { recordModelUsage } from "../model-usage";
 import { loadPromptHistory, pushPromptHistory } from "../prompt-history";
 import { filterSlashCommands } from "../slash-filter";
-import { mapFileHits, mapPageHits, matchAtToken, normalizeAtHits, type AtHit } from "../at-mention";
+import {
+	mapFileHits,
+	mapPageHits,
+	mapSkillHits,
+	matchAtToken,
+	mergeAtHits,
+	normalizeAtHits,
+	type AtHit,
+} from "../at-mention";
 import { getLastBrowserControlPages, pokeBrowserControl } from "../browser-control";
 import { getPluginComposerProvider, listPluginComposerProviders } from "../plugin-host";
 import { detectTouchFirstDevice } from "../touch-device";
@@ -67,8 +81,10 @@ interface ChatInputProps {
 		name: string;
 		/** "page" = 已授权给 AI 的网页（page-picker）：path 是 origin、name 是标题。
 		 *  "conversation" = 引用的另一个对话：path 不用，引用走 conversationId
-		 *  （运行中，含子代理）或 sessionPath（历史转录）。 */
-		mode: "inline" | "reference" | "lines" | "page" | "conversation";
+		 *  （运行中，含子代理）或 sessionPath（历史转录）。
+		 *  "inline" = 旧版「全文注入」的遗留值（服务端按 reference 处理）。
+		 *  粘贴图片/上传文件没有 mode（path 为空）。 */
+		mode?: "inline" | "reference" | "lines" | "page" | "conversation";
 		/** mode "conversation" + 引用运行中对话的 id（如 "c3"）。 */
 		conversationId?: string;
 		/** mode "conversation" + 引用历史会话的转录文件 path。 */
@@ -89,13 +105,15 @@ interface ChatInputProps {
 	onAddImageFiles: (files: File[]) => void;
 	/** Any dropped/uploaded file (images go through onAddImageFiles instead). */
 	onAddLocalFiles: (files: File[]) => void;
-	/** `@` 提及命中带的路径附件（App.attach 包装，无则只插文本）。 */
+	/** `@` 提及命中带的路径附件（App.attach 包装，无则只插文本）。
+	 *  silent = 本组件 acceptAt 已亲自插好提及文本，attach 不要再插一遍。 */
 	onAddPathAttachment?: (a: {
 		path: string;
 		name: string;
 		mode?: "inline" | "reference" | "lines" | "page";
 		isDir?: boolean;
 		lines?: { start: number; end: number };
+		silent?: boolean;
 	}) => void;
 	/** 服务端文件名搜索结果（App 透传 chat.fileSearch；`@` 内置文件提供方消费）。 */
 	fileSearch?: { reqId: number; ok: boolean; results: FileSearchResult[] } | null;
@@ -128,6 +146,8 @@ interface ChatInputProps {
 	dshBlank?: boolean;
 	/** 会话 id（dsh 下拉切换会话时重置选中值）。 */
 	conversationId?: string;
+	/** 当前会话是否处于只读规划模式。 */
+	planMode?: boolean;
 	/** 服务端存过的未发送草稿（全量快照携带，issue #166 单中心文件方案；
 	 *  DSH 引擎不填，传了也忽略）。 */
 	sessionDraft?: { text: string; ts: number } | null;
@@ -137,6 +157,7 @@ interface ChatInputProps {
 
 export const ChatInput = memo(function ChatInput({
 	streaming,
+	planMode,
 	messages,
 	slashCommands,
 	modelState,
@@ -277,6 +298,86 @@ export const ChatInput = memo(function ChatInput({
 		return () => registerFocusSink(null);
 	}, []);
 
+	// 宿主触发在光标处插入文本（文件树/预览点击「引用路径」联动插入 @文件名）
+	// 审查 #15：正文走 textRef（effect 每键重注册会让宿主桥反复解绑/挂载，
+	// 且错过注册窗口的插入会丢）。textRef 在每次渲染同步最新正文，effect 依赖 []。
+	const textRef = useRef("");
+	textRef.current = text;
+	useEffect(() => {
+		registerInsertSink((textToInsert) => {
+			// 第二道防线：正文里已有同一 @提及（重复点同一文件等）→ 跳过不重复插。
+			// 同 tick 的双通道（@ 选单 acceptAt + attach）由 silent 分工，这里管跨 tick。
+			{
+				const core = textToInsert.trim();
+				const specials = new Set([".", "*", "+", "?", "^", "$", "{", "}", "(", ")", "|", "[", "]", "\\"]);
+				const esc = core
+					.split("")
+					.map((ch) => (specials.has(ch) ? "\\" + ch : ch))
+					.join("");
+				const re = new RegExp("(^|[\\s(（\"'“‘[【])" + esc + "(?=[\\s,.;:!?，。！？)\\]】」]|$)");
+				if (core && re.test(textRef.current)) return;
+			}
+			const ta = taRef.current;
+			if (!ta) {
+				setText((prev) => {
+					const next = prev + (prev && !prev.endsWith(" ") ? " " : "") + textToInsert;
+					menuTextRef.current = next;
+					return next;
+				});
+				return;
+			}
+			const start = ta.selectionStart ?? textRef.current.length;
+			const end = ta.selectionEnd ?? textRef.current.length;
+			const current = textRef.current;
+			const needsPrefixSpace = start > 0 && !/[\s([{]$/.test(current.slice(0, start));
+			const prefix = needsPrefixSpace ? " " : "";
+			const insert = prefix + textToInsert;
+			const next = current.slice(0, start) + insert + current.slice(end);
+			menuTextRef.current = next;
+			setText(next);
+			const newCursor = start + insert.length;
+			requestAnimationFrame(() => {
+				ta.focus();
+				ta.selectionStart = ta.selectionEnd = newCursor;
+			});
+		});
+		return () => registerInsertSink(null);
+	}, []);
+
+	// 宿主触发移除特定提及（用户点击附件 chip 的 ✕ 时联动从正文中删除对应的 @文件名）
+	useEffect(() => {
+		registerRemoveMentionSink((mention) => {
+			setText((prev) => {
+				const special = new Set([
+					".",
+					"*",
+					"+",
+					"?",
+					"^",
+					"$",
+					"{",
+					"}",
+					"(",
+					")",
+					"|",
+					"[",
+					"]",
+					String.fromCharCode(92),
+				]);
+				const escaped = mention
+					.split("")
+					.map((ch) => (special.has(ch) ? String.fromCharCode(92) + ch : ch))
+					.join("");
+				const regex = new RegExp("(^|\\s)" + escaped + "(?:\\s|$)", "g");
+				let next = prev.replace(regex, (m, p) => (p === " " ? " " : ""));
+				next = next.replace(/ {2,}/g, " ").trim();
+				menuTextRef.current = next;
+				return next;
+			});
+		});
+		return () => registerRemoveMentionSink(null);
+	}, []);
+
 	// 未发送草稿持久化（issue #166，单中心文件方案）：L1 localStorage（同步写，
 	// 保住刷新/崩溃/beforeunload 的最后一击——beforeunload 时 WS 发已不可靠，
 	// 但同步写过的 L1 还在）+ L2 服务端 <dataDir>/composer-drafts.json
@@ -295,6 +396,7 @@ export const ChatInput = memo(function ChatInput({
 	const appliedDraftTsRef = useRef(0);
 	const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const draftScopeRef = useRef<string | null>(null);
+	const pendingCarryOverRef = useRef<string | null>(null);
 	/** 最近一次 IME compositionend 的时间戳（issue #248：macOS 中文输入法下敲英文字母按 Enter 上屏时，
 	 *  浏览器会先派发 compositionend 再派发 keydown(Enter, isComposing=false)，需通过时间差拦截误发送）。 */
 	const compositionEndTimeRef = useRef(0);
@@ -373,7 +475,7 @@ export const ChatInput = memo(function ChatInput({
 	};
 
 	// 切会话（conversationId/sessionId 任一变）：旧会话 timer 里没发出去的先刷掉
-	//（cleanup 闭包里还是旧 sid/旧文本，key 不会写错），再清空输入框等恢复。
+	//（cleanup 闭包里还是旧 sid/旧文本，key 不会写错），并记下未发出的打字内容。
 	useEffect(() => {
 		const scope = draftSessionKey;
 		const sid = sessionId;
@@ -383,21 +485,49 @@ export const ChatInput = memo(function ChatInput({
 				clearTimeout(draftTimerRef.current);
 				draftTimerRef.current = null;
 			}
-			if (touchedRef.current && scope && sid && localKey && textMirrorRef.current.trim()) {
-				persistComposerDraft(sid, localKey, textMirrorRef.current, lastEditTsRef.current);
+			if (touchedRef.current && textMirrorRef.current.trim()) {
+				if (scope && sid && localKey) {
+					persistComposerDraft(sid, localKey, textMirrorRef.current, lastEditTsRef.current);
+				}
+				pendingCarryOverRef.current = textMirrorRef.current;
+			} else {
+				pendingCarryOverRef.current = null;
 			}
 		};
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [draftSessionKey]);
 
-	// 新会话就绪：重置追踪并清空（恢复 effect 在后面，同一 commit 内按声明顺序跑）。
+	// 新会话就绪：若切到全新空会话（messages 为空）且新会话无自身草稿，保留并承接用户未提交的正在输入内容。
 	useEffect(() => {
 		draftScopeRef.current = draftSessionKey;
-		touchedRef.current = false;
-		appliedDraftTsRef.current = 0;
-		textMirrorRef.current = "";
-		lastEditTsRef.current = 0;
-		setText("");
+		const carry = pendingCarryOverRef.current;
+		pendingCarryOverRef.current = null;
+
+		const existingLocal = draftLocalKey ? readLocalDraft(draftLocalKey) : null;
+		const hasExistingDraft = Boolean(
+			(sessionDraft && sessionDraft.text?.trim() && sessionDraft.ts > 0) ||
+			(existingLocal && existingLocal.text?.trim()),
+		);
+
+		if (
+			carry !== null &&
+			shouldCarryOverDraft(carry, messages.length, hasExistingDraft) &&
+			draftLocalKey &&
+			sessionId
+		) {
+			touchedRef.current = true;
+			appliedDraftTsRef.current = Date.now();
+			textMirrorRef.current = carry;
+			lastEditTsRef.current = appliedDraftTsRef.current;
+			setText(carry);
+			persistComposerDraft(sessionId, draftLocalKey, carry, lastEditTsRef.current);
+		} else {
+			touchedRef.current = false;
+			appliedDraftTsRef.current = 0;
+			textMirrorRef.current = "";
+			lastEditTsRef.current = 0;
+			setText("");
+		}
 		setMenu(null);
 		historyIndexRef.current = -1;
 	}, [draftSessionKey]);
@@ -500,14 +630,23 @@ export const ChatInput = memo(function ChatInput({
 		// 内置页面提供方（page-picker 已授权页）：读缓存同步出结果，后台节流刷新
 		// （扩展在线才会问，桌面壳/未装扩展时缓存恒空，零打扰）。
 		pokeBrowserControl();
+		const immediatePages = mapPageHits(t("browserControl"), getLastBrowserControlPages(), query);
 		jobs.push({
 			id: "host:pages",
 			label: t("browserControl"),
-			run: () => Promise.resolve(mapPageHits(t("browserControl"), getLastBrowserControlPages(), query)),
+			run: () => Promise.resolve(immediatePages),
 		});
 		if (jobs.length === 0) {
 			setMenu(null);
 			return;
+		}
+		const skillItems = mapSkillHits(t("slashSkill"), slashCommands, query, 15, slashDesc);
+		const eagerItems = mergeAtHits({ pages: immediatePages, skills: skillItems }, query, 30);
+		let eagerRendered = false;
+		if (eagerItems.length > 0) {
+			eagerRendered = true;
+			setMenu({ kind: "at", start, items: eagerItems });
+			setMenuIndex(0);
 		}
 		void Promise.allSettled(
 			jobs.map((j) =>
@@ -518,18 +657,25 @@ export const ChatInput = memo(function ChatInput({
 			),
 		).then((results) => {
 			if (atReqRef.current !== req || menuTextRef.current !== snapshot) return;
-			// 页面置顶：`@page` 一打全是页面在前，不用记标题，文件与插件结果跟在后面。
 			const pageItems: AtHit[] = [];
-			const restItems: AtHit[] = [];
+			const fileItems: AtHit[] = [];
+			const pluginItems: AtHit[] = [];
 			results.forEach((r, i) => {
-				if (r.status !== "fulfilled" || pageItems.length + restItems.length >= 30) return;
+				if (r.status !== "fulfilled") return;
 				if (jobs[i].id === "host:pages" && Array.isArray(r.value)) pageItems.push(...(r.value as AtHit[]));
-				else if (jobs[i].id === "host:files") restItems.push(...mapFileHits(jobs[i].label, r.value));
-				else restItems.push(...normalizeAtHits(jobs[i].id, jobs[i].label, r.value));
+				else if (jobs[i].id === "host:files") fileItems.push(...mapFileHits(jobs[i].label, r.value));
+				else pluginItems.push(...normalizeAtHits(jobs[i].id, jobs[i].label, r.value));
 			});
-			const items = [...pageItems, ...restItems].slice(0, 30);
+			const items = mergeAtHits(
+				{ pages: pageItems, skills: skillItems, files: fileItems, plugins: pluginItems },
+				query,
+				30,
+			);
 			setMenu(items.length > 0 ? { kind: "at", start, items } : null);
-			setMenuIndex(0);
+			// 仅在初次渲染浮层时重置高亮；若已展示过 eager 结果，保留用户已有键盘/鼠标选项目
+			if (!eagerRendered && items.length > 0) {
+				setMenuIndex(0);
+			}
 		});
 	};
 
@@ -591,6 +737,7 @@ export const ChatInput = memo(function ChatInput({
 		const next = `/${pick.name} ${rest}`;
 		menuTextRef.current = next;
 		setText(next);
+		noteComposerEdit(next);
 		setMenu(null);
 		taRef.current?.focus();
 	};
@@ -607,12 +754,17 @@ export const ChatInput = memo(function ChatInput({
 		}
 		const ta = taRef.current;
 		const cursor = ta ? (ta.selectionStart ?? text.length) : text.length;
-		const insert = `${pick.text ?? pick.title} `;
+		const atts = pick.attachments ?? [];
+		const rawText = pick.text ?? pick.title;
+		// 附件型命中（文件/目录/页签…）统一插 `@提及` 形式：正文里的 `@x` 与附件 chip
+		// 双向联动（点 ✕ 双向删、退格整块删）；纯文本命中保持原样。
+		const insert = atts.length > 0 && !rawText.startsWith("@") ? `@${rawText} ` : `${rawText} `;
 		const next = `${text.slice(0, at)}${insert}${text.slice(cursor)}`;
 		menuTextRef.current = next;
 		setText(next);
+		noteComposerEdit(next);
 		setMenu(null);
-		for (const a of pick.attachments ?? []) {
+		for (const a of atts) {
 			try {
 				onAddPathAttachment?.({
 					path: a.path,
@@ -620,6 +772,7 @@ export const ChatInput = memo(function ChatInput({
 					...(a.mode ? { mode: a.mode } : { mode: "reference" as const }),
 					...(typeof a.isDir === "boolean" ? { isDir: a.isDir } : {}),
 					...(a.lines ? { lines: a.lines } : {}),
+					silent: true,
 				});
 			} catch {
 				/* 单条附件失败不挡文本插入 */
@@ -665,7 +818,7 @@ export const ChatInput = memo(function ChatInput({
 				title={h.hint ?? h.title}
 			>
 				<span className="slash-name">@{h.title}</span>
-				<span className="slash-source plugin">{h.providerLabel}</span>
+				<span className={`slash-source ${h.providerId === "host:skills" ? "skill" : "plugin"}`}>{h.providerLabel}</span>
 				{h.hint && <span className="slash-desc">{h.hint}</span>}
 			</button>
 		));
@@ -718,24 +871,13 @@ export const ChatInput = memo(function ChatInput({
 	};
 
 	const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-		const items = e.clipboardData?.items;
-		if (!items) return;
-		const images: File[] = [];
-		for (const item of items) {
-			if (item.kind === "file" && isRasterImage(item.type)) {
-				const f = item.getAsFile();
-				if (f) images.push(f);
-			}
-		}
-		if (images.length === 0) return; // plain text paste — leave the default
+		// 粘贴板里带真文件（文件管理器复制 / 截图 / 混合内容）→ 当附件附加；
+		// 与拖拽同走 handleFiles：图片走视觉管线（含 noVision 拦截），其余走
+		// fileData 上传。拿不到文件就是纯文本粘贴，不 preventDefault。
+		const files = collectClipboardFiles(e.clipboardData?.items, e.clipboardData?.files);
+		if (files.length === 0) return; // plain text paste — leave the default
 		e.preventDefault();
-		// P1-7：当前模型明确不支持图片时拒绝粘贴并提示。
-		const noVision = currentModelNoVision();
-		if (noVision) {
-			onNotice("warning", noVision);
-			return;
-		}
-		onAddImageFiles(images);
+		handleFiles(files);
 	};
 
 	/** 当前模型在模型清单中标记为 text-only（vision === false）→ 返回提示文案。
@@ -863,8 +1005,8 @@ export const ChatInput = memo(function ChatInput({
 
 	const submit = (queue = false) => {
 		const trimmed = text.trim();
-		const hasRawAttach = attachments.some((a) => a.imageData || a.fileData || a.mode === "conversation");
-		if (!trimmed && !hasRawAttach) return;
+		const hasAttach = attachments.length > 0;
+		if (!trimmed && !hasAttach) return;
 		if (!connected) {
 			// 输入框在断连时不禁用（只有发送按钮禁用），Enter 仍进 submit：
 			// 别静默吞掉，文本保留并给出可见提示供重连后重发。
@@ -998,6 +1140,55 @@ export const ChatInput = memo(function ChatInput({
 					e.preventDefault();
 					setMenu(null);
 					return;
+			}
+		}
+
+		// 退格键原子化整块删除 @提及 并联动摘掉对应附件 chip（文件/目录/页签同一套）。
+		// 两段式：① chip 精确匹配 —— 覆盖带空格标题、中文文件名等词元正则表达不了的名字；
+		// ② 通用有边界 @词元 —— 覆盖用户手打的 @引用（邮箱前有词字符，不会命中）。
+		if (e.key === "Backspace" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+			const ta = taRef.current;
+			if (ta && ta.selectionStart === ta.selectionEnd && ta.selectionStart > 0) {
+				const pos = ta.selectionStart;
+				const before = text.slice(0, pos);
+				const chipHit = attachments.find(
+					(a) => a.name && (before.endsWith("@" + a.name + " ") || before.endsWith("@" + a.name)),
+				);
+				let tokenStart = -1;
+				if (chipHit && chipHit.name) {
+					const tok = "@" + chipHit.name;
+					const withSpace = before.endsWith(tok + " ");
+					const cand = pos - (withSpace ? tok.length + 1 : tok.length);
+					// token 紧贴词类字符（如 path 中段 /@file）→ 不整块删，落回普通退格
+					if (cand > 0 && /[\w.\-/]/.test(before[cand - 1])) tokenStart = -1;
+					else tokenStart = cand;
+				}
+				if (tokenStart < 0) {
+					const gm = /(^|[\s(（"'"“‘[【])(@[^\s@,.;:!?，。！？)\]】」]+)(\s?)$/.exec(before);
+					if (gm) tokenStart = pos - gm[2].length - gm[3].length;
+				}
+				if (tokenStart >= 0 && tokenStart < pos) {
+					e.preventDefault();
+					const nextText = text.slice(0, tokenStart) + text.slice(pos);
+					menuTextRef.current = nextText;
+					setText(nextText);
+					requestAnimationFrame(() => {
+						if (taRef.current) {
+							taRef.current.selectionStart = taRef.current.selectionEnd = tokenStart;
+						}
+					});
+					const rawToken = text.slice(tokenStart, pos).trim().replace(/^@/, "");
+					const baseName = rawToken.split("/").pop() ?? rawToken;
+					const hit =
+						chipHit ?? attachments.find((a) => a.name === rawToken || a.name === baseName || a.path === rawToken);
+					if (hit) {
+						onRemoveAttachment(
+							hit.key ??
+								(hit.mode === "conversation" ? `conv|${hit.conversationId ?? ""}|${hit.sessionPath ?? ""}` : hit.path),
+						);
+					}
+					return;
+				}
 			}
 		}
 		// Global prompt history cycling (issue #68): Up = older, Down = newer.
@@ -1221,7 +1412,7 @@ export const ChatInput = memo(function ChatInput({
 		),
 		"host:composer-templates": (
 			<button type="button" className="btn tpl-open" title={t("tpl.openPicker")} onClick={openPicker}>
-				<FiGrid />
+				<FiBookOpen />
 			</button>
 		),
 		"host:composer-model": (
@@ -1512,7 +1703,9 @@ export const ChatInput = memo(function ChatInput({
 								? isDsh
 									? t("placeholderStreamingQueued")
 									: t("placeholderStreaming")
-								: t("placeholderIdle")
+								: planMode
+									? t("placeholderPlanMode")
+									: t("placeholderIdle")
 							: t("placeholderConnecting")
 					}
 					disabled={!connected}
@@ -1526,6 +1719,28 @@ export const ChatInput = memo(function ChatInput({
 					onKeyDown={onKeyDown}
 					onPaste={onPaste}
 				/>
+				{planMode && (
+					<div
+						style={{
+							display: "inline-flex",
+							alignItems: "center",
+							gap: 4,
+							fontSize: 11,
+							color: "var(--accent, #38bdf8)",
+							background: "var(--accent-soft, rgba(56, 189, 248, 0.1))",
+							padding: "2px 8px",
+							borderRadius: 12,
+							position: "absolute",
+							right: 12,
+							top: 8,
+							pointerEvents: "none",
+							zIndex: 2,
+						}}
+						title={t("planModeTip")}
+					>
+						📋 {t("planModeBadge")}
+					</div>
+				)}
 				{/* 底部工具条（ChatGPT 风格）：附件 / 模型 / 思考强度 在左，
 				    发送 / 停止 在右，全部收进输入框容器内。 */}
 				<div className="composer-tools">
@@ -1556,7 +1771,7 @@ export const ChatInput = memo(function ChatInput({
 								{/* 插件输入框动作（start 组）：紧跟文件上传右侧，与上传同一组线条图标风格。 */}
 								{pluginActions.start.map(renderPluginAction)}
 								<button type="button" className="btn tpl-open" title={t("tpl.openPicker")} onClick={openPicker}>
-									<FiGrid />
+									<FiBookOpen />
 								</button>
 								<ModelThinking
 									state={modelState}

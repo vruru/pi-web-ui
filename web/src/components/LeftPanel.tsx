@@ -25,6 +25,7 @@ import { ProjectPicker } from "./ProjectPicker.js";
 import { LP_SECTION_ENTRY_IDS, type UiSlotEntry } from "../ui-slots";
 import { contextMenuItems, openContextMenu, type ContextMenuRequest } from "../context-menu-state";
 import { composeToComposer, focusComposer } from "../composer-bridge";
+import { clearCachedProject, clearCachedSession, clearLastCwdIfMatches } from "../use-chat";
 
 /** Props are deliberately NARROW (no whole-ChatState object): every field is
  *  stable while tokens stream in, so the shallow-compared memo() below skips
@@ -54,6 +55,7 @@ interface LeftPanelProps {
 			| { type: "dismiss_conversation"; id: string; withFinishedSubagents?: boolean; force?: boolean }
 			| { type: "dismiss_finished_subagents"; parentId?: string }
 			| { type: "persist_conversation"; id: string }
+			| { type: "pin_conversation"; id: string; pinned: boolean }
 			| { type: "take_over_conversation"; owner: string; id: string }
 			| { type: "peek_elsewhere_question"; owner: string; id: string }
 			| { type: "make_dir"; path: string; setAsCwd?: boolean },
@@ -102,6 +104,7 @@ type SessionMenuTarget = {
 	owner?: string;
 	/** A retained remote row has no inline rename editor until it is opened. */
 	allowRename?: boolean;
+	pseudo?: boolean;
 };
 
 /** 右键落点是不是「输入类」元素：重命名输入框里的右键要留给浏览器（复制 / 粘贴 /
@@ -315,9 +318,12 @@ export const LeftPanel = memo(function LeftPanel({
 					return target.allowRename !== false && (target.kind === "running" || target.kind === "history")
 						? entry
 						: { ...entry, hidden: true };
-				// 过户：只在「另一处」行出现（无 owner/convId 的旧条目同样隐藏）。
+				// 过户：只在「另一处」行出现（无 owner/convId 的旧条目与插件伪客户端条目同样隐藏；
+				// 定时任务对话可交互接管）。
 				if (entry.id === "host:conv-takeover")
-					return isElsewhere && takeId && target.owner ? entry : { ...entry, hidden: true };
+					return isElsewhere && takeId && target.owner && !target.owner.startsWith("plugin:")
+						? entry
+						: { ...entry, hidden: true };
 				// 关闭类是本会话口径，「另一处」行不适用。
 				if (isElsewhere && (entry.id === "host:conv-dismiss-subagents" || entry.id === "host:conv-force-dismiss"))
 					return { ...entry, hidden: true };
@@ -327,12 +333,22 @@ export const LeftPanel = memo(function LeftPanel({
 					return scopeId
 						? { ...entry, ...(armed ? { label: t("forceDismissConfirm") } : {}) }
 						: { ...entry, hidden: true };
-				// 固化子代理为普通对话：只在运行中的内存子代理（未落盘或 isSubagent）行显示
+				// 钉住 / 取消钉住：只在运行中的主对话行出现（子代理本来就永久保留，钉住无意义；
+				// 历史行与「另一处」行不适用 —— 历史是落盘文件，钉只作用于在运行的对话）。
+				if (entry.id === "host:conv-pin") {
+					if (!scopeId) return { ...entry, hidden: true };
+					const pinTarget = conversations.find((c) => c.id === scopeId);
+					if (!pinTarget || pinTarget.isSubagent) return { ...entry, hidden: true };
+					return pinTarget.pinned ? { ...entry, label: t("unpinConversation") } : entry;
+				}
+				// 固化子代理/临时对话为普通对话：只在内存会话（未落盘、isSubagent 或临时）行显示
 				if (entry.id === "host:conv-persist") {
 					if (!scopeId) return { ...entry, hidden: true };
 					const targetConv = conversations.find((c) => c.id === scopeId);
 					const canPersist = Boolean(targetConv && (targetConv.isSubagent || !targetConv.sessionFile));
-					return canPersist ? entry : { ...entry, hidden: true };
+					if (!canPersist) return { ...entry, hidden: true };
+					// 临时对话用「保存为正式对话」而非「固化子代理」措辞（用户视角不是子代理）。
+					return targetConv?.isEphemeral ? { ...entry, label: t("saveEphemeral") } : entry;
 				}
 				// 对话引用三件套：复制 id 运行中对话行与「另一处」行都有（后者是对方会话内的
 				// convId）；复制路径历史行恒有、运行中仅落盘的有（inMemory 子代理没有文件，
@@ -397,6 +413,14 @@ export const LeftPanel = memo(function LeftPanel({
 			}
 			if (entry.id === "host:conv-persist") {
 				if (scopeId) panelSend({ type: "persist_conversation", id: scopeId });
+				return;
+			}
+			// 钉住 / 取消钉住：按当前状态翻转（菜面文案已按状态给过用户正确预期）。
+			if (entry.id === "host:conv-pin") {
+				if (scopeId) {
+					const cur = conversations.find((c) => c.id === scopeId);
+					panelSend({ type: "pin_conversation", id: scopeId, pinned: !cur?.pinned });
+				}
 				return;
 			}
 			// 对话引用三件套（复制 id / 复制会话文件路径 / 引用到输入框）。
@@ -549,6 +573,7 @@ export const LeftPanel = memo(function LeftPanel({
 		convId?: string;
 		hasQuestion?: boolean;
 		openSessionPath?: string;
+		pseudo?: boolean;
 	};
 	const panelRef = useRef<HTMLElement>(null);
 	const [weights, setWeights] = useState<LpWeights>(() => loadLpWeights());
@@ -570,6 +595,7 @@ export const LeftPanel = memo(function LeftPanel({
 			isSubagent: false as const,
 			elsewhere: true as const,
 			...(w.requiresTakeover === false && w.sessionFile ? { openSessionPath: w.sessionFile } : {}),
+			pseudo: Boolean(w.pseudo),
 			// 过户目标定位（无则沿用旧行为：只读行，无过户入口）。
 			...(w.owner && w.convId ? { owner: w.owner, convId: w.convId } : {}),
 			...(w.hasQuestion ? { hasQuestion: true as const } : {}),
@@ -743,9 +769,11 @@ export const LeftPanel = memo(function LeftPanel({
 										</span>
 										<span className="project-time">{formatModified(p.lastUsed)}</span>
 									</button>
-									{delButton(`proj:${p.path}`, t("deleteProject"), t("deleteProjectConfirm"), () =>
-										panelSend({ type: "remove_project", path: p.path }),
-									)}
+									{delButton(`proj:${p.path}`, t("deleteProject"), t("deleteProjectConfirm"), () => {
+										clearLastCwdIfMatches(p.path);
+										clearCachedProject(p.path);
+										panelSend({ type: "remove_project", path: p.path });
+									})}
 								</div>
 							);
 						})}
@@ -838,6 +866,14 @@ export const LeftPanel = memo(function LeftPanel({
 															</button>
 														</div>
 													);
+												const elseOwner = (c as RowConv).owner;
+												const elseConvId = (c as RowConv).convId;
+												const isPseudo = Boolean((c as RowConv).pseudo);
+												// Plugin sessions cannot be taken over; scheduled conversations can.
+												const tooltip =
+													isPseudo && elseOwner?.startsWith("plugin:")
+														? `${t("elsewherePseudoTip")}\n${c.cwd}`
+														: `${t("elsewhereTip")}\n${c.cwd}`;
 												return (
 													<div
 														className="lp-row"
@@ -845,16 +881,17 @@ export const LeftPanel = memo(function LeftPanel({
 														// 「另一处」行右键：过户到本页（含等答复的问卷）。
 														onContextMenu={(e) =>
 															openSessionMenu(e, {
-																id: (c as RowConv).convId ?? c.id,
+																id: elseConvId ?? c.id,
 																kind: "elsewhere",
 																label: c.title,
-																...((c as RowConv).owner ? { owner: (c as RowConv).owner } : {}),
+																...(elseOwner ? { owner: elseOwner } : {}),
+																...(isPseudo ? { pseudo: true } : {}),
 															})
 														}
 													>
 														<div
 															className="session-item elsewhere-item"
-															title={`${t("elsewhereTip")}\n${c.cwd}`}
+															title={tooltip}
 															role={sessionMenuAvailable ? "button" : undefined}
 															tabIndex={sessionMenuAvailable ? 0 : undefined}
 															aria-haspopup={sessionMenuAvailable ? "menu" : undefined}
@@ -864,10 +901,11 @@ export const LeftPanel = memo(function LeftPanel({
 																forceArmedRef.current = null;
 																const r = e.currentTarget.getBoundingClientRect();
 																showSessionMenu(r.left, r.bottom + 4, {
-																	id: (c as RowConv).convId ?? c.id,
+																	id: elseConvId ?? c.id,
 																	kind: "elsewhere",
 																	label: c.title,
-																	...((c as RowConv).owner ? { owner: (c as RowConv).owner } : {}),
+																	...(elseOwner ? { owner: elseOwner } : {}),
+																	...(isPseudo ? { pseudo: true } : {}),
 																});
 															}}
 															onKeyDown={(e) => {
@@ -880,8 +918,10 @@ export const LeftPanel = memo(function LeftPanel({
 															<FiMessageSquare className="session-icon" />
 															<span className="session-info">
 																<span className="session-title">
-																	<span className="elsewhere-badge">{t("elsewhereBadge")}</span>
-																	{(c as RowConv).hasQuestion && (c as RowConv).owner && (c as RowConv).convId && (
+																	<span className="elsewhere-badge">
+																		{isPseudo ? t("elsewherePseudoBadge") : t("elsewhereBadge")}
+																	</span>
+																	{c.hasQuestion && elseOwner && elseConvId && !isPseudo && (
 																		<span
 																			className="question-badge clickable"
 																			title={t("takeoverHasQuestion")}
@@ -890,8 +930,8 @@ export const LeftPanel = memo(function LeftPanel({
 																				// 点 `?` 直接把问卷拉到本页作答（不搬迁对话）。
 																				panelSend({
 																					type: "peek_elsewhere_question",
-																					owner: (c as RowConv).owner as string,
-																					id: (c as RowConv).convId as string,
+																					owner: elseOwner,
+																					id: elseConvId,
 																				});
 																			}}
 																		>
@@ -917,10 +957,11 @@ export const LeftPanel = memo(function LeftPanel({
 																	// 坐标按按钮矩形锚定（触屏 click 的 clientX/Y 不可靠），clampMenuPosition 会自行钳进视口。
 																	const r = e.currentTarget.getBoundingClientRect();
 																	showSessionMenu(r.left, r.bottom + 4, {
-																		id: (c as RowConv).convId ?? c.id,
+																		id: elseConvId ?? c.id,
 																		kind: "elsewhere",
 																		label: c.title,
-																		...((c as RowConv).owner ? { owner: (c as RowConv).owner } : {}),
+																		...(elseOwner ? { owner: elseOwner } : {}),
+																		...(isPseudo ? { pseudo: true } : {}),
 																	});
 																}}
 															>
@@ -972,6 +1013,15 @@ export const LeftPanel = memo(function LeftPanel({
 															) : (
 																<span className="session-title">
 																	{c.isSubagent && <span className="subagent-badge">{t("subagentBadge")}</span>}
+																	{c.isEphemeral && <span className="ephemeral-badge">{t("ephemeralBadge")}</span>}
+																	{c.forkFrom && (
+																		<span
+																			className="preset-badge fork-badge"
+																			title={`${t("forkBadgeTip")}: ${c.forkFrom.title ?? c.forkFrom.conversationId}`}
+																		>
+																			🌿 {t("forkBadge")}
+																		</span>
+																	)}
 																	{c.agentPreset && (
 																		<span className="preset-badge" title={c.agentPreset}>
 																			{presetNames?.[c.agentPreset] ?? c.agentPreset}
@@ -987,6 +1037,11 @@ export const LeftPanel = memo(function LeftPanel({
 																	{c.hasQuestion && (
 																		<span className="question-badge" title={t("waitingQuestionBadge")}>
 																			?
+																		</span>
+																	)}
+																	{c.pinned && (
+																		<span className="pin-badge" title={t("pinnedConversation")}>
+																			📌
 																		</span>
 																	)}
 																</span>
@@ -1236,9 +1291,10 @@ export const LeftPanel = memo(function LeftPanel({
 									>
 										<FiEdit2 />
 									</button>
-									{delButton(`sess:${s.path}`, t("deleteSession"), t("deleteSessionConfirm"), () =>
-										panelSend({ type: "delete_session", path: s.path }),
-									)}
+									{delButton(`sess:${s.path}`, t("deleteSession"), t("deleteSessionConfirm"), () => {
+										clearCachedSession(s.path, currentCwd);
+										panelSend({ type: "delete_session", path: s.path });
+									})}
 									{renderLeftSessions()}
 								</div>
 							);

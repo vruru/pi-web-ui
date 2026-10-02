@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const REPO_ROOT = fileURLToPath(new globalThis.URL("../", import.meta.url));
-const PORT = 8967;
+const PORT = Number(process.argv[2] || 8967);
 const URL = `ws://localhost:${PORT}/ws`;
 
 let failures = 0;
@@ -179,8 +179,20 @@ async function run() {
 	check("越界文件未被删除", existsSync(join(workDir, "a.txt")));
 
 	// 4) remove_project：最近项目列表移除 otherDir
+	// 最近项目只收用户显式打开过的工作区：otherDir 此刻只有一条历史会话，不该出现在列表里；
+	// 显式打开一次（set_cwd）再切回，它才成为最近项目条目。
 	c.send({ type: "list_projects" });
-	const p1 = await c.next((m) => m.type === "projects", "projects #1");
+	const p0 = await c.next((m) => m.type === "projects", "projects #0");
+	const projPaths0 = (p0.projects ?? []).map((x) => x.path);
+	check("仅有历史会话的目录不进最近项目", !projPaths0.includes(otherDir), projPaths0.join(","));
+	c.send({ type: "set_cwd", path: otherDir });
+	await c.next((m) => m.type === "notice" && String(m.text ?? "").includes(otherDir), "已切换到 otherDir");
+	c.send({ type: "set_cwd", path: workDir });
+	await c.next((m) => m.type === "notice" && String(m.text ?? "").includes(workDir), "已切回 workDir");
+	c.send({ type: "list_projects" });
+	const p1 = await c
+		.next((m) => m.type === "projects" && (m.projects ?? []).some((x) => x.path === otherDir), "projects #1")
+		.catch(() => ({ projects: [] }));
 	const projPaths1 = (p1.projects ?? []).map((x) => x.path);
 	check("初始最近项目含 otherDir", projPaths1.includes(otherDir), projPaths1.join(","));
 

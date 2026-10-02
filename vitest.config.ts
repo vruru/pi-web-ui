@@ -8,5 +8,7 @@ export default defineConfig({
 		include: ["tests/unit/**/*.test.ts"],
 		environment: "node",
 		setupFiles: ["tests/unit/setup-chrome-i18n.ts"],
+		silent: true,
+		onConsoleLog: () => false,
 	},
 });

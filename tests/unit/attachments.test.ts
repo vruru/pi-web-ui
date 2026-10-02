@@ -6,7 +6,8 @@
  *   2. 恢复的 uploadPath → 服务端从 uploads 目录重读字节、按同路径附加；
  *   3. uploadPath 越出本客户端 uploads 目录 → 拒绝 + notice；
  *   4. uploadPath 指向已清理/不存在文件 → notice + 跳过；
- *   5. 工作区路径附件（reference/inline/lines）原样重附加。
+ *   5. 工作区路径附件（reference / lines / 无 mode 的 auto / 旧版 inline）一律只给
+ *      路径引用（内容不进 prompt）。
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
@@ -64,8 +65,10 @@ function makeCtx(opts: {
 			terminalToolsEnabled: true,
 			terminalBash: false,
 			terminalBashIdleMs: 15000,
+			terminalBashMaxForegroundMs: 60_000,
 			toolWatchdogTimeoutMs: 1_200_000,
 			readDirEnabled: true,
+			toolApprovalEnabled: true,
 			editSoftEnabled: false,
 			visionBridgeEnabled: true,
 			visionBridgeModel: null,
@@ -73,6 +76,8 @@ function makeCtx(opts: {
 			visionBridgePrompt: "",
 			scmCommitMsgPromptMode: "append" as const,
 			scmCommitMsgPrompt: "",
+			planModePromptMode: "append" as const,
+			planModePrompt: "",
 			reviewPrompt: "",
 			reviewDisabledSkills: [],
 			thinkingWrap: true,
@@ -113,11 +118,11 @@ describe("buildAttachmentMessages — 编辑重问附件恢复", () => {
 			expect(out.length).toBe(1);
 			expect(out[0].message.customType).toBe("file");
 			expect(out[0].message.details.upload).toBe(true);
-			// 文本小文件 → inline，路径是 uploads 目录下的绝对路径
-			expect(out[0].message.details.mode).toBe("inline");
+			// 上传文件一律只给绝对路径引用（不再内联小文本）
+			expect(out[0].message.details.mode).toBe("reference");
 			const abs = out[0].message.details.path!;
 			expect(abs.startsWith(uploadsRoot(dataDir).replace(/\\/g, "/"))).toBe(true);
-			expect(out[0].message.content[0].text).toContain("hello world");
+			expect(out[0].message.content[0].text).toBe(`<file path="${abs}" size="15" />`);
 		} finally {
 			if (oldDataDir === undefined) delete process.env.PI_WEB_DATA_DIR;
 			else process.env.PI_WEB_DATA_DIR = oldDataDir;
@@ -201,7 +206,7 @@ describe("buildAttachmentMessages — 编辑重问附件恢复", () => {
 		}
 	});
 
-	it("工作区路径附件（reference / inline / lines）原样重附加", async () => {
+	it("工作区路径附件：一律只给路径引用（reference / 旧 inline / lines / auto）", async () => {
 		const cwd = tempDir();
 		const src = join(cwd, "src");
 		mkdirSync(src, { recursive: true });
@@ -216,18 +221,29 @@ describe("buildAttachmentMessages — 编辑重问附件恢复", () => {
 			{ path: "src/a.ts", mode: "reference" },
 			{ path: "src/a.ts", mode: "inline" },
 			{ path: "src/a.ts", mode: "lines", lines: { start: 1, end: 1 } },
+			{ path: "src/a.ts" },
 			{ path: "src/big.md", mode: "reference" },
 		])) as Aside[];
-		expect(out.length).toBe(4);
+		expect(out.length).toBe(5);
+		// 内容永不进 prompt（连 2 行的小文件也是）
+		for (const card of out) {
+			expect(card.message.content[0].text).not.toContain("export const a = 1");
+		}
 		expect(out[0].message.details.mode).toBe("reference");
 		expect(out[0].message.details.path).toBe("src/a.ts");
-		expect(out[1].message.details.mode).toBe("inline");
-		expect(out[1].message.content[0].text).toContain("export const a = 1");
+		expect(out[0].message.content[0].text).toContain('path="src/a.ts"');
+		// 旧版 inline 模式 → 当 reference 处理
+		expect(out[1].message.details.mode).toBe("reference");
+		expect(out[1].message.content[0].text).toContain('path="src/a.ts"');
+		// 行范围 → 引用上带 lines 属性（模型据此只读那几行）
 		expect(out[2].message.details.mode).toBe("lines");
 		expect(out[2].message.details.startLine).toBe(1);
 		expect(out[2].message.details.endLine).toBe(1);
+		expect(out[2].message.content[0].text).toContain('lines="1-1"');
+		// 无 mode（auto）同样只给引用
 		expect(out[3].message.details.mode).toBe("reference");
-		expect(out[3].message.details.path).toBe("src/big.md");
+		expect(out[4].message.details.mode).toBe("reference");
+		expect(out[4].message.details.path).toBe("src/big.md");
 	});
 
 	it("网页引用（mode:page）：不读文件，只给模型 browser_page 的 target（origin）+ 标题", async () => {

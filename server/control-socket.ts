@@ -22,6 +22,29 @@ import { join } from "node:path";
 import type { AgentService } from "./agent-service.js";
 import type { UiServiceInfo } from "./protocol.js";
 
+/** 探测既有 socket 的超时：活实例对 connect 的响应是内核级的，300ms 足够。 */
+const CONTROL_PROBE_TIMEOUT_MS = 300;
+
+/** 控制路径探测：连得上（有活实例在 listen）→ null；失败 → errno
+ *  （ECONNREFUSED/ENOENT = 崩溃残留，可安全删除）。超时按「可能是活实例」
+ *  保守处理，返回超时码 —— 宁可不删残留也别摘掉正在服务的 socket。 */
+function probeControlPath(path: string): Promise<string | null> {
+	return new Promise((resolve) => {
+		const sock = createConnection(path);
+		let settled = false;
+		const finish = (result: string | null): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			sock.destroy();
+			resolve(result);
+		};
+		const timer = setTimeout(() => finish("ETIMEDOUT"), CONTROL_PROBE_TIMEOUT_MS);
+		sock.once("connect", () => finish(null));
+		sock.once("error", (err: NodeJS.ErrnoException) => finish(err.code ?? "EUNKNOWN"));
+	});
+}
+
 /** 控制 socket 只需服务状态与 quiesce 控制（pi/dsh 引擎都满足）。 */
 type ControlService = Pick<AgentService, "serviceStatus" | "quiesce" | "unquiesce">;
 
@@ -61,20 +84,43 @@ export function startControlServer(opts: { service: ControlService; dataDir: str
 	const { service, dataDir, port } = opts;
 	const path = controlPath(dataDir, port);
 	let server: Server;
+	// 只有本实例真正 bind 成功才允许 stop 时删 socket 文件：探测发现活实例而
+	// listen 失败时，path 上是对方的 socket，删了会让后续客户端全部失联。
+	let bound = false;
 
 	if (process.platform === "win32") {
+		// Windows named pipe 不落盘（最后一个句柄关闭即消失），不存在崩溃残留
+		// 文件可清理；撞上活实例时 listen 直接 EADDRINUSE，走下方统一 error
+		// 处理。无需探测。
 		server = createServer(handleConnection);
+		server.listen(path, () => {
+			bound = true;
+			console.log(`  control    : ${path}`);
+		});
 	} else {
-		// Remove a stale socket left by a previous crash (only if it's ours —
-		// an existing socket file that refuses connections is stale).
-		if (existsSync(path)) {
-			try {
-				rmSync(path);
-			} catch {
-				/* best-effort */
-			}
-		}
 		server = createServer(handleConnection);
+		// POSIX socket 文件崩溃后会残留，但先探测再删：无条件 rmSync 会把正在
+		// 服务的实例（比如被新的 pi-web 抢占前仍在跑的旧实例）的 socket 文件摘
+		// 走，新旧实例互相踩。只有连不上的残留（ECONNREFUSED/ENOENT）才删；
+		// 探测超时保守当作活实例，让 listen 自己以 EADDRINUSE 失败告警。
+		void probeControlPath(path).then((probeErr) => {
+			if (probeErr && existsSync(path)) {
+				try {
+					rmSync(path);
+				} catch {
+					/* best-effort */
+				}
+			}
+			server.listen(path, () => {
+				bound = true;
+				try {
+					chmodSync(path, 0o600);
+				} catch {
+					/* best-effort */
+				}
+				console.log(`  control    : ${path}`);
+			});
+		});
 	}
 	// A second instance on the same data dir / port would fail to bind — don't
 	// crash the server over it, just log and run without a control socket.
@@ -132,26 +178,10 @@ export function startControlServer(opts: { service: ControlService; dataDir: str
 		sock.on("close", () => clearTimeout(timer));
 	}
 
-	if (process.platform === "win32") {
-		// net.Server on a named pipe: listen on the pipe name directly.
-		server.listen(path, () => {
-			console.log(`  control    : ${path}`);
-		});
-	} else {
-		server.listen(path, () => {
-			try {
-				chmodSync(path, 0o600);
-			} catch {
-				/* best-effort */
-			}
-			console.log(`  control    : ${path}`);
-		});
-	}
-
 	return () => {
 		server.close();
 		try {
-			if (process.platform !== "win32" && existsSync(path)) rmSync(path);
+			if (process.platform !== "win32" && bound && existsSync(path)) rmSync(path);
 		} catch {
 			/* best-effort */
 		}

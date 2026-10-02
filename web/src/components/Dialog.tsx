@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useT } from "../i18n";
 import { appSend } from "../app-globals";
+import { useEscapeKey } from "../shortcut-stack";
 import { Markdown } from "./Markdown";
 
 interface DialogProps {
@@ -29,13 +30,10 @@ export function Dialog({ dialog }: DialogProps) {
 	useEffect(() => {
 		setInputValue("");
 		setSel(0);
-		const onKey = (e: KeyboardEvent) => {
-			if (e.key === "Escape") respond(null);
-		};
-		document.addEventListener("keydown", onKey);
-		return () => document.removeEventListener("keydown", onKey);
-		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [dialog.id]);
+	// 审查 #12：Esc 改走 shortcut-stack 分层栈 —— 裸 document 监听会抢走
+	// 叠在上面的模态弹窗的 Esc（与 Modal.tsx 同一调度，内层优先）。
+	useEscapeKey(() => respond(null));
 
 	const options = Array.isArray(dialog.args[0]) ? (dialog.args[0] as string[]) : [];
 	const message = typeof dialog.args[0] === "string" ? (dialog.args[0] as string) : "";
@@ -64,6 +62,29 @@ export function Dialog({ dialog }: DialogProps) {
 						</button>
 					))}
 					{options.length === 0 && <div className="dialog-hint">{t("noOptions")}</div>}
+					<div className="dialog-custom-row">
+						<input
+							className="dialog-input"
+							value={inputValue}
+							placeholder={t("modelQuestionCustom")}
+							onChange={(e) => setInputValue(e.target.value)}
+							onKeyDown={(e) => {
+								if (e.key === "Enter" && !e.nativeEvent.isComposing && inputValue.trim()) {
+									respond(inputValue.trim());
+								}
+							}}
+						/>
+						<button
+							type="button"
+							className="btn primary"
+							disabled={!inputValue.trim()}
+							onClick={() => {
+								if (inputValue.trim()) respond(inputValue.trim());
+							}}
+						>
+							{t("ok")}
+						</button>
+					</div>
 				</div>
 			)}
 

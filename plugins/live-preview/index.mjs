@@ -413,17 +413,17 @@ export default {
 			host.registerAgentTool({
 				name: "live_preview",
 				description:
-					"打开工作区文件/文件夹的 Live Server 式预览：HTML（含相对资源与自动刷新）走 /liveserver/，Markdown 渲染走 /md/。path 可给文件或目录（缺省根目录）。返回同源预览地址；浏览器会自动在新标签打开（被拦截时点结果里的链接）。",
+					"Open a Live Server-style preview of a workspace file or folder: HTML (relative assets, auto-refresh) is served under /liveserver/, Markdown rendering under /md/. path may be a file or a directory (defaults to the workspace root). Returns a same-origin preview URL; the browser opens it in a new tab automatically (click the link in the result if the popup was blocked).",
 				parameters: {
 					type: "object",
 					properties: {
 						path: {
 							type: "string",
-							description: "工作区相对路径，如 index.html、docs/a.md；缺省列出根目录。",
+							description: "Workspace-relative path, e.g. index.html or docs/a.md; omit to preview the root.",
 						},
 						open: {
 							type: "boolean",
-							description: "为 false 时只返回地址、不自动打开新标签（默认自动打开）。",
+							description: "When false, only return the URL without opening a new tab (default: open automatically).",
 						},
 					},
 				},

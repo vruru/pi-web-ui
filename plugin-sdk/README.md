@@ -125,4 +125,29 @@ describe("my-plugin", () => {
 | `schedule` 持久版（`{id, persistent, catchUp, label}`，落盘+补跑+进后台面板）                    | ✅                    | —                               |
 | `host.requestPermission`（动态授权：net 补主机 / llm 限模型，用户逐条确认可记住）                | ✅（基础族须已声明）  | 确认框 + 设置面板「已授权能力」 |
 
+## 反激活与清理：`host.effect(label, dispose)`
+
+宿主的每个注册面（`ui.register` / `registerAgentTool` / `registerCommand` / `route` /
+`registerProxy` / `fs.watch` / `schedule` / `registerBackgroundTask` / `events.on` /
+`onStats` / `onStreaming` / `onSettingsChanged` …）都返回注销函数，**并且**已经在宿主内部
+登记进该插件的 effect 栈：反激活（禁用、卸载、`plugins_reload`）时**逆序回卷**，插件忘了
+调用返回的注销函数也不会留下孤儿订阅/定时器/路由。
+
+你自己建的东西（`setInterval` / `addEventListener` / WebSocket / 自建缓存）挂在
+`host.effect` 上同样享受这条保障：
+
+```js
+export default definePlugin({
+	async activate(host) {
+		const timer = setInterval(() => host.log("info", "tick"), 60_000);
+		host.effect("my-timer", () => clearInterval(timer));
+		// 也可以两者都写（幂等：dispose 写成本身幂等即可）
+		const off = host.effect("my-ws", () => ws.close());
+	},
+});
+```
+
+清理抛错只记一条诊断、不阻断其它清理；`host.effect` 返回的注销函数与反激活都会调
+`dispose`，所以 `dispose` 请写成**幂等**的。
+
 完整契约见 `docs/architecture-plugins.md`。

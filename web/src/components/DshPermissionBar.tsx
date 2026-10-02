@@ -94,24 +94,16 @@ export const DshPermissionBar = memo(function DshPermissionBar({
 				direction="up"
 				align="left"
 			>
-				{offered.map((v) => {
-					const opt = options.find((o) => o.value === v);
-					return (
-						<DropdownItem
-							key={v}
-							active={v === effective}
-							title={opt?.description ?? t(permDescKey(v))}
-							onClick={() => pick(v)}
-						>
-							<span className="dd-preset-name">
-								{t(permLabelKey(v))}
-								{v === defaultPreset && <span className="dd-preset-tag">{t("dshPresetDefaultTag")}</span>}
-								{v === "danger-full-access" && <span className="dd-preset-tag warn">{t("dshPermFullAccessTag")}</span>}
-							</span>
-							<span className="dd-preset-desc">{t(permDescKey(v))}</span>
-						</DropdownItem>
-					);
-				})}
+				{offered.map((v) => (
+					<DropdownItem key={v} active={v === effective} title={t(permDescKey(v))} onClick={() => pick(v)}>
+						<span className="dd-preset-name">
+							{t(permLabelKey(v))}
+							{v === defaultPreset && <span className="dd-preset-tag">{t("dshPresetDefaultTag")}</span>}
+							{v === "danger-full-access" && <span className="dd-preset-tag warn">{t("dshPermFullAccessTag")}</span>}
+						</span>
+						<span className="dd-preset-desc">{t(permDescKey(v))}</span>
+					</DropdownItem>
+				))}
 				{confirmFull && <div className="dd-note warn">{t("dshPermConfirmFull")}</div>}
 			</Dropdown>
 		);
@@ -140,24 +132,16 @@ export const DshPermissionBar = memo(function DshPermissionBar({
 					if (!v) setConfirmFull(false);
 				}}
 			>
-				{offered.map((v) => {
-					const opt = options.find((o) => o.value === v);
-					return (
-						<DropdownItem
-							key={v}
-							active={v === effective}
-							title={opt?.description ?? t(permDescKey(v))}
-							onClick={() => pick(v)}
-						>
-							<span className="dd-preset-name">
-								{t(permLabelKey(v))}
-								{v === defaultPreset && <span className="dd-preset-tag">{t("dshPresetDefaultTag")}</span>}
-								{v === "danger-full-access" && <span className="dd-preset-tag warn">{t("dshPermFullAccessTag")}</span>}
-							</span>
-							<span className="dd-preset-desc">{t(permDescKey(v))}</span>
-						</DropdownItem>
-					);
-				})}
+				{offered.map((v) => (
+					<DropdownItem key={v} active={v === effective} title={t(permDescKey(v))} onClick={() => pick(v)}>
+						<span className="dd-preset-name">
+							{t(permLabelKey(v))}
+							{v === defaultPreset && <span className="dd-preset-tag">{t("dshPresetDefaultTag")}</span>}
+							{v === "danger-full-access" && <span className="dd-preset-tag warn">{t("dshPermFullAccessTag")}</span>}
+						</span>
+						<span className="dd-preset-desc">{t(permDescKey(v))}</span>
+					</DropdownItem>
+				))}
 			</Dropdown>
 			{confirmFull && <span className="dsh-preset-hint warn">{t("dshPermConfirmFull")}</span>}
 		</div>

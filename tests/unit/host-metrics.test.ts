@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { calculateHostMetrics, createHostMetricsSampler } from "../../server/host-metrics.js";
+import { calculateHostMetrics, createHostMetricsSampler, meanCpuPercent } from "../../server/host-metrics.js";
 
 describe("calculateHostMetrics", () => {
 	it("正常输入：计算处理器与内存百分比", () => {
@@ -41,7 +41,7 @@ describe("calculateHostMetrics", () => {
 });
 
 describe("createHostMetricsSampler", () => {
-	it("可注入采样器连续读取三个快照，基线按次推进", () => {
+	it("可注入采样器连续读取三个快照，基线按次推进（窗口=1 时为瞬时值）", () => {
 		const snapshots = [
 			{ cpuIdle: 100, cpuTotal: 400, memoryFree: 250, memoryTotal: 1000 },
 			{ cpuIdle: 140, cpuTotal: 500, memoryFree: 250, memoryTotal: 1000 },
@@ -49,7 +49,7 @@ describe("createHostMetricsSampler", () => {
 		];
 		let idx = 0;
 		const readSnapshot = () => snapshots[idx++];
-		const sampler = createHostMetricsSampler(readSnapshot);
+		const sampler = createHostMetricsSampler(readSnapshot, 1);
 
 		const firstMetrics = sampler();
 		expect(firstMetrics.cpuPercent).toBeCloseTo(60);
@@ -58,5 +58,52 @@ describe("createHostMetricsSampler", () => {
 		const secondMetrics = sampler();
 		expect(secondMetrics.cpuPercent).toBeCloseTo(80);
 		expect(secondMetrics.memoryPercent).toBeCloseTo(90);
+	});
+
+	it("默认上报窗口内均值：单次毛刺被摊平", () => {
+		const snapshots = [
+			{ cpuIdle: 100, cpuTotal: 400, memoryFree: 250, memoryTotal: 1000 },
+			{ cpuIdle: 140, cpuTotal: 500, memoryFree: 250, memoryTotal: 1000 }, // 瞬时 60
+			{ cpuIdle: 160, cpuTotal: 600, memoryFree: 250, memoryTotal: 1000 }, // 瞬时 80
+		];
+		let idx = 0;
+		const sampler = createHostMetricsSampler(() => snapshots[idx++]);
+		expect(sampler().cpuPercent).toBeCloseTo(60); // 历史 [60]
+		expect(sampler().cpuPercent).toBeCloseTo(70); // 历史 [60, 80] → 均值
+	});
+
+	it("窗口截断：只保留最近 N 次", () => {
+		// 每次瞬时 100：idle 不动、total 涨，busy 占比 100%
+		const snapshots = [
+			{ cpuIdle: 0, cpuTotal: 0, memoryFree: 500, memoryTotal: 1000 },
+			{ cpuIdle: 0, cpuTotal: 100, memoryFree: 500, memoryTotal: 1000 }, // 100
+			{ cpuIdle: 50, cpuTotal: 200, memoryFree: 500, memoryTotal: 1000 }, // 50
+			{ cpuIdle: 50, cpuTotal: 300, memoryFree: 500, memoryTotal: 1000 }, // 100
+			{ cpuIdle: 100, cpuTotal: 400, memoryFree: 500, memoryTotal: 1000 }, // 50
+		];
+		let idx = 0;
+		const sampler = createHostMetricsSampler(() => snapshots[idx++], 2);
+		expect(sampler().cpuPercent).toBeCloseTo(100); // [100]
+		expect(sampler().cpuPercent).toBeCloseTo(75); // [100, 50]
+		expect(sampler().cpuPercent).toBeCloseTo(75); // [50, 100]，最早的 100 被挤掉
+		expect(sampler().cpuPercent).toBeCloseTo(75); // [100, 50]
+	});
+
+	it("meanCpuPercent：空序列回 null，前端显示 —", () => {
+		expect(meanCpuPercent([])).toBeNull();
+		expect(meanCpuPercent([30])).toBeCloseTo(30);
+		expect(meanCpuPercent([10, 20, 30])).toBeCloseTo(20);
+	});
+
+	it("totalDelta<=0 的 null 读数不进历史，均值保持", () => {
+		const snapshots = [
+			{ cpuIdle: 100, cpuTotal: 400, memoryFree: 250, memoryTotal: 1000 },
+			{ cpuIdle: 140, cpuTotal: 500, memoryFree: 250, memoryTotal: 1000 }, // 60
+			{ cpuIdle: 140, cpuTotal: 500, memoryFree: 250, memoryTotal: 1000 }, // delta 0 → null
+		];
+		let idx = 0;
+		const sampler = createHostMetricsSampler(() => snapshots[idx++]);
+		expect(sampler().cpuPercent).toBeCloseTo(60);
+		expect(sampler().cpuPercent).toBeCloseTo(60); // 历史仍是 [60]，不被空洞拉低
 	});
 });

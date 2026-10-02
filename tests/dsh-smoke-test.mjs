@@ -49,7 +49,7 @@ try {
 }
 if (!rtAvailable) {
 	console.log(
-		"⏭ SKIP：未找到 dsh 运行时树（需 npm i -g @deepseek-ai/dsh@0.1.1-rc.2 或 PI_WEB_DSH_RUNTIME 指向运行时树根）",
+		"⏭ SKIP：未找到 dsh 运行时树（需 npm i -g @deepseek-ai/dsh@0.1.5-rc.3 或 PI_WEB_DSH_RUNTIME 指向运行时树根）",
 	);
 	process.exit(0);
 }
@@ -83,6 +83,10 @@ const server = spawn("node", ["dist/server/index.js"], {
 		PI_WEB_ENGINE: "dsh",
 		// 隔离 agent 目录：不读真实 ~/.pi/agent（冒烟零 key 场景）。
 		PI_CODING_AGENT_DIR: mkdtempSync(join(tmpdir(), "dsh-smoke-agent-")),
+		// 隔离 DSH 家目录：不读真实 ~/.dsh（里面有用户自建 agent-presets，会让
+		// 「四预设 / 无 broken」两条断言取决于跑测试的机器上装了什么）。dsh-home-paths
+		// 的优先级是 显式配置 > $DSH_HOME > ~/.dsh，所以这里设 env 即刻生效。
+		DSH_HOME: mkdtempSync(join(tmpdir(), "dsh-smoke-home-")),
 	},
 	stdio: ["ignore", "ignore", "pipe"],
 });
@@ -178,14 +182,20 @@ async function main() {
 	// attach 时可能先推一次空名录（运行时未就绪），等 onStarted 后的實名单。
 	const pr = await c.wait((m) => m.type === "dsh_presets" && m.presets.length > 0);
 	const presetIds = pr.presets.map((p) => p.id).sort();
+	// shipped 四预设（standard/ptc/minimal/cordis，由 preset-clones.ts 克隆改写）。
+	// 不断言「恰好只有这四个」：$DSH_HOME/.agent-presets 里的自建预设也会一并上架
+	// （设计如此，见 preset-clones.ts 的 roster 注释），那是机器状态不是仓库行为。
+	const SHIPPED = ["cordis", "minimal", "ptc", "standard"];
 	check(
 		"dsh_presets 四预设",
-		JSON.stringify(presetIds) === JSON.stringify(["cordis", "minimal", "ptc", "standard"]),
+		SHIPPED.every((id) => presetIds.includes(id)),
 		presetIds.join(","),
 	);
 	check(
 		"dsh_presets 无 broken（clone 改写生效）",
-		pr.presets.every((p) => !p.broken),
+		// 只查 shipped：自建预设里的裸包名在 launcher 式 boot 下不可解析，是**已知限制**
+		// （preset-clones.ts 只克隆 shipped；裸名需要官方 CLI 的安装锚点才能解析）。
+		SHIPPED.every((id) => !pr.presets.find((p) => p.id === id)?.broken),
 		pr.presets.map((p) => `${p.id}:${p.broken ?? "ok"}`).join(", "),
 	);
 	check("dsh_presets 默认 standard", pr.defaultPreset === "standard", pr.defaultPreset);

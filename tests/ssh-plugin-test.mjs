@@ -24,8 +24,9 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { startMockSsh, dirs as mDirs, files as mFiles, ensurePluginSsh2Dep } from "./lib/mock-ssh.mjs";
 import WebSocket from "ws";
 
-const PORT = 8964;
-const SSH_PORT = 22964;
+const PORT = Number(process.argv[2] || 8964);
+// mock SSH 端口必须跟随主端口走（并行时各 worker 端口不同，写死会撞车）。
+const SSH_PORT = PORT + 10000;
 const PLUGIN_ID = "vscode-editor";
 const BASE = `http://127.0.0.1:${PORT}`;
 const REPO = fileURLDirname(import.meta.url);

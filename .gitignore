@@ -25,8 +25,15 @@ plugins/*/storage/
 # Scratch/test temp files
 tests/scratch/
 
+# Local editor and backup files
+.zcodeignore
+*.bak
+
 # pi-web-ui Electron 桌面版构建产物
 release/
 
 # 独立社区插件清单仓库工作区
 plugin-registry/
+
+# 本地临时调试截图
+dev/wechat-shot*.png

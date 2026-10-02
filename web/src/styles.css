@@ -1,3 +1,5 @@
+@import "./model-management.css";
+
 /* pi-web-ui — dark theme, pi-flavored */
 
 /* File manager archive / folder transfer dialog. Native dialog traps focus. */
@@ -10,6 +12,39 @@
 	width: min(520px, calc(calc(100vw / var(--ui-zoom)) - 32px));
 	max-height: calc(85vh / var(--ui-zoom));
 	overflow: auto;
+}
+.file-transfer-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	margin-bottom: 8px;
+}
+.file-transfer-head h3 {
+	margin: 0;
+	font-size: 16px;
+	font-weight: 600;
+}
+.file-transfer-close {
+	flex-shrink: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 28px;
+	height: 28px;
+	padding: 0;
+	border: 1px solid var(--border-soft);
+	border-radius: 6px;
+	background: var(--bg-elev2);
+	color: var(--text-dim);
+	cursor: pointer;
+	font-size: 14px;
+	transition: all 0.12s ease;
+}
+.file-transfer-close:hover:not(:disabled) {
+	color: var(--text);
+	border-color: var(--border);
+	background: var(--bg-elev3);
 }
 .file-transfer-dialog::backdrop {
 	background: #0008;
@@ -203,6 +238,13 @@ body {
 	font-family: var(--sans);
 	font-size: 14px;
 	line-height: 1.6;
+}
+
+/* iOS <17 WebKit flexbox bug: inline SVGs inside fixed-width flex buttons shrink to width 0 (issue #399). */
+button > svg {
+	min-width: 1em;
+	min-height: 1em;
+	flex-shrink: 0;
 }
 
 .app {
@@ -911,6 +953,23 @@ body.rp-resizing .rp-sash.dragging::after {
 	outline: 2px solid var(--accent);
 	outline-offset: -2px;
 }
+/* issue #290：「另一处」行可点击过户（有 owner + convId）—— 恢复手形光标 + hover 反馈；
+   第一次点进入 .confirm 两段确认态（醒目底色 + 确认文案）。 */
+button.session-item.elsewhere-item {
+	cursor: pointer;
+}
+button.session-item.elsewhere-item.elsewhere-static {
+	cursor: default;
+}
+button.session-item.elsewhere-item:hover {
+	background: var(--bg-elev2);
+	color: var(--text);
+}
+button.session-item.elsewhere-item.confirm {
+	background: var(--accent-soft);
+	color: var(--text);
+	box-shadow: inset 0 0 0 1px var(--accent);
+}
 /* issue #145：“另一处”标签（运行的对话里的跨客户端只读行） */
 .elsewhere-badge {
 	display: inline-block;
@@ -985,6 +1044,33 @@ body.rp-resizing .rp-sash.dragging::after {
 	background: color-mix(in srgb, var(--accent) 8%, transparent);
 	white-space: nowrap;
 	flex-shrink: 0;
+}
+
+/* 临时会话强标（左栏会话行） */
+.ephemeral-badge {
+	display: inline-block;
+	vertical-align: 1px;
+	margin-right: 6px;
+	font-size: 9.5px;
+	line-height: 1.4;
+	padding: 0 5px;
+	border-radius: 999px;
+	border: 1px solid rgba(139, 92, 246, 0.4);
+	color: #a78bfa;
+	background: rgba(139, 92, 246, 0.1);
+	white-space: nowrap;
+	flex-shrink: 0;
+}
+
+/* 钉住标记（左栏会话行：常驻运行列表） */
+.pin-badge {
+	display: inline-block;
+	vertical-align: 1px;
+	margin-right: 6px;
+	font-size: 11px;
+	line-height: 1;
+	flex-shrink: 0;
+	opacity: 0.85;
 }
 
 /* 子代理运行报错的红点（左栏会话行；hover 显示错误文本） */
@@ -1663,16 +1749,6 @@ body.rp-resizing .rp-sash.dragging::after {
 	display: none;
 }
 
-/* + : inline file content */
-.file-attach.inline {
-	background: var(--accent-soft);
-	color: var(--accent);
-}
-.file-attach.inline:hover {
-	background: var(--accent);
-	color: #fff;
-}
-
 /* download icon : save the file (any kind, incl. binary/archives) */
 .file-attach.download {
 	background: rgba(52, 211, 153, 0.14);
@@ -1941,6 +2017,8 @@ body.rp-resizing .rp-sash.dragging::after {
 	padding: 6px 10px;
 	border-bottom: 1px solid var(--border);
 	background: rgba(139, 92, 246, 0.06);
+	/* 里面插的是文件名（可含无空格长 token）→ 允许断行 */
+	overflow-wrap: anywhere;
 }
 
 .attachcard-refnote {
@@ -1948,6 +2026,7 @@ body.rp-resizing .rp-sash.dragging::after {
 	border-top: 1px dashed rgba(251, 191, 36, 0.3);
 	font-size: 11.5px;
 	color: var(--text-faint);
+	overflow-wrap: anywhere;
 }
 
 .attachcard-content {
@@ -2461,6 +2540,95 @@ select.plugin-topbar-item.plugin-topbar-select {
 .plugin-topbar-menu.portal > .plugin-topbar-menu-keep > .panel-toggle.has-label:hover {
 	border-color: var(--accent);
 	background: var(--accent-soft);
+}
+/* 菜单里所有行文字统一一档（--text）：同一屏里混着好几种颜色 —— 扁平行继承
+   --text，未选中的视图 tab 是 --text-dim，新对话是强调色、临时对话是紫色，
+   看起来深浅不一。状态只留给背景/边框/悬浮高亮（.tb-tab.active 的强调底、
+   chip 的边框仍在），文字不再承担状态提示。:is() 取参数里最高的特异性
+   （.panel-toggle.has-label = 0,2,0），整体 0,4,0，压得住 .tb-tab.active /
+   .chip.newchat / .chip.ephemeral-chat-btn 这些状态类。
+   只设 color（不碰 display）—— issue #183 的后代选择器禁忌针对布局，这里安全。 */
+.plugin-topbar-menu.portal :is(.chip, .tb-tab, .plugin-topbar-item, .panel-toggle.has-label) {
+	color: var(--text);
+}
+/* ---- 菜单行的图标槽：图标统一 15px 方盒 + 无图标补同宽占位，文字左缘落在同一条竖线上 ----
+   之前同屏混着四套规格：宿主 Fi 图标与插件 SVG 都是 1em(12.5px)、.chip.github 写死
+   15px、emoji 字形随字体走（且 `.plugin-icon-glyph` 没有固定盒）；行内边距也分两档
+   （.tb-tab 4px 12px，其余 5~6px 10px），于是图标与文字各走各的、左缘参差。
+   行 = .tb-row（菜单自绘的扁平行/下拉行）+ 原样搬进来的 .chip/.tb-tab/
+   .plugin-topbar-item/.panel-toggle。图标格只认行首那个元素（:not(.dd-caret) 排掉
+   下拉箭头，它在右端由 auto 外边距定位）。 */
+.plugin-topbar-menu.portal :is(.tb-row, .chip, .tb-tab, .plugin-topbar-item, .panel-toggle) {
+	gap: 6px;
+	padding: 5px 10px;
+	align-items: center;
+}
+.plugin-topbar-menu.portal
+	:is(.tb-row, .chip, .tb-tab, .plugin-topbar-item, .panel-toggle)
+	> :is(svg, .plugin-icon-svg, .plugin-icon-glyph):not(.dd-caret) {
+	flex: 0 0 auto;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 15px;
+	height: 15px;
+	/* emoji 字形：字号跟方盒走，别让字体自己决定高度 */
+	font-size: 14px;
+	line-height: 1;
+}
+/* 没有行首图标的行补一个同宽占位（伪元素在 flex 里是 flex item，天然不参与
+   text-overflow），文字左缘因此和带图标的行对齐。 */
+.plugin-topbar-menu.portal
+	:is(.tb-row, .chip, .tb-tab, .plugin-topbar-item, .panel-toggle):not(
+		:has(> svg, > .plugin-icon-svg, > .plugin-icon-glyph)
+	)::before {
+	content: "";
+	flex: 0 0 auto;
+	width: 15px;
+	height: 15px;
+}
+/* 行内文字：菜单里一律跟按钮同字号（.chip-sub 平时是 11px --text-faint，顶栏里当
+   次要标签用；菜单里它是这一行的主文字），并保留单行省略。 */
+.plugin-topbar-menu.portal
+	:is(.tb-row, .chip, .tb-tab, .plugin-topbar-item, .panel-toggle)
+	> :is(.tb-row-text, .chip-sub) {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 1em;
+	color: var(--text);
+}
+/* .tb-row 原来是 display:block（省略号靠按钮自身），改 flex 后省略号落在文字 span 上
+   （上面的规则），这里只把行本身摆成一行。 */
+.plugin-topbar-menu.portal > .tb-row {
+	display: flex;
+	align-items: center;
+}
+/* 浏览器控制（host:browser）是 OVERFLOW_AS_NODE_IDS 直出的，外面裹着 .bc-anchor
+   （没有 .plugin-topbar-menu-keep 包装），所以上面那几条「拉满宽」都没命中它：
+   补齐后它与其他行同宽同内距，文字也落在同一条竖线上（分体形态两块 chip 平分宽度）。 */
+.plugin-topbar-menu.portal > .bc-anchor,
+.plugin-topbar-menu.portal > .bc-anchor > .browser-control-split {
+	display: flex;
+	width: 100%;
+}
+.plugin-topbar-menu.portal > .bc-anchor > .chip,
+.plugin-topbar-menu.portal > .bc-anchor > .browser-control-split > .chip {
+	width: 100%;
+	justify-content: flex-start;
+}
+.plugin-topbar-menu.portal > .bc-anchor > .browser-control-split > .chip {
+	flex: 1 1 auto;
+	min-width: 0;
+}
+.plugin-topbar-menu.portal > .bc-anchor > .chip > span {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 1em;
+	color: var(--text);
 }
 /* 桌面端（>768px）：文件列表抽屉开关整体隐藏（含 ⋯ 菜单里那份 —— 用 :has 藏整行，
    避免空 wrapper 吃掉菜单的纵向 gap；桌面右栏常驻、有自己的折叠按钮，抽屉开关无意义）。 */
@@ -3757,6 +3925,11 @@ body.panel-resizing .scm-divider::after {
 	color: var(--red);
 }
 
+/* 累计成本 */
+.status-cost {
+	font-variant-numeric: tabular-nums;
+}
+
 /* 实时生成速率 (tokens/sec) */
 .status-rate {
 	font-variant-numeric: tabular-nums;
@@ -3986,6 +4159,29 @@ body.panel-resizing .scm-divider::after {
 	cursor: default;
 }
 
+.cwd-close {
+	flex-shrink: 0;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	border: 1px solid var(--border);
+	border-radius: 5px;
+	background: var(--bg-elev);
+	color: var(--text-dim);
+	cursor: pointer;
+	font-size: 13px;
+	transition: all 0.12s ease;
+	margin-left: auto;
+}
+.cwd-close:hover {
+	color: var(--red);
+	border-color: rgba(248, 113, 113, 0.4);
+	background: var(--red-soft);
+}
+
 .cwd-picker-row {
 	display: flex;
 	align-items: center;
@@ -4167,16 +4363,24 @@ body.panel-resizing .scm-divider::after {
 }
 
 /* 顶栏按钮文字总开关（关 = 只剩图标）：藏掉各类按钮的文字标签，但数字角标
-   （.bg-task-badge / .update-badge / .update-dot）、品牌图标块与插件图标
+   （.bg-task-badge / .update-badge / .update-dot）、品牌图标块、插件图标
    （.plugin-icon-svg / .plugin-icon-glyph，见 PluginIcon：图标本身就是 span，
-   不排除会被上面的 `> span` 误杀）保留；
-   溢出菜单（portal 到 body，不在 .topbar 内）不受影响，仍带文字。 */
+   不排除会被上面的 `> span` 误杀）与 emoji 图标（.chip-emoji，如临时对话的 🎭：
+   同样是「用 span 画的图标」，不排除按钮就剩个空方块）保留；
+   溢出菜单（portal 到 body，不在 .topbar 内）不受影响，仍带文字。
+   ⚠️ 末尾的 `:not(.goalbar-opt)` 与窄屏那组 chip 标签规则**必须同步**：这些
+   `:not()` 链的特异性会逐项累加，名单一长一短就会互相打平、再靠源码顺序反超 ——
+   窄屏豁免（(0,9,1)）一旦与本条打平且写在后面，「隐藏顶栏文字」就会失效（按钮全变回
+   带文字的样子）。`.goalbar-opt`（目标条的审查/执行模型选择器）只是借 chip 皮，
+   不在顶栏里，留着它对本条无影响。 */
 .topbar.no-labels
 	.chip
-	> span:not(.bg-task-badge):not(.update-badge):not(.update-dot):not(.plugin-icon-svg):not(.plugin-icon-glyph),
-.topbar.no-labels .tb-tab > span:not(.plugin-icon-svg):not(.plugin-icon-glyph),
-.topbar.no-labels .plugin-topbar-item > span:not(.plugin-icon-svg):not(.plugin-icon-glyph),
-.topbar.no-labels .panel-toggle > span:not(.plugin-icon-svg):not(.plugin-icon-glyph),
+	> span:not(.bg-task-badge):not(.update-badge):not(.update-dot):not(.plugin-icon-svg):not(.plugin-icon-glyph):not(
+		.chip-emoji
+	):not(.goalbar-opt),
+.topbar.no-labels .tb-tab > span:not(.plugin-icon-svg):not(.plugin-icon-glyph):not(.chip-emoji),
+.topbar.no-labels .plugin-topbar-item > span:not(.plugin-icon-svg):not(.plugin-icon-glyph):not(.chip-emoji),
+.topbar.no-labels .panel-toggle > span:not(.plugin-icon-svg):not(.plugin-icon-glyph):not(.chip-emoji),
 .topbar.no-labels .brand-name {
 	display: none;
 }
@@ -4994,6 +5198,19 @@ body.panel-resizing .scm-divider::after {
 	background: var(--accent-soft);
 }
 
+/* 顶栏里的 chip 统一裸幽灵化（主题下拉 / 声音 / 语言 / GitHub / 新对话…）：
+ * 与 tb-tab 图标键同规格——无底无框，悬停才现 hairline。否则顶栏里
+ * 「裸图标 + 盒子 chip」混排（下拉触发器尤其突兀）。主题可再整体重排。 */
+.topbar .chip {
+	background: transparent;
+	border-color: transparent;
+}
+
+.topbar .chip:hover {
+	background: transparent;
+	border-color: var(--border);
+}
+
 .chip-model {
 	max-width: 220px;
 	overflow: hidden;
@@ -5011,12 +5228,28 @@ body.panel-resizing .scm-divider::after {
 	font-size: 11px;
 }
 
+/* 用 emoji 当图标的顶栏按钮（如临时对话的 🎭）：与 .plugin-icon-glyph 同理，
+   它是「图标」而不是「文字标签」，所以要在 .topbar.no-labels 的 `> span` 隐藏
+   规则里豁免（见该处注释）。line-height:1 让 emoji 在正方形按钮里垂直居中。 */
+.chip-emoji {
+	line-height: 1;
+}
+
 .chip.newchat {
 	color: var(--accent);
 	border-color: rgba(139, 92, 246, 0.4);
 }
 .chip.newchat:hover {
 	background: var(--accent-soft);
+}
+/* 临时对话按鈕：紫色加深以区分普通新对话 */
+.chip.ephemeral-chat-btn {
+	color: #a78bfa;
+	border-color: rgba(139, 92, 246, 0.5);
+	background: rgba(139, 92, 246, 0.07);
+}
+.chip.ephemeral-chat-btn:hover {
+	background: rgba(139, 92, 246, 0.16);
 }
 /* GitHub repo link (top-right corner) — perfect circle. */
 .chip.github {
@@ -5562,6 +5795,36 @@ body.panel-resizing .scm-divider::after {
 	white-space: nowrap;
 }
 
+/* 临时会话提示条：常驻消息流顶部（跟随滚动），不遮挡 protocol-banner */
+.ephemeral-banner {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin: 8px auto 12px;
+	padding: 5px 8px 5px 14px;
+	border-radius: 8px;
+	background: rgba(139, 92, 246, 0.08);
+	border: 1px solid rgba(139, 92, 246, 0.35);
+	color: #a78bfa;
+	font-size: 12px;
+	width: fit-content;
+	max-width: 100%;
+}
+/* 「保存为正式对话」：提示条里的即时转正入口（右键菜单里的那条是同一动作） */
+.ephemeral-save {
+	flex-shrink: 0;
+	padding: 2px 8px;
+	border-radius: 6px;
+	border: 1px solid rgba(139, 92, 246, 0.45);
+	background: rgba(139, 92, 246, 0.12);
+	color: #c4b5fd;
+	font-size: 11px;
+	cursor: pointer;
+}
+.ephemeral-save:hover {
+	background: rgba(139, 92, 246, 0.22);
+}
+
 .notices {
 	position: fixed;
 	/* 顶部偏下：顶栏下方，不挡顶栏也不贴消息区 */
@@ -5918,6 +6181,35 @@ body:not(.has-wallpaper)::after {
 	overflow-anchor: auto;
 }
 
+/* 未钉底（向上翻阅）时，滚动容器底缘会把下一条消息拦腰切断，看上去像被下面那条
+   （目标药丸行 / chips 行 / 输入区）挡住了 —— 其实那就是裁剪边，不是遮挡。与其让半行
+   硬切，不如在底缘铺一层向下的渐隐：半行淡出 = 「下面还有」，不再像「被遮住」。
+   只在未钉底时出现（.messages.anchor-live，MessageList 用它标记逃逸阅读）：钉底时最后
+   一条消息完整可见（底部还留 12px padding），这时候糊它反而像 bug。
+   画在 .messages-wrap（滚动容器的父级）上而不是给 .messages 加 mask：mask 会让该元素
+   成为内部 position:fixed 后代的包含块（消息里的下拉菜单、灯箱都会跟着滚），项目已经
+   在 .messages-wrap 的 container-type 上踩过同一类坑，这里别再叠一层。
+   渐变终点用 --msgs-bg：与 .main 铺在整面板上的那层同色，正常主题下就是底色本身
+   （半透主题会与底层再叠一点，肉眼是极轻的暗角，可接受）。z-index 0 压在
+   「回到底部」按钮（z-index 1）与提问导航条（15）之下，不挡它们。 */
+.messages-wrap::after {
+	content: "";
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	height: 30px;
+	z-index: 0;
+	pointer-events: none;
+	opacity: 0;
+	transition: opacity 0.15s ease;
+	background: linear-gradient(to bottom, transparent, var(--msgs-bg, var(--bg-elev)));
+}
+
+.messages-wrap:has(> .messages.anchor-live)::after {
+	opacity: 1;
+}
+
 /* 惰性窗口化的等高占位（视口外的重型消息收起后的替身） */
 .msg-lazy-ph {
 	margin: 0;
@@ -5953,6 +6245,10 @@ body:not(.has-wallpaper)::after {
 	font-size: 11px;
 	color: var(--accent);
 	font-family: var(--mono);
+	/* 模型 id 常是无空格长 token（provider/vendor/model-2026-xx），
+	 * 在 .msg-meta 这行 flex 里不加 min-width:0 + 断行会顶宽整行。 */
+	min-width: 0;
+	overflow-wrap: anywhere;
 }
 
 .msg-customtype {
@@ -6053,38 +6349,175 @@ body:not(.has-wallpaper)::after {
 
 .msg-actions {
 	display: flex;
+	align-items: center;
 	justify-content: flex-end;
-	gap: 8px;
-	margin-top: 2px;
+	gap: 6px;
+	margin-top: 4px;
 	-webkit-user-select: none;
 	user-select: none;
 	-webkit-touch-callout: none;
 }
 
+/* 卡头右端**只有复制键**（.chead-copy）：思考 / 工具 / 附件 / 技能 / 压缩摘要
+ * 共用一条右缘垂直线，悬停整条消息才浮现。消息级按钮（复制三件套 / 分叉 /
+ * 回滚 / 朗读）一律在 .msg-actions 行，不进卡头 —— 助手消息把这一行锚在**最后
+ * 一段正文之后**（后面再跟工具卡也不隔开），用户/无正文的消息落在消息末尾。
+ * 所以卡头没有「操作簇」这个概念，也没有它的 hover 显隐与触屏在流内那套补丁。
+ * 复制成功的反馈统一为印绿（head 复制键 / 正文复制键） */
+.chead-copy.copied,
+.msg-text-copy.copied {
+	color: var(--green) !important;
+}
+
+/* 消息底部的操作纯按钮：统一为大一些的纯图标按钮，居中、清爽、易点 */
 .msg-action {
 	display: inline-flex;
 	align-items: center;
-	gap: 4px;
+	justify-content: center;
+	width: 32px;
+	height: 32px;
+	padding: 0;
+	margin: 0;
 	border: none;
 	background: transparent;
 	color: var(--text-faint);
-	font-size: 11.5px;
+	font-size: 16px;
 	cursor: pointer;
-	padding: 3px 8px;
-	border-radius: 6px;
+	border-radius: 8px;
 	opacity: 0;
+	flex: none;
 	transition:
 		opacity 0.15s ease,
 		color 0.15s ease,
-		background 0.15s ease;
+		background 0.15s ease,
+		transform 0.1s ease;
 }
+
+/* 纯按钮模式：默认隐藏文字标签，只留清晰大图标 */
+.msg-action-label {
+	display: none !important;
+}
+
+.msg-action > svg {
+	width: 16px;
+	height: 16px;
+	flex: none;
+}
+
 .msg:hover .msg-action,
 .msg-action:focus-visible {
 	opacity: 1;
 }
+
 .msg-action:hover {
+	color: var(--text);
+	background: var(--bg-elev2);
+}
+
+.msg-action:active {
+	transform: scale(0.92);
+}
+
+/* 朗读中：这条消息的「停止朗读」按钮保持可见 + 高亮（即使用户鼠标已移开）。 */
+.msg-action.msg-action-speaking {
+	opacity: 1;
 	color: var(--accent);
 	background: var(--bg-elev2);
+}
+
+/* 聚合复制按钮与下拉菜单 */
+.msg-actions.has-open-dropdown .msg-action {
+	opacity: 1;
+}
+
+.msg-copy-group {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+	height: 32px;
+	border-radius: 8px;
+}
+
+.msg-copy-main-btn {
+	width: 32px;
+	height: 32px;
+	border-top-right-radius: 0;
+	border-bottom-right-radius: 0;
+}
+
+.msg-copy-caret-btn {
+	width: 18px;
+	height: 32px;
+	border-top-left-radius: 0;
+	border-bottom-left-radius: 0;
+	margin-left: -1px;
+}
+
+.msg-copy-caret-btn.active,
+.msg-copy-caret-btn:hover {
+	color: var(--text);
+	background: var(--bg-elev2);
+}
+
+.msg-copy-caret-icon {
+	font-size: 10px;
+	transition: transform 0.15s ease;
+}
+
+.msg-copy-caret-icon.open {
+	transform: rotate(180deg);
+}
+
+.msg-copy-main-btn.msg-copy-success {
+	color: var(--green);
+}
+
+.msg-copy-dropdown {
+	position: absolute;
+	top: calc(100% + 4px);
+	right: 0;
+	min-width: 140px;
+	background: var(--menu-bg, var(--bg-elev2));
+	border: 1px solid var(--border-soft);
+	border-radius: 8px;
+	box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+	padding: 4px;
+	z-index: 50;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.msg-copy-menu-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 7px 10px;
+	border: none;
+	background: transparent;
+	color: var(--text);
+	font-size: 12.5px;
+	border-radius: 6px;
+	cursor: pointer;
+	text-align: left;
+	white-space: nowrap;
+	transition:
+		background 0.15s ease,
+		color 0.15s ease;
+}
+
+.msg-copy-menu-item:hover {
+	background: var(--bg-elev);
+	color: var(--accent);
+}
+
+.msg-copy-menu-item svg {
+	font-size: 14px;
+	color: var(--text-faint);
+}
+
+.msg-copy-menu-item:hover svg {
+	color: var(--accent);
 }
 
 /* ------------------------------------------------------- plugin slot entries */
@@ -6430,6 +6863,10 @@ span.msg-editor-hint svg {
 	border-radius: 999px;
 	border: 1px solid var(--border);
 	white-space: nowrap;
+	/* 文件名/命令等长 token 徽标：单行省略，不外溢。 */
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 
 .msg-collapsed-time {
@@ -6482,6 +6919,29 @@ span.msg-editor-hint svg {
 	color: var(--accent);
 	background: var(--bg-elev2);
 }
+/* markdown 正文统一断行口径（基线）。
+ * `.md` 是所有 markdown 容器的共同类（消息气泡、compaction 摘要、skillcard、
+ * 问卷对话框、present 卡片…），此前只有 .msg-text 一处声明断行规则：气泡外
+ * 的 markdown 遇到无空格长英文单词/长路径就会溢出，而 .messages 是
+ * overflow-y:auto（未声明的 overflow-x 计算值为 auto），于是整条消息区
+ * 冒出横向滚动条。这里给基线补上，p/li/td/a/内联 code 靠继承全覆盖；
+ * 真正的代码块走 .codeblock pre（overflow-x:auto + 逐行 break-word），
+ * 不受这条影响。 */
+.md {
+	min-width: 0;
+	overflow-wrap: anywhere;
+	word-break: break-word;
+}
+
+/* 裸 <pre>（rawHtml markdown 里的 HTML、插件视图直接塞的 pre）不经过
+ * .codeblock 包装，缺 overflow-x 就会横向溢出容器与消息区。
+ * （.codeblock pre 的规则优先级更高，两者声明一致，互不影响。） */
+.md > pre,
+.msg-text pre {
+	max-width: 100%;
+	overflow-x: auto;
+}
+
 .msg-text {
 	position: relative;
 	color: var(--text);
@@ -6520,6 +6980,11 @@ span.msg-editor-hint svg {
 .msg-text table {
 	border-collapse: collapse;
 	margin: 8px 0;
+	/* 宽表格（GFM 表格列多/单元格长）不自己收着就会横向溢出气泡与消息区：
+	 * 与 .dialog-inline .md table 同口径 —— 表格自身成块 + 内部横向滚动。 */
+	display: block;
+	max-width: 100%;
+	overflow-x: auto;
 }
 .msg-text th,
 .msg-text td {
@@ -6541,12 +7006,15 @@ span.msg-editor-hint svg {
 	padding: 1px 5px;
 }
 /* KaTeX 公式（issue #116）：颜色继承气泡文字，深色主题无需覆盖；
- * 长公式横向滚动而非撑破气泡；行内公式字号与正文对齐。 */
-.msg-text .katex-display {
+ * 长公式横向滚动而非撑破气泡；行内公式字号与正文对齐。
+ * 口径提到基线（与 .md 断行规则配套）：气泡外的 markdown（问卷对话框 /
+ * skillcard / 文件预览）里的长公式同样会顶宽容器。 */
+.katex-display {
 	margin: 8px 0;
 	padding: 4px 2px;
 	overflow-x: auto;
 	overflow-y: hidden;
+	max-width: 100%;
 }
 .msg-text .katex {
 	font-size: 1.05em;
@@ -6684,6 +7152,7 @@ span.msg-editor-hint svg {
 	font-size: 11.5px;
 	color: var(--text-faint);
 	font-style: italic;
+	overflow-wrap: anywhere;
 }
 
 .msg-image img {
@@ -6724,6 +7193,13 @@ span.msg-editor-hint svg {
 	font-style: italic;
 	font-size: 13px;
 	white-space: pre-wrap;
+	/* 思考是模型原文，会有无空格的长英文单词 / 长路径 / 长标识符；pre-wrap 只
+	   * 在已有空白处折行，单个长 token 照样顶出边框 —— 而 .messages 是
+	   * overflow-y:auto（计算值会把 overflow-x 变成 auto），于是整条消息区
+	   * 冒出横向滚动条。口径与 .msg-text 一致（缺 key 回落不了，直接同规则）。 */
+	min-width: 0;
+	overflow-wrap: anywhere;
+	word-break: break-word;
 	border-top: 1px solid var(--border-soft);
 }
 
@@ -6817,6 +7293,20 @@ span.msg-editor-hint svg {
 	font-family: var(--mono);
 	font-weight: 600;
 	color: var(--text);
+}
+
+/* 工具名是这行的**主体**，提示文本（命令 / 派单模板 / 超时）是配角，
+   路径最次（shrink 权重最高，先让到自己的下限）：缺口全由提示文本吸收。
+   名字只做**带地板的兜底**：min-width 5ch 大于任何短工具名的自然宽
+   （"read" 约 30px），所以常规行里它一点都不缩（不会变成 "rea…"）；只有当
+   右端按钮簇 + 徽标 + 路径地板都塞不下时（插件塞满 message.actions 的
+   极端行）它才让一点，避免把按钮簇顶出卡头。
+   选择器必须写成 `.chead-title.toolcall-name`：.chead-title 的 flex 声明在
+   文件里排在后面，同权重靠后者胜，只写 .toolcall-name 压不住。 */
+.chead-title.toolcall-name {
+	flex: 0 1 auto;
+	min-width: 5ch;
+	max-width: 40%;
 }
 
 /* 状态图标：名字右侧的小图标（具体文字放 title 悬浮提示里）。 */
@@ -7150,6 +7640,10 @@ span.msg-editor-hint svg {
 	gap: 6px;
 	box-sizing: border-box;
 	width: 100%;
+	/* 行容器不许被长子项（路径 / 命令 / 插件徽标）顶宽：.messages 是
+	   overflow-y:auto，任何横向溢出都会变成整条消息区的横向滚动条（§9）。 */
+	min-width: 0;
+	max-width: 100%;
 	min-height: 32px;
 	padding: 2px 8px 2px 4px;
 	border: 0;
@@ -7157,6 +7651,9 @@ span.msg-editor-hint svg {
 	background: transparent;
 	color: var(--text);
 	font-size: 12.5px;
+	/* 唯一的行内元素是右端复制键（.chead-copy，absolute 钉在右缘）；
+	 *  position: relative 是给它的定位上下文。 */
+	position: relative;
 	-webkit-user-select: none;
 	user-select: none;
 	-webkit-touch-callout: none;
@@ -7287,6 +7784,7 @@ div.chead[role="button"]:focus-visible,
 	right: 8px;
 	z-index: 1;
 }
+/* 触屏常驻时靠 `@media (hover: none)` 给首行留按钮列，不再压着首行字。 */
 
 /* 单行消息：复制键行内右置（flex 6px 间距、垂直居中，不压字）。 */
 .msg-text.single {
@@ -7344,7 +7842,13 @@ div.chead[role="button"]:focus-visible,
 /* 工具卡头提示：关键参数（文件路径 / 超时）。弱化小字，超长值截断显示，
    不拆卡头布局（完整值在 title 悬浮提示里）。 */
 .toolcall-path {
-	flex-shrink: 0;
+	/* 卡头里**最不重要**的一项：整行放不下时它第一个让位（权重 12，其他提示
+	   都是 1），最后让到 0 宽。工具名、状态图标、右端按钮列一个都不牺牲。
+	   可缩（不是 flex-shrink:0）：不让步 → 整行顶宽 → 按钮被顶出右缘
+	   （.toolcall overflow:hidden 裁掉，点不到），且每行按路径长度各自右移，
+	   右端按钮列**列不齐**。 */
+	flex: 0 12 auto;
+	min-width: 0;
 	max-width: min(58ch, calc(42vw / var(--ui-zoom)));
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -7354,8 +7858,13 @@ div.chead[role="button"]:focus-visible,
 	color: var(--text-dim);
 }
 .toolcall-timeout {
-	flex-shrink: 0;
+	flex: 0 1 auto;
+	min-width: 0;
 	white-space: nowrap;
+	/* 超时文案带参数（时长/工具名），仍不得外溢。 */
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
 	color: var(--text-faint);
 	font-size: 11px;
 }
@@ -7374,7 +7883,8 @@ div.chead[role="button"]:focus-visible,
 }
 /* 派单目标模板（delegate_task 卡头，状态图标右侧；折叠时也可见） */
 .toolcall-agent {
-	flex-shrink: 0;
+	flex: 0 1 auto;
+	min-width: 0;
 	max-width: min(30ch, calc(24vw / var(--ui-zoom)));
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -7495,6 +8005,31 @@ div.chead[role="button"]:focus-visible,
 	max-height: calc(calc(100vh / var(--ui-zoom)) - 48px);
 	border-radius: 8px;
 }
+.img-lightbox-close {
+	position: fixed;
+	top: 16px;
+	right: 16px;
+	z-index: 501;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 40px;
+	height: 40px;
+	border-radius: 50%;
+	border: 1px solid rgba(255, 255, 255, 0.25);
+	background: rgba(0, 0, 0, 0.65);
+	color: #ffffff;
+	font-size: 20px;
+	cursor: pointer;
+	backdrop-filter: blur(4px);
+	-webkit-backdrop-filter: blur(4px);
+	transition: all 0.15s ease;
+}
+.img-lightbox-close:hover {
+	background: rgba(0, 0, 0, 0.9);
+	border-color: rgba(255, 255, 255, 0.5);
+	transform: scale(1.06);
+}
 
 .toolcall-waiting {
 	margin-top: 8px;
@@ -7536,10 +8071,22 @@ div.chead[role="button"]:focus-visible,
 	font-family: var(--mono);
 	font-size: 12.5px;
 	border-bottom: 1px solid var(--border-soft);
+	/* 行本身可缩：里面的 code 走单行省略（见 text-wrap 守卫）。 */
+	min-width: 0;
+	max-width: 100%;
 }
 .bashblock-prompt {
 	color: var(--green);
 	font-weight: 700;
+}
+/* 命令行（长路径 / URL / 无空格参数）单行省略：不加 min-width:0 会在
+ * 这行 flex 里顶宽整块 bash 卡片，手机端把消息区带出横向滚动。 */
+.bashblock-command code {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 .bashblock-exit {
 	margin-left: auto;
@@ -7818,6 +8365,140 @@ div.chead[role="button"]:focus-visible,
 	font-size: 12px;
 }
 
+/* -------------------------------------------------- 被折叠历史消息视窗 (issue #398) */
+
+.compacted-history-action {
+	margin-top: 8px;
+}
+
+.compacted-history-toggle-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	background: transparent;
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	padding: 4px 10px;
+	color: var(--text-dim);
+	font-size: 12px;
+	cursor: pointer;
+	transition: all 0.15s ease;
+	max-width: 100%;
+	min-width: 0;
+}
+
+.compacted-history-toggle-btn:hover {
+	color: var(--text);
+	border-color: rgba(96, 165, 250, 0.4);
+	background: rgba(96, 165, 250, 0.06);
+}
+
+.compacted-history-chevron {
+	display: inline-flex;
+	align-items: center;
+	flex: none;
+	font-size: 12px;
+}
+
+.compacted-history-clock-icon {
+	flex: none;
+	font-size: 12px;
+	color: var(--info-blue);
+}
+
+.compacted-history-btn-text {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.compacted-history-count-pill {
+	display: inline-flex;
+	align-items: center;
+	padding: 1px 6px;
+	border-radius: 10px;
+	background: rgba(96, 165, 250, 0.12);
+	color: var(--info-blue);
+	font-size: 11px;
+	font-weight: 500;
+	flex: none;
+}
+
+.compacted-history-panel {
+	margin-top: 10px;
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	background: var(--bg-elev);
+	overflow: hidden;
+	min-width: 0;
+	max-width: 100%;
+}
+
+.compacted-history-loading,
+.compacted-history-empty,
+.compacted-history-error {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 12px 14px;
+	font-size: 12px;
+	color: var(--text-dim);
+}
+
+.compacted-history-error {
+	color: var(--red);
+}
+
+.compacted-history-stream {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+	max-width: 100%;
+}
+
+.compacted-history-stream-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 6px 12px;
+	background: rgba(0, 0, 0, 0.1);
+	border-bottom: 1px solid var(--border);
+	font-size: 11px;
+	min-width: 0;
+	max-width: 100%;
+}
+
+.compacted-history-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	color: var(--info-blue);
+	font-weight: 600;
+	flex: none;
+}
+
+.compacted-history-count {
+	color: var(--text-dim);
+	flex: none;
+}
+
+.compacted-history-messages {
+	padding: 8px;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	max-height: 480px;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	min-width: 0;
+	max-width: 100%;
+}
+
+.compacted-history-messages .msg-readonly {
+	opacity: 0.92;
+	position: relative;
+}
+
 /* -------------------------------------------------------------- empty state */
 
 /* Empty cards follow the chat column, including zoom and side-panel resizing. */
@@ -7849,8 +8530,9 @@ div.chead[role="button"]:focus-visible,
 /* ---- 提示词模板（空态推荐卡片） ---- */
 .empty-templates {
 	margin-top: 0;
-	width: 100%;
-	max-width: 720px;
+	/* 上限 720px，但**跟着消息列**而不是视口走：面板都展开时消息列可能
+	   比视口窄得多，写 92vw 会让空态比列宽 → 整条消息区出横向滚动条。 */
+	width: min(720px, 100%);
 	min-width: 0;
 }
 
@@ -8271,9 +8953,19 @@ div.chead[role="button"]:focus-visible,
 	font-size: 13px;
 }
 
+/* 「回到底部」浮标：底边**正中**（最初的位置），**贴底 4px**；只在目标药丸**真的浮在
+   消息区里**时才上抬一层让开。药丸浮起时（.goalbar-collapsed 常态：absolute +
+   bottom:100% + 底 margin 4px，自身 24px 高 → 占 4~28px），两者都在正中会叠 →
+   抬到 bottom:32px（28 + **4px 间隙**）。
+   药丸退回文档流时（.plan-board / .dialog-inline 面板在场，见下面两条 :has）它已经落在
+   消息区**外面**，浮标无需让位 —— 保持 bottom:4px 贴着最后一条消息。
+   早先这里只要 :has(.goalbar-collapsed) 就抬 52px，看板在场时按钮被凭空顶高一截、悬在
+   正文中间（用户实报「回到底部距离太远了」），故改成「浮起才抬」。
+   本块只调**间距**（贴底 16→4、让位 52→32，浮标与药丸之间恒定留 4px），按钮尺寸保持原样（12px 字 / 6/14 内边距 /
+   自身 28px 高）—— 要的是「离底近一点」，不是「把按钮做小」。 */
 .scroll-bottom {
 	position: absolute;
-	bottom: 16px;
+	bottom: 4px;
 	left: 50%;
 	z-index: 1;
 	transform: translateX(-50%);
@@ -8288,6 +8980,12 @@ div.chead[role="button"]:focus-visible,
 	font-size: 12px;
 	cursor: pointer;
 	box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+
+/* 药丸**浮在消息区内**时才上抬一层（居中同列，不横移）；药丸已退回文档流的两种
+   情形（任务看板 / 问卷·插件对话框在场）排除掉，否则按钮会无谓地离底 ~50px。 */
+.main:has(.goalbar-collapsed):not(:has(.plan-board)):not(:has(.dialog-inline)) .scroll-bottom {
+	bottom: 32px;
 }
 .scroll-bottom:hover {
 	color: var(--text);
@@ -8587,6 +9285,197 @@ div.chead[role="button"]:focus-visible,
 	}
 }
 
+/* ------------------------------------------------------------- plan board */
+
+/* 任务执行看板（Plan Mode，PlanBoard.tsx）：渲染在 .main 里、输入框上方。
+ * 与消息列 / 输入框 / goalbar 完全同宽齐平 —— 左右内缩走同一条列 token
+ * （--chat-inset，见 .main 的「中央列几何」），不再自写固定 margin（曾写死
+ * 16px：宽屏聊天列 / 窄屏下都比对话列宽一截，边缘对不齐）。 */
+.plan-board {
+	margin: 0 var(--chat-inset) 8px;
+	/* 列向 flex 子项：默认 min-width:auto 会被长英文单词顶宽，窄屏撑破容器 */
+	min-width: 0;
+	max-width: 100%;
+	/* 限高封顶靠下面的清单自身滚动（不砍头部）。列向 flex 子项给 min-height:0：
+	   否则清单的 max-height 到了 .main 算总高时仍可能被压回，整页跟着滚。 */
+	min-height: 0;
+}
+
+/* 摘要栏（标题 / 计数 / 当前步骤 chip / 操作按钮）—— 窄屏下唯一会打架的一行。
+ * 竖排病根：行内 flex 子项默认 min-width:auto 且允许收缩，「任务看板」「0/6 (0%)」
+ * 被 chip 挤到 1 字一行（CJK 逐字断）。口径：标题与计数钉死 nowrap + 不参与收缩，
+ * 可压缩的额度全留给 chip；chip 自己 flex-basis 120px，放不下整块换行（父级 wrap），
+ * 于是「宽屏同行、窄屏另起一行」，不再出现竖排。 */
+.plan-board-head {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 8px;
+	min-width: 0;
+	cursor: pointer;
+	user-select: none;
+}
+.plan-board-head-main {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 4px 8px;
+	flex: 1 1 auto;
+	min-width: 0;
+}
+.plan-board-icon {
+	color: var(--accent);
+	flex-shrink: 0;
+}
+.plan-board-title {
+	font-weight: 600;
+	color: var(--text);
+	white-space: nowrap;
+	flex: 0 0 auto;
+}
+.plan-board-count {
+	font-size: 12px;
+	color: var(--text-dim);
+	white-space: nowrap;
+	flex: 0 0 auto;
+	font-variant-numeric: tabular-nums;
+}
+.plan-board-active {
+	/* basis 180px：手机端同行只剩 ~150px，放不下就整块落到第二行拿满宽度
+	   （比硬挤成半个字宽的 chip 好看）；宽屏仍与标题同行。 */
+	flex: 1 1 180px;
+	min-width: 0;
+	max-width: 100%;
+	margin-left: 4px;
+	padding: 2px 8px;
+	border-radius: 4px;
+	font-size: 12px;
+	background: var(--accent-soft);
+	color: var(--accent);
+	/* 当前步骤标题是模型原文：单行收着（长路径/长 token 省略号，不撑破看板） */
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.plan-board-actions {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	flex: 0 0 auto;
+}
+/* 审查者模式标识（底栏）：开启时给出「活不在这里」的常驻提示 + 打开执行对话。 */
+.status-item.delegate-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	color: var(--accent);
+}
+.delegate-badge-open {
+	border: none;
+	background: none;
+	color: inherit;
+	cursor: pointer;
+	padding: 0 1px;
+	font-size: 11px;
+	line-height: 1;
+}
+.delegate-badge-open:hover {
+	text-decoration: underline;
+}
+
+.plan-board-iconbtn {
+	display: inline-flex;
+	padding: 3px;
+	border: none;
+	border-radius: 6px;
+	background: none;
+	color: var(--text-dim);
+	cursor: pointer;
+}
+.plan-board-iconbtn:hover {
+	color: var(--text);
+	background: var(--bg-elev2);
+}
+
+/* 计划看板的「开始实施」：计划模式下**唯一**的出口（闸门在服务端常亮）。
+   实心强调色 + 文案，和旁边两个纯图标钮拉开一个层级。 */
+.plan-board-implement {
+	display: inline-flex;
+	align-items: center;
+	padding: 3px 10px;
+	border: none;
+	border-radius: 6px;
+	background: var(--accent);
+	color: #fff;
+	font-size: 12px;
+	line-height: 1.5;
+	cursor: pointer;
+	white-space: nowrap;
+}
+.plan-board-implement:hover {
+	filter: brightness(1.08);
+}
+
+/* 净室执行按钮：开辟全新无探索噪音会话 */
+.plan-board-clean-handoff {
+	display: inline-flex;
+	align-items: center;
+	padding: 3px 8px;
+	border: 1px solid var(--accent);
+	border-radius: 6px;
+	background: var(--accent-soft);
+	color: var(--accent);
+	font-size: 12px;
+	line-height: 1.5;
+	cursor: pointer;
+	white-space: nowrap;
+}
+.plan-board-clean-handoff:hover {
+	background: var(--accent);
+	color: #fff;
+}
+
+.plan-board-add-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	padding: 6px 12px;
+	border: 1px dashed var(--border-subtle);
+	border-radius: 6px;
+	background: none;
+	color: var(--text-dim);
+	font-size: 12px;
+	cursor: pointer;
+	width: 100%;
+	transition: all 0.2s ease;
+}
+.plan-board-add-btn:hover {
+	border-color: var(--accent);
+	color: var(--accent);
+	background: var(--accent-soft);
+}
+
+/* 展开后的步骤清单：条目多时自己滚，别把整页（输入框 / 顶栏 / 状态栏）顶长。 */
+.plan-board-steps {
+	/* flex:1 + min-height:0：超出上限后在清单内滚动；上限按视口比例，桌面同样
+	   封顶（60vh），不然大屏上几十条也能顶到输入框外面。 */
+	flex: 1 1 auto;
+	min-height: 0;
+	max-height: min(60vh, 520px);
+	overflow-y: auto;
+	/* 滚到头别把手势继续传给外层消息区（否则与 .messages 抢滚动） */
+	overscroll-behavior: contain;
+	-webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 640px) {
+	.plan-board-steps {
+		/* 手机：摘要栏 + 清单合计仍需给消息区和输入框留出可用地板 */
+		max-height: 34vh;
+	}
+}
+
 /* ---------------------------------------------------------------- goalbar */
 
 /* DSH Agent 预设条（输入框上方，goalbar 同列宽；只在 dsh 引擎 + 名录可用时渲染） */
@@ -8626,7 +9515,10 @@ div.chead[role="button"]:focus-visible,
 .dd-preset-name {
 	display: flex;
 	align-items: center;
-	gap: 6px;
+	flex-wrap: wrap;
+	gap: 4px 6px;
+	font-weight: 600;
+	color: var(--text);
 }
 .dd-preset-tag {
 	font-size: 10px;
@@ -8644,8 +9536,24 @@ div.chead[role="button"]:focus-visible,
 .dd-preset-desc {
 	display: block;
 	font-size: 11px;
+	line-height: 1.55;
 	color: var(--text-dim);
 	white-space: normal;
+}
+/* 带说明的预设/权限项：上下堆叠（名称一行、说明另起一行占满宽），
+   不跟 .dd-item 的单行左右布局抢横向空间；✓ 改绝对定位到右上角，
+   免得把说明文字挤成窄条。 */
+.dd-item:has(.dd-preset-desc) {
+	flex-direction: column;
+	align-items: stretch;
+	gap: 3px;
+	position: relative;
+	padding-right: 28px;
+}
+.dd-item:has(.dd-preset-desc).active::after {
+	position: absolute;
+	right: 10px;
+	top: 9px;
 }
 
 /* 左栏会话行的预设徽标（口径同 .subagent-badge） */
@@ -8676,12 +9584,28 @@ div.chead[role="button"]:focus-visible,
 	flex-direction: column;
 	align-items: stretch;
 	gap: 6px;
+	/* 横向不许外溢：这一条是 flex 列容器，列方向子项默认 min-height:auto，
+	   而**行方向**要看子项自己的 min-width —— 这里先把容器钉死在列宽内，
+	   里面每个长文本再各自负责断行/省略（见下方 .goalbar-* 各条）。
+	   禁止 overflow:hidden/clip：目标条展开态内部包含向上的模型与历史 Dropdown
+	   菜单（桌面端为 absolute 向上浮层），加 overflow 裁剪会导致超出目标条上边界的
+	   菜单被硬截断看不见（同 .goalbar-slot 的 static 流口径）。 */
+	min-width: 0;
+	max-width: 100%;
 }
 
 .goalbar-row {
 	display: flex;
 	align-items: center;
+	/* 窄屏（手机）一行塞不下「图标 + 输入框 + 开始 + AI 提炼 + 锁 + 收起」：
+	   整组按钮换行到第二行（右对齐），输入框独占第一行拿满宽度 —— 否则
+	   输入框被挤成几十 px，控件挤成一排谁都点不准。宽屏放得下，不换行。 */
+	flex-wrap: wrap;
+	justify-content: flex-end;
 	gap: 8px;
+	/* 行本身可缩：里面的长元素（输入框、插件条目）才不会把它顶宽。 */
+	min-width: 0;
+	max-width: 100%;
 }
 
 .goalbar-icon {
@@ -8704,7 +9628,8 @@ div.chead[role="button"]:focus-visible,
 }
 
 .goalbar-input {
-	flex: 1;
+	/* basis 给 160px（不是 0）：窄屏时它是「先占一行、按钮换行」的依据 */
+	flex: 1 1 160px;
 	min-width: 0;
 	background: transparent;
 	border: none;
@@ -8745,6 +9670,39 @@ div.chead[role="button"]:focus-visible,
 	background: var(--amber);
 }
 
+/* 目标条那一排动作按钮（提炼 / 计划）：口径统一为「点一下直接发出去」，
+   彼此只靠颜色区分职责，都不是开关。`plan` 用强调色（与「发送」同族但略浅，
+   免得两个实心块抢焦点）；空输入时 disabled（.goalbar-btn:disabled 已处理）。 */
+.goalbar-btn.action.plan {
+	background: var(--accent);
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+
+/* 目标模式 2.0：执行方式开关（⚡ 直奔 / 🧭 委托）——次要控件样式，
+ * 委托态用 accent-soft 底色提示当前不是默认行为。 */
+.goalbar-btn.mode {
+	background: var(--bg-elev2);
+	color: var(--text-dim);
+	border: 1px solid var(--border);
+}
+
+.goalbar-btn.mode.active {
+	background: var(--accent-soft);
+	color: var(--text);
+	border-color: var(--accent);
+}
+
+/* 目标模式 2.0 加固：旧后端（进程未重启）的显式告警 —— 不让混合态静默骗人。 */
+.goalbar-stale {
+	font-size: 11px;
+	line-height: 1.4;
+	color: var(--amber);
+	min-width: 0;
+	max-width: 100%;
+	overflow-wrap: anywhere;
+	word-break: break-word;
+}
+
 .goalbar-active.wizard {
 	border-color: var(--amber);
 }
@@ -8773,12 +9731,20 @@ div.chead[role="button"]:focus-visible,
 	background: var(--bg-elev2);
 }
 
+/* 偏好行（执行方式 / 审查模型 / 最大轮数 / 锁定说明）：同样允许整块换行。
+   不换行时子项会被压到 min-content —— CJK 标签（"最大轮数"）逐字断成竖排。 */
 .goalbar-opts {
 	display: flex;
 	align-items: center;
-	gap: 14px;
+	flex-wrap: wrap;
+	gap: 6px 14px;
+	min-width: 0;
 	font-size: 12px;
 	color: var(--text-dim);
+}
+/* 插件成组的槽位条目：作为一个整体换行，不参与逐字压缩 */
+.goalbar-opts > .slot-toolbar {
+	flex: 0 0 auto;
 }
 
 /* DSH：无独立审查模型说明（P1-11） */
@@ -8787,13 +9753,44 @@ div.chead[role="button"]:focus-visible,
 	color: var(--text-dim);
 	font-size: 12px;
 }
+
+/* 偏好行里的两个模型下拉（审查/执行模型）——**整块不参与收缩**。
+   病根：`.dropdown`（inline-flex）在这条 flex 行里默认可收缩，而里面的
+   `.chip` 是 nowrap，于是「审查模型: X」被压成一个只剩箭头的空盒子 ——
+   审查/执行各选了哪个模型完全看不见（手机宽度必现）。口径与 `.goalbar-round`
+   同一套：钉死不收缩，放不下就整块换到下一行；仍超宽时由 .goalbar-opt 的
+   省略号收着（title 里有全名）。 */
+.goalbar-opts > .dropdown {
+	flex: 0 0 auto;
+	min-width: 0;
+	max-width: 100%;
+}
+/* 触发器本身也要能收：.chip 撑满 .dropdown，单块超宽时不外溢。
+   text-align: left：button 的 UA 默认是 center，标签一旦被拉满宽度就会“居中”。 */
+.goalbar-opts > .dropdown > .chip {
+	min-width: 0;
+	max-width: 100%;
+	text-align: left;
+}
 .goalbar-opt {
 	display: inline-flex;
 	align-items: center;
+	/* 标签与值之间那一格空白：不能靠 JSX 里的尾随空格（行尾空白不渲染） */
+	column-gap: 4px;
 	cursor: pointer;
 	padding: 3px 6px;
 	border-radius: 6px;
 	line-height: 1.3;
+	min-width: 0;
+	max-width: 100%;
+	/* 审查/执行模型名是无空格长 token（provider/model-2026-xx）：单行省略号，不外溢 */
+	overflow: hidden;
+}
+
+/* 标签（"审查模型:"）永不压缩：可压的额度全留给值 */
+.goalbar-opt-label {
+	flex: 0 0 auto;
+	white-space: nowrap;
 }
 
 .goalbar-opt:hover {
@@ -8803,8 +9800,13 @@ div.chead[role="button"]:focus-visible,
 .goalbar-opt b {
 	color: var(--text);
 	font-weight: 600;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
+/* 「最大轮数」标签 + 数字框：标签永不逐字断（钉 nowrap），整组不参与收缩 */
 .goalbar-round {
 	display: inline-flex;
 	align-items: center;
@@ -8812,6 +9814,20 @@ div.chead[role="button"]:focus-visible,
 	color: var(--text-dim);
 	font-size: 12px;
 	line-height: 1.3;
+	white-space: nowrap;
+	/* 可缩：长文案靠标签省略号收（input 固定宽，不参与压缩）。 */
+	min-width: 0;
+	max-width: 100%;
+	overflow: hidden;
+}
+
+/* 轮数标签：可压的额度全留给 input，标签自己省略 */
+.goalbar-round > span {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	flex: 0 1 auto;
 }
 
 .goalbar-round input {
@@ -8839,6 +9855,13 @@ div.chead[role="button"]:focus-visible,
 	align-items: center;
 	line-height: 1.3;
 	color: var(--text-dim);
+	min-width: 0;
+	max-width: 100%;
+	/* 长文案不得外溢：行级 flex 子项默认 min-width:auto 不肯缩到内容宽度以下，
+	   一个长句就会把整条目标条顶宽、在消息区引出横向滚动条（AGENTS §9 病根②）。 */
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
 /* Active (goal set) state */
@@ -8856,6 +9879,11 @@ div.chead[role="button"]:focus-visible,
 	align-items: center;
 	gap: 10px;
 	font-size: 13px;
+	/* 活跃行：目标文本 + 状态胶囊 + 状态文案 + 按钮挤在一行。行本身可缩 + 必要时
+	   换行；里面的长文本各自负责收（text 2 行夹、detail/chip 省略号）。 */
+	min-width: 0;
+	max-width: 100%;
+	flex-wrap: wrap;
 }
 
 .goalbar-text {
@@ -8876,6 +9904,10 @@ div.chead[role="button"]:focus-visible,
 	background: var(--bg-elev2);
 	color: var(--text-dim);
 	white-space: nowrap;
+	/* 轮次/判决胶囊也不许外溢（「第 12/50 轮」这类文案 + 窄屏）。 */
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 
 .goalbar-chip.reviewing {
@@ -8890,6 +9922,11 @@ div.chead[role="button"]:focus-visible,
 
 .goalbar-chip.fail {
 	background: var(--red);
+	color: #fff;
+}
+
+.goalbar-chip.blocked {
+	background: var(--amber);
 	color: #fff;
 }
 
@@ -8919,19 +9956,104 @@ div.chead[role="button"]:focus-visible,
 	cursor: default;
 }
 
+/* 目标模式 2.0：循环进行中时这颗按钮从「取消」变成「■ 停止目标」（可点，不是禁用态）。 */
+.goalbar-x.stopping {
+	color: var(--red);
+}
+
+.goalbar-x.stopping:hover {
+	background: var(--red-soft);
+	border-radius: 6px;
+}
+
 .goalbar-x:hover:not(:disabled) {
 	color: var(--red);
 	background: var(--bg-elev2);
 }
 
-.goalbar-collapsed {
-	/* No border/panel — a tiny chip that doesn't dominate the bottom strip. */
-	border: none;
-	background: transparent;
-	padding: 0;
-	align-items: center;
+/* 目标条宿主槽（App.tsx 里包住 GoalBar 的那一层）。常态不占位：折叠态的子元素
+   脱离文档流，槽高为 0，消息区一路通到输入区。
+   只在**折叠态**才建立定位上下文（`:has(.goalbar-collapsed)`）：展开态必须保持
+   static —— 里面的 `.dropdown` 在窄屏是 fixed 底抽屉，给它套一个定位祖先会把
+   底抽屉的包含块改成这个槽（直接打歪），与 .messages-wrap 的 container-type
+   是同一类包含块坑。 */
+.goalbar-slot {
+	flex: none;
+	min-height: 0;
 }
 
+.goalbar-slot:has(.goalbar-collapsed) {
+	position: relative;
+}
+
+/* 目标条折叠态：只有一枚小药丸，**不是一条面板**。
+   刻意不带 `.goalbar` 类（那套边框/底色/圆角/内边距在收起时全是多余），而且
+   **脱离文档流**：position:absolute + bottom:100%（浮在输入区上沿），与「回到底部」
+   同一路数。收起时消息区直接通到输入框，底缘不再多出一条 30px 的带子把最后一条
+   消息 / 半行正文拦腰切断（用户实报「折叠时一整行遮挡底部消息」「下面一整条不透明」）。
+   药丸整行水平居中（0.96.x 及更早的位置）。 */
+.goalbar-collapsed {
+	position: absolute;
+	left: 0;
+	right: 0;
+	/* 100% = 槽顶（槽高 0 → 就是消息区底缘 / 输入区上沿），抬到它上面去 */
+	bottom: 100%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	margin: 0 var(--chat-inset) 4px;
+	min-width: 0;
+	max-width: 100%;
+	/* 插件可能往 pill 那一行贡献条目；不让它把整行顶宽（否则又是横向溢出）。 */
+	overflow: hidden;
+	/* 整行通栏不能吃事件：空白处照常滚动/选中正文，只有药丸与插件条目本身可点。 */
+	pointer-events: none;
+}
+
+.goalbar-collapsed > * {
+	pointer-events: auto;
+}
+
+/* 与「回到底部」的关系：浮起态两者都在正中，浮标上抬 24px 让开（见上面
+   `.main:has(.goalbar-collapsed):not(...) .scroll-bottom`）；退回文档流时药丸在消息区
+   之外，浮标原地贴底（4px）即可，两者间距恒为 4px。窄屏（≤380px）浮标退成纯图标，
+   见 .scroll-bottom-label。 */
+
+/* 问卷 / 插件对话框（.dialog-inline）与任务看板（.plan-board）是插在槽位与输入区
+   之间的面板：药丸浮到它们顶边会压住面板上边框，这两种情况退回文档流（此时消息区
+   本来就被面板压得很矮，不差这 30px）。 */
+.main:has(.dialog-inline) .goalbar-collapsed {
+	position: static;
+	margin: 0 var(--chat-inset) 6px;
+	pointer-events: auto;
+}
+
+.main:has(.plan-board) .goalbar-collapsed {
+	position: static;
+	margin: 0 var(--chat-inset) 6px;
+	pointer-events: auto;
+}
+
+/* 兜底：折叠态一旦有人把 .goalbar 面板类带回来（插件塞的、浏览器里还活着的
+   老 bundle 缓存页），这一行就又变回一条通栏带子横在最后一条消息上；主题给
+   .goalbar 写的底色/上边框还带 !important，只能同权重把面板皮抹掉 ——
+   折叠态只准剩药丸。 */
+.goalbar.goalbar-collapsed {
+	border: 0 !important;
+	background: none !important;
+	box-shadow: none !important;
+	padding: 0 !important;
+	/* 主题/插件可能用回贴（backdrop-filter）、圆角、阴影边做任何一丁点绘制；
+	   折叠态的契约是「整行零绘制，只留中间那颗药丸」，一并粘掉。 */
+	backdrop-filter: none !important;
+	-webkit-backdrop-filter: none !important;
+	border-radius: 0 !important;
+}
+
+/* 收起态的小药丸：尺寸保持原样（12px 字 / 4/10 内边距 / gap 7 / feather 图标默认
+   尺寸），只把**贴边间距**从 8px 收到 4px（改 .goalbar-collapsed 的底 margin）。
+   手机上它是常驻件，贴得越近越不占地方。 */
 .goalbar-hint {
 	border: none;
 	color: var(--text-dim);
@@ -8942,6 +10064,9 @@ div.chead[role="button"]:focus-visible,
 	display: inline-flex;
 	align-items: center;
 	gap: 7px;
+	/* 收起态的小药丸：也是 flex 行，长文案靠省略号收（下面 span 收）。 */
+	min-width: 0;
+	max-width: 100%;
 	border: 1px dashed var(--border);
 	background: var(--chip-bg, var(--bg-elev2));
 	transition:
@@ -8961,6 +10086,9 @@ div.chead[role="button"]:focus-visible,
 
 .goalbar-hint span {
 	white-space: nowrap;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 
 /* The review-result card inserted into the message flow. */
@@ -8970,6 +10098,152 @@ div.chead[role="button"]:focus-visible,
 
 .msg-goal-review.msg-custom {
 	background: transparent;
+}
+
+/* ---- 手机宽度下的目标条（≤768px）：两行工整网格 ----
+   原来是一行 flex 硬挤：输入框被“开始”抢掉大半、提炼按钮孤零零吊在第二行右端、
+   两个模型下拉塌成空盒子、锁定说明独占一行 —— 信息既挤没了又参差不齐。
+   口径与 `.plan-board-head` 同一套（能整块换行就整块换行，额度给省略号）：
+     行 1  🎯 + 目标输入占满整行（basis = calc(100% - 图标)，必然把按钮挤到下一行）
+     行 2  主/次按钮平分整行（拇指可点），两个图标按钮钉右侧
+     行 3  审查模型 / 执行模型 / 最大轮数 三个字段并排（值省略号，title 给全名）
+     行 4  锁定说明（整行，读得全）
+   用媒体查询而不是 container query：.dropdown 的菜单在手机上是
+   position:fixed 底抽屉，而 inline-size 容器查询会给容器加 layout containment
+   （fixed 定位改为以容器为包含块）——直接把底抽屉打歪。 */
+@media (max-width: 768px) {
+	/* 整块收窄：内缩/行距/字号都往下压一档（手机上目标条是常驻底栏，
+	   高度直接吃消息区与输入框的地板）。 */
+	.goalbar {
+		gap: 4px;
+		padding: 4px 6px;
+	}
+	/* 行 1：输入框与 🎯 图标同行拿满宽度。
+	   basis 取 calc(100% - 32px)（图标 15px 字号 + 8px gap）：正好一行装下，
+	   后面的按钮必然换行；直接写 100% 会把图标顶到上一行、留一个孤零零的行首。 */
+	.goalbar-input {
+		flex: 1 1 calc(100% - 30px);
+		font-size: 12.5px;
+		line-height: 1.25;
+		padding: 1px 2px;
+	}
+	/* 行 2：开始 / AI 提炼 平分剩余宽度（basis 取内容宽，放得下就不换行）。 */
+	.goalbar-row {
+		gap: 4px;
+	}
+	.goalbar-row > .goalbar-btn {
+		flex: 1 1 auto;
+	}
+	/* 偏好行：两行网格，列间距收紧。 */
+	.goalbar-opts {
+		gap: 4px 6px;
+	}
+	/* 行 3：两个模型下拉 + 最大轮数并排成一行（三只同款方框）。
+	   basis 用 0（不是 100px）：不管值长短（没选模型时只有“使用主模型”四个字），
+	   两只是否分光剩余空间，整行永远填满，右边不会空出一块。 */
+	.goalbar-opts > .dropdown {
+		flex: 1 1 0;
+	}
+	.goalbar-opts > .dropdown > .chip {
+		padding: 2px 6px;
+		/* 与 .goalbar-round 同高：三个字段的标签才在同一水平线上
+		   （33 = 标签 12 + 值 15 + 内缩 4 + 边框 2） */
+		min-height: 33px;
+	}
+	.goalbar-opt {
+		flex-direction: column;
+		/* 拉伸（不是 flex-start）：列向 flex 里 flex-start 会让值按 max-content 撑开，
+		   再被 .goalbar-opt 的 overflow:hidden 硬切（没省略号、半个字）。 */
+		align-items: stretch;
+		justify-content: center;
+		gap: 0;
+		/* 内缩交给 .chip（这里再留 3px 就是双份，把字段撑高 6px） */
+		padding: 0;
+		line-height: 1.2;
+	}
+	.goalbar-opt-label {
+		font-size: 10px;
+		color: var(--text-faint);
+	}
+	/* 轮数：与两个下拉同款的方框（标签 10px 淡色 + 数字框），数字框自己不再描边，
+	   免得“框里又一层框”。68px - 8px 内缩 = 60px，刚够英文标签 "Max rounds" 排一行
+	   （更窄会折成 "Max" / "rounds" 两行）；框占固定位，剩下的全给两个下拉。 */
+	.goalbar-round {
+		flex: 0 0 68px;
+		flex-direction: column;
+		align-items: stretch;
+		justify-content: center;
+		gap: 0;
+		width: 68px;
+		height: 33px;
+		padding: 2px 4px;
+		border: 1px solid var(--border);
+		border-radius: 9px;
+		background: var(--chip-bg, var(--bg-elev2));
+		/* 基础样式钉了 nowrap（防 CJK 逐字断），字段化后不再需要 */
+		white-space: normal;
+	}
+	.goalbar-round:focus-within {
+		border-color: var(--accent);
+	}
+	.goalbar-round > span {
+		font-size: 10px;
+		line-height: 1.2;
+		color: var(--text-faint);
+		text-align: center;
+	}
+	.goalbar-round input {
+		width: 100%;
+		min-width: 0;
+		height: 19px;
+		padding: 0;
+		/* 框已经在了：数字框自身去边框、去底色 */
+		background: transparent;
+		border: none;
+	}
+	/* 行 4：锁定说明整块换行（长短两种语言都读得全）。 */
+	.goalbar-lock-hint {
+		flex: 1 1 100%;
+		font-size: 11px;
+		line-height: 1.2;
+	}
+	/* 活动态（目标已设）：标题行（图标 + 目标文本 + ✕）占第一行，
+	   状态 chip 与审查说明并排第二行 —— 原来三者硬挤一行，末尾全被截掉。
+	   order 不可省：flex 换行只能按序放，✕ 在 DOM 里排在 chip 后面，chip 换行时
+	   会把 ✕ 一起带下去（第一行右侧反而空出来）。chip/detail 都不是可聚焦控件，
+	   视觉顺序变了不影响 Tab 序。 */
+	.goalbar-active-row {
+		flex-wrap: wrap;
+		row-gap: 6px;
+	}
+	.goalbar-active-row .goalbar-icon {
+		order: 0;
+	}
+	.goalbar-active-row .goalbar-text {
+		order: 1;
+		/* basis 与 max-width 同为 100% - 84px（图标 19 + ✕ 18 + 三个 10px gap +
+		   余量）：文本只 grow 到这个上限，第一行右端给 ✕ 留出位置 —— 不加
+		   max-width 的话文本吃满整行，✕ 挤到第二行末尾。手机多给一行：
+		   目标原文是这里唯一的信息源。 */
+		flex: 1 1 calc(100% - 84px);
+		max-width: calc(100% - 84px);
+		-webkit-line-clamp: 3;
+	}
+	.goalbar-active-row .goalbar-x {
+		order: 2;
+	}
+	.goalbar-active-row .goalbar-chip {
+		order: 3;
+	}
+	.goalbar-active-row .goalbar-detail {
+		order: 4;
+		flex: 1 1 60%;
+		max-width: 100%;
+	}
+	.goalbar-stale {
+		order: 5;
+		flex: 1 1 100%;
+	}
 }
 
 /* ---------------------------------------------------------------- inputbar */
@@ -9057,7 +10331,7 @@ div.chead[role="button"]:focus-visible,
 .composer-tools-left {
 	display: flex;
 	align-items: center;
-	gap: 4px;
+	gap: 6px;
 	min-width: 0;
 	flex-wrap: wrap;
 }
@@ -9088,10 +10362,13 @@ div.chead[role="button"]:focus-visible,
 }
 /* 工具条里的模型/思考 chip 跟着收紧（只作用于输入框内，别处 chip 不动）。 */
 .composer-tools .chip {
-	padding: 3px 8px;
-	font-size: 12px;
-	gap: 4px;
+	padding: 4px 10px;
+	font-size: 13px;
+	gap: 6px;
 	border-radius: 8px;
+}
+.composer-tools .chip-sub {
+	font-size: 12px;
 }
 .composer-tools .chip > span.chip-model,
 .composer-tools .chip > span.chip-sub {
@@ -9212,6 +10489,11 @@ div.chead[role="button"]:focus-visible,
 	background: var(--accent-soft);
 	color: var(--accent);
 }
+
+/* 计划模式开关：已从「开关」改成**一次性动作按钮**（GoalBar 的 host:goal-plan，
+   .goalbar-btn.action.plan）—— 点一下 = 开服务端只规划闸门 + 把目标输入直接发出去。
+   因此这一带不再有 .active / aria-pressed 常亮态，也不需要开启态小圆点；
+   退出计划的唯一出口是计划看板里的「开始实施」（PlanBoard）。 */
 
 /* Send: solid blue circle with a white up-arrow. */
 .inputbox .btn.send {
@@ -9634,6 +10916,20 @@ div.chead[role="button"]:focus-visible,
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
+}
+.dialog-custom-row {
+	display: flex;
+	gap: 8px;
+	margin-top: 4px;
+}
+.dialog-custom-row .dialog-input {
+	flex: 1;
+	font-size: 13px;
+	padding: 7px 10px;
+}
+.dialog-custom-row .btn {
+	padding: 6px 14px;
+	font-size: 13px;
 }
 
 .dialog-option {
@@ -10201,6 +11497,57 @@ div.chead[role="button"]:focus-visible,
 .tpl-modal-backdrop {
 	z-index: 301;
 }
+/* 插件能力授权 / 目录访问顶层浮层：盖在设置等弹窗之上（z-index: 350） */
+.perm-modal-backdrop {
+	z-index: 350;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 24px;
+}
+.perm-dialog-card {
+	width: min(520px, calc(100vw - 32px));
+	max-width: 520px;
+	margin: 0;
+	background: var(--bg-elev2);
+	border: 1px solid var(--accent);
+	border-left: 4px solid var(--accent);
+	box-shadow: 0 24px 64px rgba(0, 0, 0, 0.65);
+}
+.active-plugin-jobs-bar {
+	position: fixed;
+	top: 52px;
+	right: 16px;
+	z-index: 250;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 14px;
+	background: var(--bg-elev2);
+	border: 1px solid var(--accent);
+	border-radius: 8px;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+	cursor: pointer;
+	font-size: 13px;
+	color: var(--text);
+	animation: dialog-slide-up 0.18s ease-out;
+}
+.active-plugin-jobs-bar:hover {
+	background: var(--bg-elev);
+	border-color: var(--link);
+}
+.active-plugin-jobs-title {
+	font-weight: 500;
+	white-space: nowrap;
+}
+.active-plugin-jobs-line {
+	color: var(--text-dim);
+	font-size: 12px;
+	max-width: 260px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
 .tpl-modal {
 	max-width: 640px;
 	height: min(calc(82vh / var(--ui-zoom)), 720px);
@@ -10285,6 +11632,41 @@ div.chead[role="button"]:focus-visible,
 	border: 0;
 	border-top: 1px solid var(--border-soft);
 	margin: 8px 0;
+}
+
+/* 文件类型插件的查看器容器：插件只管理 host 的子树，宿主负责弹窗尺寸与滚动。 */
+.modal.plugin-file-preview {
+	width: min(1100px, calc(100vw - 32px));
+	height: min(780px, calc(100vh - 32px));
+	max-height: 92vh;
+	padding: 0;
+	gap: 0;
+	overflow: hidden;
+}
+.plugin-file-preview-body {
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	height: 100%;
+	padding: 0 20px 20px;
+}
+.plugin-file-preview-file {
+	flex: 0 0 auto;
+	padding: 0 0 8px;
+	color: var(--muted);
+	font-size: 12px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.plugin-file-preview-host {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow: auto;
+}
+.plugin-file-preview-error {
+	padding: 12px;
+	color: var(--red);
 }
 .model-modal > .modal-close {
 	flex-shrink: 0;
@@ -10521,6 +11903,7 @@ div.chead[role="button"]:focus-visible,
 	position: relative;
 	padding: 10px 2px;
 	min-height: 40px;
+	flex-shrink: 0;
 }
 .settings-modal .set-catalog-row + .set-catalog-row {
 	margin-top: 0;
@@ -11022,7 +12405,14 @@ button.source-default-toggle {
 	background: var(--bg-elev2);
 }
 
-/* 查看当前完整系统提示词（只读） */
+/* 查看当前完整系统提示词与工具 schema（只读） */
+.set-prompt-view-triggers {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 12px;
+	margin-bottom: 8px;
+}
 .set-view-prompt-btn {
 	align-self: flex-start;
 	background: none;
@@ -11032,8 +12422,19 @@ button.source-default-toggle {
 	padding: 2px 0;
 	cursor: pointer;
 }
-.set-view-prompt-btn:hover {
+.set-view-prompt-btn:hover > span:first-child {
 	text-decoration: underline;
+}
+/* 提示词 / 工具 schema token 占用估算（预览按钮内，弱化展示） */
+.set-prompt-token-est {
+	color: var(--text-dim);
+	margin-left: 6px;
+}
+.set-prompt-total-est {
+	font-size: 12px;
+	color: var(--text-dim);
+	padding-left: 4px;
+	border-left: 1px solid var(--border);
 }
 .set-prompt-view {
 	display: flex;
@@ -11229,6 +12630,9 @@ button.source-default-toggle {
 	font-size: 12px;
 	line-height: 1.55;
 	white-space: pre-line;
+	/* 提示气泡里常插文件名 / 命令（无空格长 token）→ 允许断行，
+	   否则 max-width 到了也不折行，直接顶出气泡。 */
+	overflow-wrap: anywhere;
 	text-align: left;
 	z-index: 60;
 	pointer-events: none;
@@ -11307,6 +12711,14 @@ button.source-default-toggle {
 	max-height: none;
 	overflow-y: visible;
 }
+/* 设置弹窗内全部解除 260px 限高：modal-body 本身就是滚动容器（overflow-y:auto），
+   卡片内再套一层限高内滚会双重滚动——列表末行被裁、卡片下方留大片空白
+   （快捷短语 / 技能 / 目标审查三区实测）。这里整体沿用 .set-list-flat 的
+   「高度交给外层统一滚」约定，只作用于设置弹窗，不影响 dialog-inline 等其他用家。 */
+.settings-modal .set-list {
+	max-height: none;
+	overflow-y: visible;
+}
 
 .set-row {
 	display: flex;
@@ -11316,6 +12728,7 @@ button.source-default-toggle {
 	background: var(--bg-elev2);
 	border: 1px solid var(--border-soft);
 	border-radius: 8px;
+	flex-shrink: 0;
 }
 
 .set-row-info {
@@ -11362,6 +12775,17 @@ button.source-default-toggle {
 	color: var(--red);
 	border-color: var(--red);
 	font-weight: 600;
+}
+.set-uninstall.accent {
+	color: var(--accent);
+	border-color: var(--accent);
+	background: rgb(139 92 246 / 0.1);
+	font-weight: 600;
+}
+.set-uninstall.accent:hover {
+	color: var(--accent);
+	border-color: var(--accent);
+	filter: brightness(1.1);
 }
 
 /* Plugin diagnostics (manifest/ui parse drops + runtime warnings, read-only) */
@@ -11633,6 +13057,78 @@ button.source-default-toggle {
 	white-space: nowrap;
 	max-width: 100%;
 }
+/* 「安装前先读 spec」的一句话提示（DSH P0-3）：输入框下就地给出形状/已装/远端结论。 */
+/* 布局诊断横幅（P0-1）：列出「没出现在界面上」的条目与原因，默认折叠。 */
+.set-ui-diag {
+	margin: 4px 0 8px;
+	padding: 8px 10px;
+	border-radius: 8px;
+	border: 1px solid var(--border, rgb(255 255 255 / 0.12));
+	background: rgb(255 255 255 / 0.03);
+	font-size: 12px;
+}
+.set-ui-diag > summary {
+	cursor: pointer;
+	color: var(--amber);
+	font-weight: 600;
+}
+.set-ui-diag-list {
+	margin: 6px 0 0;
+	padding-left: 18px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+.set-ui-diag-item {
+	line-height: 1.5;
+	overflow-wrap: anywhere;
+	color: var(--text-dim, #b9bcc4);
+}
+.set-ui-diag-item.error {
+	color: var(--red);
+}
+.set-ui-diag-item code {
+	margin-right: 6px;
+	padding: 0 4px;
+	border-radius: 4px;
+	background: rgb(0 0 0 / 0.25);
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 11px;
+}
+.set-ui-diag-hint {
+	margin-top: 6px;
+	opacity: 0.75;
+	line-height: 1.5;
+}
+/* 单个 slot 条目崩溃时的就地占位（P0-1：坏条目只丢自己，不炸整片）。 */
+.slot-error {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 2px 6px;
+	border-radius: 6px;
+	border: 1px dashed var(--red, #e5534b);
+	background: transparent;
+	color: var(--red, #e5534b);
+	font: inherit;
+	cursor: pointer;
+	opacity: 0.85;
+}
+
+.set-catalog-hint {
+	margin: -2px 0 4px;
+	font-size: 12px;
+	line-height: 1.5;
+	color: var(--text-dim, #b9bcc4);
+	overflow-wrap: anywhere;
+}
+.set-catalog-hint.warn {
+	color: var(--red);
+}
+.set-catalog-hint.ok {
+	color: var(--green);
+}
+
 .set-catalog-job-out {
 	flex: 1 0 100%;
 	margin: 4px 0 0;
@@ -11738,6 +13234,18 @@ button.source-default-toggle {
 	border-radius: 999px;
 	padding: 1px 8px;
 }
+.set-catalog-update-badge {
+	font-size: 11px;
+	font-weight: 500;
+	color: var(--amber);
+	border: 1px solid rgb(251 191 36 / 0.45);
+	background: rgb(251 191 36 / 0.12);
+	border-radius: 999px;
+	padding: 1px 8px;
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
 .set-catalog-custom {
 	font-size: 11px;
 	font-weight: 500;
@@ -11832,6 +13340,64 @@ button.source-default-toggle {
 	color: var(--accent);
 	border-color: var(--accent);
 	background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* ---- 审批规则（设置面板） ------------------------------------------- */
+.rule-editor {
+	border: 1px solid var(--border-soft);
+	border-radius: 10px;
+	padding: 12px;
+	margin-bottom: 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	background: var(--bg-elev);
+}
+.rule-badge {
+	display: inline-block;
+	padding: 1px 7px;
+	border-radius: 999px;
+	font-size: 11px;
+	font-weight: 500;
+	margin-right: 6px;
+	vertical-align: 1px;
+}
+.rule-badge.ask {
+	color: var(--amber);
+	border: 1px solid color-mix(in srgb, var(--amber) 40%, transparent);
+	background: color-mix(in srgb, var(--amber) 12%, transparent);
+}
+.rule-badge.deny {
+	color: var(--red);
+	border: 1px solid color-mix(in srgb, var(--red) 40%, transparent);
+	background: color-mix(in srgb, var(--red) 12%, transparent);
+}
+.rule-badge.allow {
+	color: var(--green);
+	border: 1px solid color-mix(in srgb, var(--green) 40%, transparent);
+	background: color-mix(in srgb, var(--green) 12%, transparent);
+}
+.rule-meta-code {
+	font-family: var(--mono);
+	font-size: 11px;
+	padding: 2px 6px;
+	border-radius: 4px;
+	background: var(--bg-elev2);
+	color: var(--text-dim);
+}
+.rule-pattern-code {
+	font-family: var(--mono);
+	font-size: 11px;
+	padding: 2px 6px;
+	border-radius: 4px;
+	background: var(--bg-elev2);
+	color: var(--text-dim);
+	word-break: break-all;
+	display: inline-block;
+	max-width: 100%;
+}
+.rule-row-disabled {
+	opacity: 0.55;
 }
 
 .set-row-actions {
@@ -12580,6 +14146,26 @@ button.source-default-toggle {
 	text-align: right;
 }
 
+/* TTS block (Settings → Sound & Voice) reuses the sound-menu rows. */
+.tts-unavailable {
+	padding: 6px 10px 2px;
+	color: var(--text-faint);
+}
+.tts-voice-select {
+	flex: 1;
+	max-width: 220px;
+	font-size: 12px;
+	padding: 3px 6px;
+}
+.tts-preview {
+	margin-left: auto;
+	padding: 4px 12px;
+}
+.tts-preview:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+
 /* ------------------------------------------------------------ file preview modal */
 
 .fp-overlay {
@@ -12626,7 +14212,7 @@ button.source-default-toggle {
 .fp-head {
 	display: flex;
 	align-items: center;
-	gap: 10px;
+	gap: 8px;
 	padding: 10px 14px;
 	border-bottom: 1px solid var(--border-soft);
 	flex-shrink: 0;
@@ -12639,6 +14225,10 @@ button.source-default-toggle {
 	font-weight: 700;
 	color: var(--text);
 	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	min-width: 0;
+	flex-shrink: 1;
 }
 
 .fp-path {
@@ -12663,7 +14253,15 @@ button.source-default-toggle {
 	display: flex;
 	align-items: center;
 	gap: 6px;
-	flex-shrink: 0;
+	min-width: 0;
+	flex-shrink: 1;
+	overflow-x: auto;
+	overflow-y: hidden;
+	scrollbar-width: none;
+	margin-left: auto;
+}
+.fp-head-actions::-webkit-scrollbar {
+	display: none;
 }
 
 /* 文件预览工具条（file.preview.toolbar 槽位）：跟在关闭按钮后，无条目时不渲染。 */
@@ -12684,11 +14282,6 @@ button.source-default-toggle {
 	background: var(--bg-elev);
 	color: var(--text-dim);
 	cursor: pointer;
-}
-.fp-attach.inline:hover {
-	background: var(--accent);
-	border-color: var(--accent);
-	color: #fff;
 }
 .fp-attach.ref:hover {
 	background: var(--amber);
@@ -12773,10 +14366,11 @@ button.source-default-toggle {
 	height: 26px;
 	border: 1px solid var(--border);
 	border-radius: 6px;
-	background: transparent;
+	background: var(--bg-elev);
 	color: var(--text-dim);
 	cursor: pointer;
 	margin-left: 2px;
+	flex-shrink: 0;
 }
 .fp-close:hover {
 	color: var(--red);
@@ -13057,6 +14651,36 @@ button.source-default-toggle {
 .fp-markdown tbody tr:hover {
 	background: rgba(139, 92, 246, 0.07);
 }
+/* Office 预览（docx/xlsx 转 Markdown 下发）：表格是主体，紧凑排布。
+ * Markdown 会在每个格子里包一层 <p>（自带 0.8em 边距），不杀掉行高直接翻倍。 */
+.fp-office h2 {
+	font-size: 15px;
+	margin: 0.4em 0 0.6em;
+}
+.fp-office table {
+	margin: 0.6em 0 1em;
+	overflow-x: scroll;
+}
+.fp-office th,
+.fp-office td {
+	min-width: 48px;
+	padding: 4px 10px;
+	line-height: 1.5;
+}
+.fp-office th p,
+.fp-office td p {
+	margin: 0;
+	line-height: inherit;
+}
+/* 全空格子也撑一行高度，避免塌成细条 */
+.fp-office td:empty::after {
+	content: "\00a0";
+}
+.fp-office thead th {
+	position: sticky;
+	top: 0;
+	background: var(--bg-elev, #16161d);
+}
 .fp-markdown code {
 	font-family: var(--mono);
 	font-size: 0.88em;
@@ -13316,28 +14940,57 @@ button.source-default-toggle {
 	}
 	/* 菜单里**搬进来的整块控件**必须保留文字标签：上面那条全局的
 	   `.chip > span { display:none }`（窄屏省宽度用）在菜单里会退化成“一排看不懂的图标”
-	   —— 菜单里的行本来就是纵向列，宽度不缺，标签才是可认性。 */
-	.plugin-topbar-menu.portal .chip > span:not(.update-dot) {
+	   —— 菜单里的行本来就是纵向列，宽度不缺，标签才是可认性。
+	   ⚠️ 豁免名单与桌面 `.topbar.no-labels` 那条同口径（角标 / 图标 span 不是“标签”）：
+	   角标被强制成 inline 后，作为 flex item 被块化成 block，17px 圆盒里的数字就贴着盒顶
+	   （像素实测偏上 3.4px，就是“圆形数字不垂直居中”那个现象）。
+	   名单里另有 `.goalbar-opt`（目标条的审查/执行模型选择器）：它虽然是个标签，
+	   但藏不得 —— 藏了手机端就只剩两个朝下的箭头，审查/执行各选了哪个模型完全看不见；
+	   它的宽度由 `.goalbar-opts` 的换行口径管（值单行省略号 + title 给全名），
+	   不靠藏字省宽度。 */
+	.plugin-topbar-menu.portal
+		.chip
+		> span:not(.update-dot):not(.bg-task-badge):not(.update-badge):not(.plugin-icon-svg):not(.plugin-icon-glyph):not(
+			.chip-emoji
+		):not(.goalbar-opt) {
 		display: inline;
 	}
 	/* 品牌不再是手机端特例：显隐走布局页 hidden 偏好，名称文字走顶栏文字总开关
 	   （.topbar.no-labels 藏 .brand-name 只剩 π）；放不下由实测溢出接管 —— 手机端与桌面端同一套配置。 */
-	.chip > span:not(.update-dot) {
+	.chip
+		> span:not(.update-dot):not(.bg-task-badge):not(.update-badge):not(.plugin-icon-svg):not(.plugin-icon-glyph):not(
+			.chip-emoji
+		):not(.goalbar-opt) {
 		display: none;
 	}
 	/* 顶栏按钮（新对话 / 各工具 chip）保留文字标签：宽度不够时不再靠隐藏文字省宽度，
-	   而是把尾部条目实测后送进「⋯」（见 TopBar / topbar-fit），所以这里不藏标签。 */
-	.topbar .chip > span:not(.update-dot) {
+	   而是把尾部条目实测后送进「⋯」（见 TopBar / topbar-fit），所以这里不藏标签。
+	   豁免名单同上：角标与图标 span 有自己的 display/盒模型，不能当“标签”处理。 */
+	.topbar
+		.chip
+		> span:not(.update-dot):not(.bg-task-badge):not(.update-badge):not(.plugin-icon-svg):not(.plugin-icon-glyph):not(
+			.chip-emoji
+		):not(.goalbar-opt) {
 		display: inline;
 	}
 
 	/* ---- composer: 输入框内底部工具条（模型/思考/附件 左，发送/停止/排队 右）。
 	   恢复 chip 标签显示（上面的全局规则会隐藏它们），并让模型名可截断。
+	   ⚠️ 这条必须限定在 561px 以上：下面 ≤560px 那条「纯图标」要靠**不恢复**
+	   才生效（靠赢下权重很难 —— 上面的藏字规则带一串 :not() 豁免，权重 (0,9,1)，
+	   这里若不限断点，≤560px 的 `display: none`（0,3,1）永远赢不了它，手机端
+	   文字标签就一直漏出来、被格宽截成「S.」「H.」这种碎片）。
 	   手机端工具条保证单行：左侧可收缩（模型/思考文本收缩 → 截断 → 只剩图标），
 	   发送/停止/排队 始终固定在右侧。收缩与截断的规则在基础样式里，这里只放宽
 	   标签宽度、把工具条锁成单行，并在下面一个阈值里直接切成纯图标。 ---- */
-	.composer-tools .chip > span:not(.update-dot) {
-		display: inline;
+	@media (min-width: 561px) {
+		.composer-tools
+			.chip
+			> span:not(.update-dot):not(.bg-task-badge):not(.update-badge):not(.plugin-icon-svg):not(.plugin-icon-glyph):not(
+				.chip-emoji
+			):not(.goalbar-opt) {
+			display: inline;
+		}
 	}
 	.composer-tools .chip-model {
 		max-width: 96px;
@@ -13353,6 +15006,13 @@ button.source-default-toggle {
 		flex: 1 1 auto;
 		min-width: 0;
 		flex-wrap: nowrap;
+		/* 手机端均匀分布：把左组摊开到「除右组以外的可用宽度」里等距
+		   （space-evenly：首尾留白与按钮间隙相等，不靠边），发送/停止
+		   仍固定贴右（.composer-tools-right flex-shrink:0 + 父级
+		   space-between）。这样左组按钮/插件入口在窄屏上不会全挤在左半边、
+		   右手拇指区留一大片空白。子项仍可收缩（min-width:0 链在
+		   .chip / .dropdown 上），文字省略号优先于等距被牺牲。 */
+		justify-content: space-evenly;
 	}
 	.composer-tools-right {
 		flex-shrink: 0;
@@ -13363,6 +15023,8 @@ button.source-default-toggle {
 	   更宽），所以留到 560px 再启用。右侧按钮本身在窄屏不再变形（对半胶囊已是
 	   图标态，固定 78px，不受此阈值影响）。 */
 	@media (max-width: 560px) {
+		/* 纯图标：不再恢复文字标签（见上面 @media (min-width: 561px) 的说明），
+		   名字交给 title 悬浮提示。 */
 		.composer-tools .chip > span.chip-model,
 		.composer-tools .chip > span.chip-sub {
 			display: none;
@@ -13371,10 +15033,107 @@ button.source-default-toggle {
 			display: none;
 		}
 		.composer-tools .chip {
-			padding: 6px 9px;
-			min-width: 34px;
-			min-height: 30px;
+			padding: 0;
+			min-width: 0;
 			justify-content: center;
+		}
+		/* ---- 手机端工具条退成「等宽方块 + 等距」栅格（不显示文字）。
+		   病根：space-evenly 只让**间隙**相等，而左组各条目宽度并不一致
+		   （宿主 .btn 40px / chip 按内容 / 插件动作 30px 圆钮），宽度不等
+		   → 中心间距不等，看上去就是「不齐」。修法不是钉死宽度（条目一多
+		   就撑爆或挤成一条缝），而是**让它们平分**：flex-basis 0 + grow 1
+		   → 每个条目拿到的宽度天然一致，space-evenly 的等距才真的等距。
+		   上下限：44px 封顶（大屏手机不无限拉大），24px 兜底（条目极端
+		   多时不至于把 266px 的可用宽度顶穿成横向滚动）。 */
+		.composer-tools-left,
+		.composer-tools-center {
+			gap: 4px;
+			/* 方块化：高亮/边框的盒子跟格子同形（正方），不拉成竖长条。
+			   触摸态的高亮底色画在按钮/芯片自己的盒子上，盒子多高高亮就多高 ——
+			   之前芯片沿用基线的 height:40px，在 26px 宽的窄格子里就成了一根
+			   34×40 的竖药丸，看着「盒子太高」。这里改用 aspect-ratio 由宽度
+			   反推高度，并把 align-items 居中，多行时也不会上下错位。
+			   min-height 30px：格子被挤到 24~30px 时至少还留一个接近方形的
+			   点按目标（不为了纯方块把点按区缩成一条）。 */
+			align-items: center;
+			/* 极端情况（插件贡献的入口很多）容错：条目多于一行时折行，而不是
+			   顶穿 24px 下限后横向溢出（手机上裁掉的按钮点不到，比不齐更糟）。
+			   常规条目数（≤9）下依旧单行，外观与之前完全一致。 */
+			flex-wrap: wrap;
+			row-gap: 4px;
+		}
+		.composer-tools-left > *:not(select),
+		.composer-tools-center > *:not(select),
+		.composer-tools-left > .dropdown,
+		.composer-tools-center > .dropdown {
+			flex: 1 1 0;
+			min-width: 24px;
+			max-width: 44px;
+			height: auto;
+			min-height: 30px;
+			aspect-ratio: 1 / 1;
+			align-self: center;
+		}
+		/* 同理收掉各按钮自带的 min-width 基线（.btn / 插件动作 30px / :has(svg) 30px…），
+		   否则同一条工具条里会出现「一部分条目守 24px、另一部分守 30px」的
+		   参差 —— 那正是「不齐」。:has(svg) 那条权重更高，一并带上；
+		   两条同在本段、位置更靠后，覆盖成立。
+		   ⚠️ 选择器只圈**左/中两组**：右组的发送/停止/排队胶囊是另一种控件
+		   （大号实心圆），一旦被这几条扫到会跟着变成方块，形态就被改了。 */
+		.inputbox .composer-tools-left .btn,
+		.inputbox .composer-tools-left .btn:has(svg),
+		.inputbox .composer-tools-center .btn,
+		.inputbox .composer-tools-center .btn:has(svg) {
+			min-width: 24px;
+			/* 同上：方块化。注意要压掉 ≤768px 基线的 height:40px，否则高亮
+			   底色仍是一条 40px 高的竖条。 */
+			height: auto;
+			aspect-ratio: 1 / 1;
+		}
+		.composer-tools-left .chip,
+		.composer-tools-center .chip {
+			width: 100%;
+			max-width: 100%;
+			height: 100%;
+			aspect-ratio: 1 / 1;
+		}
+		/* 高亮 / 边框统一成「方框」：基线里 .inputbox .btn 与插件动作都是
+		   border-radius:50%（圆形），在手机端这一排密集小格子里看着像一串珠子。
+		   改成 9px 小圆角方框，和同排的 chip（基线 8px）看齐，一排入口成为
+		   同一族；触摸态的高亮底色就画在这个方框上。:has(svg) 那条权重更高，
+		   一并带上才压得住。同样只圈左/中两组（右组发送键保持圆形）。 */
+		.inputbox .composer-tools-left .btn,
+		.inputbox .composer-tools-left .btn:has(svg),
+		.inputbox .composer-tools-center .btn,
+		.inputbox .composer-tools-center .btn:has(svg),
+		.inputbox .composer-tools-left .chip,
+		.inputbox .composer-tools-center .chip {
+			border-radius: 9px;
+		}
+		/* 插件动作按钮有两条基线规则（.btn 40px 与 :has(svg) 30px 圆钮），
+		   这里只把 width 放开交给 flex 平分；min-width 不能在本地置 0 —— 那会
+		   盖掉上面栅格的 24px 下限，条目一多就出现「前几个 24px、后几个
+		   15px」的参差（等于把「不齐」又请回来了）。 */
+		.inputbox .btn.composer-plugin-action:has(svg) {
+			width: auto;
+		}
+		/* 没有图标的纯文字插件动作：保留胶囊形态（方块里塞两三个汉字更看不懂），
+		   但不许长到一格之外，宽出部分省略号收尾，完整名字在 title 里。 */
+		.inputbox .composer-tools-left .btn.composer-plugin-action:not(:has(svg)),
+		.inputbox .composer-tools-center .btn.composer-plugin-action:not(:has(svg)) {
+			width: auto;
+			max-width: 44px;
+			padding: 0 8px;
+			overflow: hidden;
+			text-overflow: ellipsis;
+		}
+		/* select 类插件动作（kind="select"）同样进栅格：只留一格宽 + 省略。 */
+		.composer-tools-left select.composer-plugin-select,
+		.composer-tools-center select.composer-plugin-select {
+			width: auto;
+			min-width: 24px;
+			max-width: 44px;
+			flex: 1 1 0;
 		}
 	}
 	.topbar-flow {
@@ -13605,9 +15364,108 @@ button.source-default-toggle {
 		height: min(420px, calc(calc(100vh / var(--ui-zoom)) - 80px));
 	}
 
-	/* ---- footer: phones show connection dot / context / cache-hit / rate / cwd on one line ----
-	 * 引擎徽标、成本、消息数、插件状态在手机上不显示（省宽度）；
-	 * 连接状态仅保留圆点隐藏文字；缓存命中率与实时速率保留，上下文只剩数字，
+	/* 移动端弹窗通用关闭按钮强化：小屏幕下扩大触控面积，显式背景，防误触，防止被背景覆盖 */
+	.modal-close {
+		width: 36px;
+		height: 36px;
+		font-size: 16px;
+		margin-bottom: -46px;
+		background: var(--bg-elev);
+		border: 1px solid var(--border-soft);
+		border-radius: 8px;
+		color: var(--text);
+		z-index: 10;
+		box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+		flex-shrink: 0;
+	}
+	.modal-close:hover,
+	.modal-close:active {
+		background: var(--bg-elev2);
+		color: var(--text);
+	}
+	.cwd-close {
+		width: 30px;
+		height: 30px;
+		font-size: 15px;
+	}
+	.file-transfer-close {
+		width: 36px;
+		height: 36px;
+		font-size: 16px;
+	}
+	.template-modal-close {
+		width: 36px;
+		height: 36px;
+		font-size: 16px;
+	}
+	.gs-close {
+		width: 34px;
+		height: 34px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 16px;
+		color: var(--text);
+	}
+	/* ---- file preview: phones hide secondary actions/info to prioritize core tools & guarantee close button ----
+	 * 像状态栏一样，手机端隐藏路径、元信息、大号缩放控件和引用按钮；
+	 * 关闭按钮独立在最右侧并放大，保证任何窄屏下绝不被挤出屏幕。 */
+	.fp-head {
+		padding: 8px 10px;
+		gap: 6px;
+	}
+	.fp-path,
+	.fp-meta,
+	.fp-zoom,
+	.fp-attach.ref {
+		display: none;
+	}
+	.fp-close {
+		width: 34px;
+		height: 34px;
+		font-size: 16px;
+		background: var(--bg-elev);
+		border-color: var(--border-soft);
+		color: var(--text);
+		flex-shrink: 0;
+		margin-left: 4px;
+	}
+	@media (max-width: 480px) {
+		.fp-attach.full {
+			display: none;
+		}
+	}
+	.tool-info-head .btn,
+	.bg-task-head .btn {
+		min-width: 34px;
+		min-height: 34px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0 8px;
+		flex-shrink: 0;
+	}
+	.tool-info-title,
+	.tool-info-name {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.dialog-dismiss {
+		min-width: 32px;
+		min-height: 32px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 15px;
+		background: var(--bg-elev);
+		border-radius: 6px;
+	}
+
+	/* ---- footer: phones show connection dot / context / cost / cache-hit / rate / cwd on one line ----
+	 * 引擎徽标、消息数、插件状态在手机上不显示（省宽度）；
+	 * 连接状态仅保留圆点隐藏文字；成本、缓存命中率与实时速率保留，上下文只剩数字，
 	 * 路径不够宽时自己截断。 */
 	.statusbar {
 		flex-wrap: nowrap;
@@ -13616,16 +15474,17 @@ button.source-default-toggle {
 		font-size: 10.5px;
 	}
 	.status-sep,
-	.status-item:not(.status-conn):not(.status-ctx):not(.status-cache):not(.status-rate):not(.status-host-metrics):not(
-			.status-cwd
-		) {
+	.status-item:not(.status-conn):not(.status-ctx):not(.status-cost):not(.status-cache):not(.status-rate):not(
+			.status-host-metrics
+		):not(.status-cwd) {
 		display: none;
 	}
 	.status-conn .status-conn-label {
 		display: none;
 	}
-	/* 三项信息各自固定宽度，不参与压缩（内容被截断会读不出来）。 */
+	/* 信息项各自固定宽度，不参与压缩（内容被截断会读不出来）。 */
 	.status-ctx,
+	.status-cost,
 	.status-cache,
 	.status-rate {
 		flex-shrink: 0;
@@ -13633,6 +15492,10 @@ button.source-default-toggle {
 	/* 上下文：手机上只留「已用 / 窗口」数字（标签与进度条占地且信息冗余）。 */
 	.status-ctx .ctx-label,
 	.status-ctx .ctx-bar {
+		display: none;
+	}
+	/* 缓存命中率：手机上「缓存命中」四个字太占宽度，只留带颜色的百分比（title 仍带读/写/未命中明细）。 */
+	.status-cache .status-cache-label {
 		display: none;
 	}
 	/* 状态栏右侧：宽度不够时收缩（内部工作目录省略号截断，点开选择器仍能看到完整路径）。 */
@@ -13773,6 +15636,15 @@ button.source-default-toggle {
 	color: inherit;
 }
 
+/* issue #321：pi-core 行的「服务运行 vX」小标注 —— 行里的大版本号是全局 pi CLI
+ * 的，不是本服务实际加载的自带副本；两者有差距时摆在一起说清楚。 */
+.dd-split-run {
+	flex-shrink: 0;
+	font-family: var(--mono);
+	font-size: 10.5px;
+	opacity: 0.75;
+}
+
 /* Per-row "update" button (plugins + the pi core, not the web UI itself). */
 .dd-update-btn {
 	flex-shrink: 0;
@@ -13816,6 +15688,11 @@ button.source-default-toggle {
 		font-size: 0;
 		gap: 0;
 	}
+	/* 移动端/窄屏：消息底部纯图标按钮紧凑排布，杜绝换行 */
+	.msg-actions {
+		gap: 6px;
+		flex-wrap: nowrap;
+	}
 }
 /* 触屏：复制键常显（无 hover）。 */
 @media (hover: none) {
@@ -13823,6 +15700,74 @@ button.source-default-toggle {
 	.chead-copy,
 	.msg-action {
 		opacity: 1;
+	}
+	/* ---- 常驻按钮的自救：桌面那套「hover 才浮现」有半行空白可以压，常驻没有 ----
+	 * 1) 整体小一号（32→26px、图标 16→14）：一排五六个按钮在 390px 宽度上
+	 *    既占宽又笨重，点按精度反而变差。 */
+	.msg-action {
+		width: 26px;
+		height: 26px;
+		border-radius: 6px;
+	}
+	.msg-action > svg {
+		width: 14px;
+		height: 14px;
+	}
+	/* 卡头右端只有复制键：同样在流内、钉死宽度（flex: none）+ 右缘对齐，
+	 * 标题用 .chead-title 的 min-width:0 + ellipsis 让位（不外溢，见
+	 *  tests/unit/text-wrap.test.ts 的「卡片头右端按钮列」分组）。 */
+	.chead > .chead-copy {
+		order: 1;
+		flex: none;
+	}
+	/* 3) 正文块的行内复制键：触屏没有 hover，容不下「悬浮才浮现」那套。
+	 *    改用 **float: right**（Message.tsx 的多行分支把按钮排在正文之前）——
+	 *    正文的行盒自己绕开它，只有与按钮并排的那一两行让位。
+	 *    ⚠️ 别退回成「给整块正文预留一条按钮列」：`:first-child` 命中的是
+	 *    **.msg-text 的第一个子元素 = 整个 .md**，于是手机上每条消息的正文
+	 *    都凭空少 40px 可用宽度 —— 每一行都提前换行、右侧空一截（本该塞进
+	 *    这一行的中文被推到下一行）。 */
+	.msg-text:not(.single) > .msg-text-copy {
+		position: static;
+		float: right;
+		margin: 4px 0 0 8px;
+	}
+	/* 少数「整块不绕排」的块（代码块 / 表格：自己是 BFC 或带 overflow-x:auto）
+	 *    的首行会被浮动按钮压住 —— 只让**首块**是它们时下移让开；后面的块不受
+	 *    影响（浮动只占顶部那一条高度）。 */
+	.msg-text > .md > .codeblock:first-child,
+	.msg-text > .md > table:first-child {
+		clear: both;
+	}
+}
+
+/* 窄屏卡头（≤640px，与上面 hover:none 的常驻按钮同一批场景）：
+   名字优先 / 提示文本让步的口径写在基础规则里（.chead-title.toolcall-name
+   与各 hint），这里只做两件窄屏专属的事：**路径只留一截尾巴**、收间距。 */
+@media (max-width: 640px) {
+	/* 手机上路径只留一截（约 20 个字符，完整值在 title 悬浮里）：窄屏一屏
+	   能看两三个工具卡，路径写满一整行没意义，先把它压短，剩下的宽度全
+	   给工具名与右端那列常驻按钮。命令预览比路径有信息量，多给一点。 */
+	.toolcall-path {
+		max-width: min(18ch, 30%);
+		/* 再挤也留一截：路径可以短，不许整体消失（缩到 0 就只剩“工具名 +
+		   按钮”，认不出是哪个文件）。宽度不够时缺口由命令预览 / 派单徽标
+		   吸收（它们权重 1，路径权重 12 但有下限）。
+		   ⚠️ 别用 `direction: rtl` 把省略号甩到左边只留尾巴：bidi 会把行尾
+		   的分隔符（"/"）跳到行尾，显示成 “…rotocol.ts/”。短路径本来就被
+		   shortenPath 截成「…/目录/文件」了（保留尾巴），这里的下限只是
+		   决定“短到什么程度”，左侧截断够用。 */
+		min-width: 7ch;
+	}
+	.toolcall-cmd {
+		max-width: min(28ch, 44%);
+	}
+	/* 间距收到 4px：一条卡头有 8~9 个子项，每项 2px 就是 16~18px 白扔。
+	   ⚠️ 别把 .chead 改成 flex-wrap:wrap 兵底：按钮簇是最后一个子项，
+	   真不够宽时换行会把行内复制键（order:1，DOM 在按钮簇之后）单独甩到
+	   第二行左端，右端对齐反而更乱。 */
+	.chead {
+		gap: 4px;
 	}
 }
 
@@ -13846,6 +15791,7 @@ button.source-default-toggle {
 .present-note {
 	font-size: 12.5px;
 	color: var(--text-dim);
+	overflow-wrap: anywhere;
 }
 .present-note > :first-child {
 	margin-top: 0;
@@ -14395,5 +16341,57 @@ button.source-default-toggle {
 }
 .finished-subagents-toggle:hover {
 	color: var(--text);
-	background: var(--surface);
+	background: var(--bg-elev);
+}
+
+/* ---- Inline File Pill (正文内联文件微标) ---- */
+.file-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	vertical-align: baseline;
+	margin: 0 3px;
+	padding: 1px 7px;
+	border-radius: 6px;
+	background: var(--bg-elev2);
+	border: 1px solid var(--border);
+	color: var(--accent, #60a5fa);
+	font-family: var(--mono, ui-monospace, monospace);
+	font-size: 0.88em;
+	font-weight: 500;
+	line-height: 1.4;
+	cursor: pointer;
+	text-decoration: none;
+	user-select: none;
+	transition:
+		background-color 0.15s ease,
+		border-color 0.15s ease,
+		color 0.15s ease,
+		transform 0.1s ease;
+}
+
+.file-pill:hover {
+	background: var(--bg-elev3);
+	border-color: var(--accent, #60a5fa);
+	color: var(--accent, #93c5fd);
+	transform: translateY(-1px);
+}
+
+.file-pill:active {
+	transform: translateY(0);
+}
+
+.file-pill-icon {
+	display: inline-block;
+	font-size: 0.9em;
+	line-height: 1;
+	opacity: 0.85;
+}
+
+.file-pill-name {
+	display: inline-block;
+	white-space: nowrap;
+	max-width: 280px;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }

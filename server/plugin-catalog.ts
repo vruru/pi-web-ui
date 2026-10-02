@@ -93,7 +93,11 @@ function toEntry(raw: Record<string, unknown>, builtin: boolean): UiPluginCatalo
 	};
 }
 
-/** 读合并后的目录：builtin 在前，custom 在后（同 id 时 custom 覆盖 builtin）。 */
+/** 读合并后的目录：builtin 在前，custom 在后（同 id 时 custom 覆盖 builtin）。
+ *  custom 覆盖 builtin 时强制打 `overridesBuiltin: true` 标记（builtin 同时为
+ *  false）：显示字段（name/icon/description）来自用户可写来源，可能仿冒官方条目，
+ *  前端据此把它标识为「自定义覆盖」。source 始终保留真实（custom）安装来源，
+ *  不允许伪装成官方来源。 */
 export function readCatalog(builtinPath: string, customPath: string): UiPluginCatalogEntry[] {
 	const out: UiPluginCatalogEntry[] = [];
 	const seen = new Set<string>();
@@ -118,8 +122,12 @@ export function readCatalog(builtinPath: string, customPath: string): UiPluginCa
 		const e = it && typeof it === "object" ? toEntry(it as Record<string, unknown>, false) : null;
 		if (!e) continue;
 		const idx = out.findIndex((x) => x.id === e.id);
-		if (idx >= 0) out[idx] = e;
-		else out.push(e);
+		if (idx >= 0) {
+			// 覆盖了同名 builtin 条目：强制带标识（不信任 custom 文件里的任何自标字段）。
+			out[idx] = { ...e, builtin: false, overridesBuiltin: true };
+		} else {
+			out.push(e);
+		}
 		seen.add(e.id);
 	}
 	return out;

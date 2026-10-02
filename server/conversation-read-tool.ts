@@ -16,13 +16,13 @@
 // 长对话分多次 offset 翻页。跨标签页的实时运行读不到——以落盘历史为准，
 // description 里会告诉模型这一点。
 //
-// 双语约定（issue #91）：definition 走 bilingual(en, zh) 内联双语；per-call
+// 文案约定：工具 definition（description/promptSnippet/promptGuidelines）为纯英文；per-call
 // 返回文本按 lang 取 pick(lang, zh, en, key, vars)，缺表回落英文内联。
 // ---------------------------------------------------------------------------
 
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { bilingual, pick, type ServerLang } from "./i18n.js";
+import { pick, type ServerLang } from "./i18n.js";
 import { CONVERSATION_READ_TOOL_NAME } from "./tool-manager.js";
 import type { AgentMessage } from "./serialize.js";
 import {
@@ -520,24 +520,12 @@ export function makeConversationReadTool(
 	return defineTool({
 		name: CONVERSATION_READ_TOOL_NAME,
 		label: "Read another conversation",
-		description: bilingual(
-			'Read ANOTHER conversation: a running conversation of this client (including subagents — use its conversation id like "c3", see action=list) or a persisted history session transcript (use its file path). ' +
-				'Use it when the user references another chat (a quoted conversation, a pasted conversation id, or "see the other chat about X"). ' +
-				"action=list shows running conversations plus history sessions (kind=running|history|all, query filter, limit; history defaults to 15). " +
-				'action=read returns one transcript: view=chat (default: only user/assistant text) or full (incl. tool calls/results); last=N takes the latest N messages instead of guessing offset; query searches within the conversation (hits ±1 context); each message is capped (~600 chars, marked "… +N chars"). ' +
-				"action=files lists files the conversation created/modified (with counts). " +
-				"action=status gives a short summary: last tool call, last assistant text, recently touched files, whether it is waiting for a question answer. " +
-				"Only sessions from the session list can be read (arbitrary file paths are refused). " +
-				"Live runs in OTHER browser tabs are not readable here — they appear in history once persisted.",
-			"读取**另一个对话**：本客户端的运行中对话（含子代理——用 action=list 查 conversation id，如 c3）或已落盘的历史会话转录（用它的文件 path）。" +
-				"用户引用了别的对话（引用 chip、粘过来的对话 id、“看看之前那个关于 X 的对话”）时用它。" +
-				"action=list 列运行中对话与历史会话（kind=running|history|all，query 过滤，limit；历史默认 15 条）。" +
-				"action=read 取某一份转录：view=chat（默认：只给 user/assistant 文本）或 full（含工具调用与结果）；last=N 取最新 N 条（不用猜 offset）；query 在对话内搜索（命中 ±1 条上下文）；每条消息独立截断（约 600 字符，超出标 “… +N chars”）。" +
-				"action=files 列该对话创建/修改过的文件（含次数）。" +
-				"action=status 给一两行摘要：最后一次工具调用、最后一句 assistant、最近动过的文件、是否在等用户回答问卷。" +
-				"只能读会话列表里的转录（任意文件路径会被拒绝）。" +
-				"其他浏览器标签页里的实时运行在这里读不到——它们落盘后会出现在历史里。",
-		),
+		description:
+			"Read ANOTHER conversation: a running conversation of this client (incl. subagents — id from action=list) or a persisted history session (file path). " +
+			"Use when the user references another chat. list: running + history sessions (query filter, limit). " +
+			"read: one transcript — view=chat (default, user/assistant text) or full (incl. tool calls); last=N latest; query searches within (±1 context); messages capped ~600 chars. " +
+			"files: files it created/modified. status: last tool call, last assistant text, pending question. " +
+			"Only listed sessions are readable; other tabs' live runs appear in history once persisted.",
 		promptSnippet:
 			"read another conversation: list/find chats, read transcript (chat view / tail / search), touched files, status summary",
 		parameters: Type.Object({

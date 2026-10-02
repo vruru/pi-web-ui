@@ -1,8 +1,14 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { cleanupUploads, saveUpload, uploadRetentionDays, uploadsRoot } from "../../server/uploads.js";
+import {
+	cleanupUploads,
+	CLIENT_ID_PATTERN,
+	saveUpload,
+	uploadRetentionDays,
+	uploadsRoot,
+} from "../../server/uploads.js";
 
 const dirs: string[] = [];
 function tempDataDir(): string {
@@ -39,6 +45,33 @@ describe("saveUpload", () => {
 		expect(norm(abs).startsWith(norm(uploadsRoot(dataDir)) + "/client-1/")).toBe(true);
 		expect(displayName).not.toMatch(/[\\/:*?"<>|]/);
 		expect(displayName.endsWith(".txt")).toBe(true);
+	});
+
+	it("clientId 必须匹配白名单，否则整条拒绝（不静默换 id）", () => {
+		const dataDir = tempDataDir();
+		// 路径穿越 / 绝对路径 / 空 / 超长 / 非法字符全部拒绝
+		for (const bad of ["../../evil", "..\\evil", "/abs", "C:\\abs", "", "a/b", "a b", "客户端", "x".repeat(129)]) {
+			expect(() => saveUpload(bad, "a.txt", Buffer.from("x"), dataDir)).toThrow();
+		}
+		// 拒绝后什么都没落盘（uploads 目录都不该被建出来）
+		expect(existsSync(uploadsRoot(dataDir))).toBe(false);
+		// 合法形态（字母数字 : _ -，1-128 长）照常工作；":" 形态合法性只在
+		// 模式层验证 —— Windows 目录名不允许 ":"，真实 clientId 是 UUID 无冒号
+		expect(CLIENT_ID_PATTERN.test("x:y")).toBe(true);
+		for (const ok of ["a", "client-1", "A_9", "z".repeat(128)]) {
+			const { abs } = saveUpload(ok, "a.txt", Buffer.from("x"), tempDataDir());
+			expect(abs).toContain(ok);
+		}
+	});
+
+	it('displayName 只取 basename 且拒绝空 / "." / ".."', () => {
+		const dataDir = tempDataDir();
+		for (const bad of ["..", ".", "", "a/..", "..\\", "../.."]) {
+			expect(() => saveUpload("c-ok", bad, Buffer.from("x"), dataDir)).toThrow();
+		}
+		const { abs, displayName } = saveUpload("c-ok", "../../etc/passwd", Buffer.from("x"), dataDir);
+		expect(displayName).toBe("passwd");
+		expect(abs).toContain("passwd");
 	});
 });
 

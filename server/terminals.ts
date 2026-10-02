@@ -25,7 +25,7 @@ import { spawn, type IPty } from "node-pty";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { CommandDef, ServerMessage, TerminalInfo } from "./protocol.js";
-import { bilingual, pick, type ServerLang } from "./i18n.js";
+import { pick, type ServerLang } from "./i18n.js";
 
 // ---------------------------------------------------------------------------
 // .pi/commands.json
@@ -223,8 +223,11 @@ export function terminalIdleNotifyLines(): number {
  *  因此不会误匹配回显里的 printf 格式串 `[pi-exit:%s]`。 */
 const BASH_SENTINEL_RE = /\[pi-exit:(\d+)\]/g;
 
+/** bash 阻塞循环 collected 的累积上限：超限丢最旧一半（见 bash 工具执行循环）。 */
+const BASH_COLLECT_MAX = 2 * 1024 * 1024;
+
 /**
- * 把任意命令（含多行脚本）构造成「一行」交互 shell 命令：执行 + 捕获退出码。
+ * 把任意命令（含多行脚本）构造成一行交互 shell 命令：执行 + 捕获退出码。
  *
  * 单行很关键：整行先被 shell 完整解析再执行，命令中途读 stdin 也不会吃掉
  * 后续哨兵；也避开交互 shell 的 bracketed-paste 对多行输入的特殊处理。
@@ -232,15 +235,6 @@ const BASH_SENTINEL_RE = /\[pi-exit:(\d+)\]/g;
  */
 export function buildTerminalBashLine(command: string, tailFile?: { file: string; lines: number }): string {
 	const trimmed = command.replace(/\s+$/, "");
-	let body = trimmed;
-	if (trimmed.includes("\n")) {
-		body = `eval $'${trimmed
-			.replace(/\\/g, "\\\\")
-			.replace(/'/g, "\\'")
-			.replace(/\r/g, "\\r")
-			.replace(/\n/g, "\\n")
-			.replace(/\t/g, "\\t")}'`;
-	}
 	// 退出码取【第一个】命令（真正干活的那个）而非管道末尾命令：`head`/`grep`/`tail`
 	// 在管道末尾会把退出码吞成自己的（head 恒 0、grep 无命恒 1）。`${PIPESTATUS:-$?}`
 	// 在 bash 里取 PIPESTATUS[0]（首命令），busybox ash/dash 无 PIPESTATUS 时退化为 `$?`。
@@ -248,12 +242,82 @@ export function buildTerminalBashLine(command: string, tailFile?: { file: string
 	// 留下的 141 不是真失败，而是“按要求截断=成功”。只有恰好 141 才转 0，真失败照报。
 	// tailFile：`cmd > log 2>&1 | tail -N`——拆掉 tail 后 stdout 进文件、终端为空；
 	// 在哨兵前补一个 `tail -N log` 让模型看到日志尾部，退出码仍是底层命令的。
-	// eslint-disable-next-line no-useless-escape -- \$? must reach the shell literally
-	const rcGuard = `__pi_rc=\${PIPESTATUS:-\$?}; [ "$__pi_rc" -eq 141 ] && __pi_rc=0`;
 	const tailPart = tailFile
 		? `; tail -n ${Math.max(1, Math.floor(tailFile.lines))} -- '${tailFile.file.replace(/'/g, `'\\''`)}'`
 		: "";
-	return `${body}; ${rcGuard}${tailPart}; printf '\\n[pi-exit:%s]\\n' "$__pi_rc"`;
+	// eslint-disable-next-line no-useless-escape -- \$? must reach the shell literally
+	const sentinel = `__pi_rc=\${PIPESTATUS:-\$?}; [ "$__pi_rc" -eq 141 ] && __pi_rc=0${tailPart}; printf '\\n[pi-exit:%s]\\n' "$__pi_rc"`;
+
+	if (trimmed.includes("\n")) {
+		// 多行路径（行为保持）：$'...' 转义后是一行物理输入，引号/换行全部字面化，
+		// 以 `'` 收尾——`; ` 同行拼接哨兵不会被尾注释/尾管道/续行吞掉。
+		const body = `eval $'${trimmed
+			.replace(/\\/g, "\\\\")
+			.replace(/'/g, "\\'")
+			.replace(/\r/g, "\\r")
+			.replace(/\n/g, "\\n")
+			.replace(/\t/g, "\\t")}'`;
+		return `${body}; ${sentinel}`;
+	}
+
+	// 单行路径：哨兵独占一行追加。行内 `; ` 拼接会被常见形态吞掉——
+	// 尾注释（`cmd # note; printf…` 整段进注释）、尾管道（`cmd |; …` 语法错误）。
+	// 独占一行后这两类安全；尾随续行符/未闭合引号仍会把哨兵行并入命令或吞进
+	// 字符串——这类形态无法安全续行，直接拒注入（调用方按无退出码模式执行并注明）。
+	if (sentinelUnsafeReason(trimmed)) return trimmed;
+	return `${trimmed}\n${sentinel}`;
+}
+
+/**
+ * 判定命令能否安全追加「独占一行的退出码哨兵」；返回拒注入原因或 null（可注入）。
+ *
+ * - 尾随续行符 `\`：下一行被并入本命令，哨兵行成为命令的一部分。
+ * - 未闭合引号：哨兵行被吞进字符串字面量，永远不会作为代码执行。
+ * - 多行命令：经 `$'...'` 转义单行化后引号/换行全部字面化，总是安全 → null。
+ *
+ * 扫描按 POSIX 引号语义跟踪 `'`/`"`/`` ` `` 三种引号与转义；`$'...'`（ANSI-C
+ * 引号）内 `\'` 不闭合引号，也一并识别。
+ */
+export function sentinelUnsafeReason(command: string): "trailing_backslash" | "unclosed_quote" | null {
+	const trimmed = command.replace(/\s+$/, "");
+	if (trimmed.includes("\n")) return null;
+	let quote: "'" | '"' | "`" | null = null;
+	// 当前单引号是否 $' 开头（ANSI-C 引号，内含转义语义）
+	let ansiC = false;
+	let escaped = false;
+	for (let i = 0; i < trimmed.length; i++) {
+		const ch = trimmed[i];
+		if (quote) {
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			// POSIX 单引号内 `\` 是普通字符；ANSI-C/双引号/反引号内 `\` 转义下一字符
+			if (ch === "\\" && (quote !== "'" || ansiC)) {
+				escaped = true;
+				continue;
+			}
+			if (ch === quote) quote = null;
+			continue;
+		}
+		if (escaped) {
+			// 引号外的转义：被转义字符原样跳过（`\"` 不开引号等）
+			escaped = false;
+			continue;
+		}
+		if (ch === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (ch === "'" || ch === '"' || ch === "`") {
+			quote = ch;
+			ansiC = ch === "'" && i > 0 && trimmed[i - 1] === "$";
+		}
+	}
+	if (quote !== null) return "unclosed_quote";
+	// 扫描结束仍在转义态 = 最后一个字符是引号外的 `\`（尾随续行符）
+	if (escaped) return "trailing_backslash";
+	return null;
 }
 
 /** 顶层（引号/反引号/转义外）按 `|` 拆分的管道元素。 */
@@ -310,6 +374,10 @@ function parseTailLines(rest: string): number | null {
 export function detectTrailingLimiter(
 	command: string,
 ): { base: string; kind: LimiterKind; lines: number | null; segment: string } | null {
+	// 含命令替换（$() / 反引号）的命令保守跳过拆管：splitTopLevelPipes 只跟踪引号
+	// 与顶层 `|`，不解析括号嵌套——`cmd $(x | y)` 里替换内的管道会被误判为顶层
+	// 管道段，拆掉后直接破坏命令语义。保守正确优先，宁可少优化。
+	if (/\$\(|`/.test(command)) return null;
 	const parts = splitTopLevelPipes(command);
 	if (parts.length < 2) return null;
 	// 管道分隔处可能在 `|` 后留前导空白（`| tail`），trim 掉再匹配。
@@ -1509,31 +1577,45 @@ export class TerminalManager {
 	 * Kill the native PTY (issue #215：Windows ConPTY 关机死锁；issue #269：MSYS2 控制台耗尽死锁）。
 	 *
 	 * Windows 下：
-	 * 1. 若进程已经退出（entry.exited）：绝不可再调用 Node 的 process.kill(pid)，
-	 *    直接调 pty.kill() 释放 HPCON 句柄（子进程已死、管道见 EOF，绝不会死锁）。
-	 * 2. 若进程尚未退出（!entry.exited）：
-	 *    先尝试优雅关闭（向 PTY 写入 \x03exit\r），让 bash 正常触发清理钩子；
-	 *    若仍未退出才以 process.kill(pid)（TerminateProcess）强制兜底。
-	 * 3. 关机（shutdown=true）：跳过 pty.kill()，由 OS 回收。
-	 * 非 Windows 原样直调 pty.kill()。
+	 * 1. 若进程已经退出（entry.exited）：直接调 pty.kill() 释放 HPCON 句柄
+	 *    （子进程已死、管道见 EOF，绝不会死锁）；关机路径跳过，由 OS 回收。
+	 * 2. 若进程尚未退出（!entry.exited）：先向 PTY 写入 \x03exit\r 优雅关闭（让
+	 *    bash 正常触发清理钩子），300ms 后仍活着再调 pty.kill() 兜底——node-pty 在
+	 *    Windows 上走 console-process-list 做**全树**清理。不再使用裸
+	 *    process.kill(pid)（TerminateProcess）：它只杀 ConPTY 附着的单一进程，
+	 *    且从拿到 pid 到调用之间隔着一个 PID 复用误杀窗口。
+	 * 3. 关机（shutdown=true）：只做优雅写，跳过 pty.kill() 与 300ms 兜底，由 OS
+	 *    回收（保持 50ms 内退出的关机预算）。
+	 * 非 Windows 原样直调 pty.kill()（POSIX 下 shell 是直接子进程，pty.kill 足够，
+	 * 保持既有行为不做额外延迟）。
 	 */
 	private killNative(entry: TermEntry, shutdown = false): void {
 		if (process.platform === "win32") {
-			if (!entry.exited) {
-				const pid = (entry.pty as { pid?: number }).pid;
-				if (typeof pid === "number") {
+			if (entry.exited) {
+				if (!shutdown) {
 					try {
-						// 优雅关闭：先发 Ctrl+C，再发 exit\r
-						entry.pty.write("\x03exit\r");
-					} catch {}
-					try {
-						process.kill(pid);
+						entry.pty.kill();
 					} catch {
 						// already dead
 					}
 				}
+				return;
 			}
+			// 优雅关闭：先发 Ctrl+C，再发 exit\r
+			try {
+				entry.pty.write("\x03exit\r");
+			} catch {}
 			if (shutdown) return;
+			const t = setTimeout(() => {
+				if (entry.exited) return;
+				try {
+					entry.pty.kill();
+				} catch {
+					// already dead
+				}
+			}, 300);
+			t.unref?.();
+			return;
 		}
 		try {
 			entry.pty.kill();
@@ -1670,11 +1752,13 @@ export function makeTerminalBashTool(
 		defaultPersist: () => boolean;
 		/** 静默解阻阈值毫秒（仅 persist=true 生效）；每次调用时读取（设置即时生效）；0 = 不解阻。 */
 		idleMs: () => number;
+		/** 前台运行最长毫秒；每次调用时读取；0 = 不限。达到后自动转入后台继续执行并解阻模型。 */
+		maxForegroundMs?: () => number;
 		/** abort_bash 的控制器集合。 */
 		kills: Set<AbortController>;
 		/** 后台命令最终结束时的宿主通知（exitCode null = 终端被关闭）。 */
 		notifyBackgroundDone: (info: { terminalId: string; command: string; exitCode: number | null }) => void;
-		/** per-call 返回文本的服务端语言（默认英文）；工具 definition 走 bilingual 内联双语。 */
+		/** per-call 返回文本的服务端语言（默认英文）；工具 definition 为纯英文。 */
 		lang?: () => ServerLang;
 	},
 ): ToolDefinition {
@@ -1683,49 +1767,38 @@ export function makeTerminalBashTool(
 	return defineTool({
 		name: "bash",
 		label: "Run bash command",
-		description: bilingual(
-			"Run a shell command and return its full output plus exit code. Commands run in a visible terminal.\n" +
-				"persist=false (default, one-shot): a fresh terminal is created per call, run to completion, then the shell exits (the process ends) while its output stays in the terminal list for later review — like a normal bash call, but each command also leaves a viewable terminal record.\n" +
-				"persist=true: commands run in the PERSISTENT visible terminal 'ai-bash' — shell state such as cd, venv activation or ssh sessions is retained across calls; you can use terminal_wait to re-block on a backgrounded command, or terminal_read / terminal_input / terminal_key on 'ai-bash' to observe or interact anytime.\n" +
-				"Run the bare command — do NOT pipe through head/tail/more/less (output is returned complete anyway, and pipes hide live progress in the terminal). Use the head/tail parameters instead to trim the returned output. For interactive commands (REPLs, prompts, installers asking y/n) set persist=true and drive them with terminal_input / terminal_key.",
-			"运行 shell 命令并返回完整输出与退出码。命令在可见终端中运行。\n" +
-				"persist=false（默认，一次性）：每次调用新建一个终端，运行至结束，然后 shell 退出（进程结束），输出保留在终端列表中供稍后查看——如同普通 bash 调用，但每条命令都会留下一条可查看的终端记录。\n" +
-				"persist=true：命令在常驻可见终端 'ai-bash' 中运行——cd、venv 激活、ssh 会话等 shell 状态跨调用保留；可用 terminal_wait 重新阻塞等待后台命令，或随时用 terminal_read / terminal_input / terminal_key 观察或交互。\n" +
-				"直接运行裸命令——不要经 head/tail/more/less 管道（反正会返回完整输出，管道还会挡住终端里的实时进度）。用 head/tail 参数截断返回的输出。交互式命令（REPL、提示符、问 y/n 的安装程序）请设 persist=true 并用 terminal_input / terminal_key 驱动。",
-		),
-		promptSnippet: bilingual(
-			"run shell commands (persist=true keeps the terminal alive across calls)",
-			"运行 shell 命令（persist=true 让终端跨调用保持存活）",
-		),
+		description:
+			"Run a shell command in a visible terminal; returns full output and exit code. " +
+			"persist=false (default): a fresh one-shot terminal per call; the shell exits after the command but its output stays viewable. " +
+			"persist=true: runs in the persistent 'ai-bash' terminal — shell state (cd/venv/ssh) is retained across calls; " +
+			"terminal_read/terminal_input/terminal_key observe or interact; terminal_wait blocks on backgrounded commands. " +
+			"Run the bare command — never pipe through head/tail/more/less (output is returned complete; pipes hide live progress); use the head/tail params instead. " +
+			"For interactive commands (REPLs, y/n prompts) set persist=true and drive them with terminal_input / terminal_key.",
+		promptSnippet: "run shell commands (persist=true keeps the terminal alive across calls)",
 		parameters: Type.Object({
-			command: Type.String({ description: bilingual("The shell command to run", "要运行的 shell 命令") }),
-			timeout: Type.Optional(Type.Number({ description: bilingual("Optional timeout in seconds", "可选的超时秒数") })),
+			command: Type.String({ description: "The shell command to run" }),
+			timeout: Type.Optional(Type.Number({ description: "Optional timeout in seconds" })),
 			persist: Type.Optional(
 				Type.Boolean({
-					description: bilingual(
-						"Keep the terminal alive after the command (default: false → a one-shot terminal that exits when the command finishes while its output is retained for review). true runs in the persistent 'ai-bash' terminal so shell state (cd/venv/ssh) is retained across calls and the terminal stays interactive.",
-						"运行后保持终端存活（默认 false → 命令结束时退出的、输出保留供查看的一次性终端）。true 则在常驻 'ai-bash' 终端中运行，shell 状态（cd/venv/ssh）跨调用保留、终端保持可交互。",
-					),
+					description:
+						"true → run in the persistent 'ai-bash' terminal: shell state (cd/venv/ssh) is retained across calls. " +
+						"false (default) → one-shot terminal that exits when the command finishes; output stays viewable.",
 				}),
 			),
 			head: Type.Optional(
 				Type.Integer({
 					minimum: 1,
 					maximum: 5000,
-					description: bilingual(
-						"Only return the FIRST N lines of output (like `| head -N`). Use this for verbose commands instead of piping through head.",
-						"只返回输出的前 N 行（如 `| head -N`）。输出冗长的命令请用它，而不要经 head 管道。",
-					),
+					description:
+						"Only return the FIRST N lines of output (like `| head -N`); prefer this over piping through head.",
 				}),
 			),
 			tail: Type.Optional(
 				Type.Integer({
 					minimum: 1,
 					maximum: 5000,
-					description: bilingual(
-						"Only return the LAST N lines of output (like `| tail -N`). Use this for verbose commands instead of piping through tail.",
-						"只返回输出的后 N 行（如 `| tail -N`）。输出冗长的命令请用它，而不要经 tail 管道。",
-					),
+					description:
+						"Only return the LAST N lines of output (like `| tail -N`); prefer this over piping through tail.",
 				}),
 			),
 		}),
@@ -1766,6 +1839,8 @@ export function makeTerminalBashTool(
 				if (!persist) void terminals.inputChecked(termId, "exit\r");
 			};
 			const idleMs = Math.max(0, opts.idleMs());
+			const maxForegroundMs = Math.max(0, opts.maxForegroundMs?.() ?? 0);
+			const startTime = Date.now();
 			const deadline = p.timeout && p.timeout > 0 ? Date.now() + p.timeout * 1000 : null;
 			// 拆掉模型常写的尾部输出限制/过滤管道（`| tail -N` / `| less` / `| more` / `| cat`）：
 			// 这类管道在终端里 ①缓冲输出——可见终端全程哑火、无法感知实时进度；②吞掉真实退出码——
@@ -1803,8 +1878,20 @@ export function makeTerminalBashTool(
 				let collected = "";
 				let cursor = start;
 				let lastDataAt = Date.now();
+				// 尾随续行符/未闭合引号的命令无法安全注入哨兵（哨兵行会被并入命令或
+				// 吞进字符串）：按无退出码模式执行，靠静默/超时/总时长解阻收尾并注明。
+				const sentinelUnsafe = sentinelUnsafeReason(runCommand);
+				const sentinelNote = sentinelUnsafe
+					? pick(
+							lang,
+							`\n[注：命令以${sentinelUnsafe === "trailing_backslash" ? "续行符 \\" : "未闭合引号"}结尾，无法注入退出码哨兵——已按无退出码模式执行，拿不到真实 exit code。建议拆分成更简单的单行命令重试。]`,
+							`\n[Note: the command ends with ${sentinelUnsafe === "trailing_backslash" ? "a line-continuation backslash" : "an unclosed quote"}; the exit-code sentinel could not be injected — it ran without exit-code detection. Prefer splitting it into simpler single-line commands.]`,
+							"terminals.bash.nosentinel.note",
+						)
+					: "";
 				// 标记「有哨兵命令在跑」：terminal_wait 据此区分等待与空闲。
-				terminals.setSentinelPending(termId, true);
+				// 无哨兵命令没有可等待的哨兵，标记反而误导 terminal_wait。
+				if (!sentinelUnsafe) terminals.setSentinelPending(termId, true);
 				const inputErr = terminals.inputChecked(termId, buildTerminalBashLine(runCommand, tailFile) + "\r");
 				if (inputErr) throw new Error(inputErr);
 				for (;;) {
@@ -1821,6 +1908,12 @@ export function makeTerminalBashTool(
 						collected += read.data;
 						cursor = read.cursor;
 						lastDataAt = Date.now();
+						// 长跑/刷屏命令的累积无上限会拖爆服务进程内存。哨兵判定只看尾部
+						// 8KB（lastSentinel），超限丢最旧一半、保留近期输出即可；
+						// 命令结束后的 cleanBashOutput 语义不受影响。
+						if (collected.length > BASH_COLLECT_MAX) {
+							collected = collected.slice(collected.length - BASH_COLLECT_MAX / 2);
+						}
 					}
 					const m = lastSentinel(collected);
 					if (m) {
@@ -1845,8 +1938,8 @@ export function makeTerminalBashTool(
 						throw new Error(
 							pick(
 								lang,
-								`Command timed out after ${p.timeout}s（已发 Ctrl+C；已有输出：${timeoutPartial}）`,
-								`Command timed out after ${p.timeout}s (sent Ctrl+C; partial output: ${timeoutPartial})`,
+								`Command timed out after ${p.timeout}s（已发 Ctrl+C；已有输出：${timeoutPartial}）${sentinelNote}`,
+								`Command timed out after ${p.timeout}s (sent Ctrl+C; partial output: ${timeoutPartial})${sentinelNote}`,
 								"terminals.bash.timeout",
 								{ "p.timeout": p.timeout, timeoutPartial },
 							),
@@ -1858,9 +1951,26 @@ export function makeTerminalBashTool(
 							terminals,
 							opts,
 							runCommand,
-							applyHeadTail(cleanBashOutput(collected), p.head, effectiveTail, lang),
+							applyHeadTail(cleanBashOutput(collected), p.head, effectiveTail, lang) + sentinelNote,
 							Math.round((Date.now() - lastDataAt) / 1000),
 							lang,
+							termId,
+							persist,
+							"idle",
+						);
+					}
+					// 总时长解阻（持久与一次性终端）：前台运行达到上限，转入后台继续执行，避免卡死。
+					if (maxForegroundMs > 0 && Date.now() - startTime >= maxForegroundMs) {
+						return backgroundResult(
+							terminals,
+							opts,
+							runCommand,
+							applyHeadTail(cleanBashOutput(collected), p.head, effectiveTail, lang) + sentinelNote,
+							Math.round((Date.now() - startTime) / 1000),
+							lang,
+							termId,
+							persist,
+							"elapsed",
 						);
 					}
 				}
@@ -1871,49 +1981,98 @@ export function makeTerminalBashTool(
 	});
 }
 
-/** 静默解阻路径：注册完成观察器后立即返回「仍在后台运行」。 */
+/** 静默 / 总时长解阻路径：注册完成观察器后立即返回「仍在后台运行」。 */
 function backgroundResult(
 	terminals: TerminalManager,
 	opts: Parameters<typeof makeTerminalBashTool>[1],
 	command: string,
 	partialText: string,
-	silentSeconds: number,
+	durationSeconds: number,
 	lang: ServerLang,
+	termId: string = "ai-bash",
+	persist: boolean = true,
+	reason: "idle" | "elapsed" = "idle",
 ): { content: { type: "text"; text: string }[]; details: unknown } {
-	terminals.watchOutput("ai-bash", BASH_SENTINEL_RE, (m) => {
+	terminals.watchOutput(termId, BASH_SENTINEL_RE, (m) => {
 		// 后台命令最终结束（或终端被关）→ 清除待决标记，terminal_wait 不再适用。
-		terminals.setSentinelPending("ai-bash", false);
+		terminals.setSentinelPending(termId, false);
 		opts.notifyBackgroundDone({
-			terminalId: "ai-bash",
+			terminalId: termId,
 			command,
 			exitCode: m ? Number(m[1]) : null,
 		});
+		if (!persist) {
+			void terminals.inputChecked(termId, "exit\r");
+		}
 	});
 	// partialText 已在调用方做过 cleanBashOutput + applyTail。
 	const partial = truncateMiddle(partialText, 6000);
 	// 空输出占位按语言预渲染（issue #91 v2：vars 只收干净标识）。
 	const partialZh = partial || "（暂无输出）";
 	const partialEn = partial || "(no output yet)";
+
+	let descZh = "";
+	let descEn = "";
+
+	if (reason === "elapsed") {
+		descZh =
+			`命令仍在终端 ${termId} 中运行（前台执行已达 ${durationSeconds} 秒上限，自动转入后台）。` +
+			`本次调用不阻塞——命令继续在后台执行，结束时你会收到自动通知。\n` +
+			`已有输出：\n${partialZh}\n`;
+		descEn =
+			`Command still running in terminal ${termId} (foreground execution reached ${durationSeconds}s limit, moved to background). ` +
+			`This call does not block — the command keeps running in the background and you will be notified automatically when it finishes.\n` +
+			`Partial output:\n${partialEn}\n`;
+	} else {
+		descZh =
+			`命令仍在持久终端 ${termId} 中运行（已连续 ${durationSeconds} 秒无输出，未结束）。` +
+			`本次调用不阻塞——命令继续在后台执行，结束时你会收到自动通知。\n` +
+			`已有输出：\n${partialZh}\n`;
+		descEn =
+			`Command still running in the persistent terminal ${termId} (no output for ${durationSeconds}s, not finished). ` +
+			`This call does not block — the command keeps running in the background and you will be notified automatically when it finishes.\n` +
+			`Partial output:\n${partialEn}\n`;
+	}
+
+	if (persist) {
+		descZh += `要重新阻塞等它结束就用 terminal_wait(terminalId="${termId}")（无需反复轮询）；需要交互用 terminal_input / terminal_key（Ctrl+C 可终止）。`;
+		descEn += `To block until it finishes, use terminal_wait(terminalId="${termId}") (no polling needed); use terminal_input / terminal_key to interact (Ctrl+C aborts).`;
+	} else {
+		descZh += `命令完成后该终端将自动退出并发送通知；如需查看输出可用 terminal_read(terminalId="${termId}")。`;
+		descEn += `When completed, this terminal will exit automatically and notify; to inspect output, use terminal_read(terminalId="${termId}").`;
+	}
+
+	if (reason === "elapsed") {
+		return {
+			content: [
+				{
+					type: "text",
+					text: pick(lang, descZh, descEn, "terminals.bash.background.elapsed", {
+						durationSeconds,
+						partialZh,
+						partialEn,
+						termId,
+					}),
+				},
+			],
+			details: { running: true, terminalId: termId, persist, durationSeconds, reason },
+		};
+	}
+
 	return {
 		content: [
 			{
 				type: "text",
-				text: pick(
-					lang,
-					`命令仍在持久终端 ai-bash 中运行（已连续 ${silentSeconds} 秒无输出，未结束）。` +
-						`本次调用不阻塞——命令继续在后台执行，结束时你会收到自动通知。\n` +
-						`已有输出：\n${partialZh}\n` +
-						`要重新阻塞等它结束就用 terminal_wait(terminalId="ai-bash")（无需反复轮询）；需要交互用 terminal_input / terminal_key（Ctrl+C 可终止）。`,
-					`Command still running in the persistent terminal ai-bash (no output for ${silentSeconds}s, not finished). ` +
-						`This call does not block — the command keeps running in the background and you will be notified automatically when it finishes.\n` +
-						`Partial output:\n${partialEn}\n` +
-						`To block until it finishes, use terminal_wait(terminalId="ai-bash") (no polling needed); use terminal_input / terminal_key to interact (Ctrl+C aborts).`,
-					"terminals.bash.background.running",
-					{ silentSeconds, partialZh, partialEn },
-				),
+				text: pick(lang, descZh, descEn, "terminals.bash.background.running", {
+					silentSeconds: durationSeconds,
+					durationSeconds,
+					partialZh,
+					partialEn,
+					termId,
+				}),
 			},
 		],
-		details: { running: true, terminalId: "ai-bash", silentSeconds },
+		details: { running: true, terminalId: termId, persist, durationSeconds, reason },
 	};
 }
 
@@ -1923,18 +2082,21 @@ export { TERMINAL_TOOL_NAMES } from "./tool-manager.js";
 /** System-prompt guidance teaching the model WHEN to prefer the terminal tools
  *  over one-shot bash. Without it models almost never pick them — bash returns
  *  complete output in a single call, so it always wins on convenience. */
-export const TERMINAL_TOOLS_GUIDANCE = `Persistent interactive terminal tools are available (terminal_create / terminal_list / terminal_close / terminal_input / terminal_key / terminal_read / terminal_wait). The bash tool stays the DEFAULT for ordinary commands - it runs in a visible terminal and returns the full output (persist=false, one-shot terminal that exits when the command finishes). Switch to the bash tool's persist=true, or to the terminal tools, when:
-- The program is interactive or TUI-based (REPLs like python/node, vim/htop, installers asking y/n, anything waiting on stdin). For these, prefer bash({ persist: true }) which runs it in the persistent 'ai-bash' terminal and returns immediately; then drive it with terminal_input / terminal_key (and terminal_read) on terminalId='ai-bash'.
-- You start a long-running server or watcher and want to keep watching its output (terminal_read with waitMs), send keys to it later (e.g. interrupt via terminal_key with Ctrl+c), or block until a backgrounded command finishes without polling (terminal_wait).
-- The user explicitly asks you to work in the visible terminal panel.
-Liveness watchdog: terminals you touched (create/input/key) are monitored - if one goes silent with no new output while you are working (default 15s), an automatic system reminder is injected into the conversation. Treat it as a prompt to check that terminal (terminal_read), respond to an input prompt (terminal_input / terminal_key), or close it (terminal_close) if it is no longer needed.`;
+export const TERMINAL_TOOLS_GUIDANCE = `Persistent interactive terminal tools are available (terminal_create / terminal_list / terminal_close / terminal_input / terminal_key / terminal_read / terminal_wait). The bash tool stays the DEFAULT for ordinary commands. Switch to bash({persist:true}) or the terminal tools when:
+- The program is interactive or TUI-based (REPLs, vim/htop, y/n installers, anything waiting on stdin): prefer bash({persist:true}), which runs it in the persistent 'ai-bash' terminal and returns immediately; then drive it with terminal_input / terminal_key / terminal_read on terminalId='ai-bash'.
+- You start a long-running server or watcher and want to watch its output (terminal_read with waitMs), send keys later (e.g. Ctrl+c via terminal_key), or block until a backgrounded command finishes without polling (terminal_wait).
+- The user asks you to work in the visible terminal panel.
+Liveness watchdog: terminals you touched are monitored — if one goes silent while you are working (default 15s), a system reminder prompts you to check it (terminal_read), answer its input prompt, or close it (terminal_close) if no longer needed.`;
 
 /** Build the agent-facing persistent terminal tools for one conversation. */
 export function makePersistentTerminalTools(
 	terminals: TerminalManager,
 	cwd: string,
-	/** per-call 返回文本的服务端语言（默认英文）；工具 definition 走 bilingual 内联双语。 */
+	/** per-call 返回文本的服务端语言（默认英文）；工具 definition 为纯英文。 */
 	lang?: () => ServerLang,
+	options?: {
+		checkSafety?: (cmd: string) => { blocked?: boolean; reason?: string };
+	},
 ): ToolDefinition[] {
 	const getLang: () => ServerLang = lang ?? (() => "en");
 	const result = (
@@ -1952,17 +2114,15 @@ export function makePersistentTerminalTools(
 		defineTool({
 			name: "terminal_create",
 			label: "Create terminal",
-			description: bilingual(
-				"Create a named persistent interactive PTY in the current workspace. Use terminal_input or terminal_key to interact with it and terminal_read to inspect incremental output. Prefer this over bash when the program is interactive/TUI-based (REPLs, vim/htop, y/n prompts), when starting a long-running server you want to keep observing or interrupt, or when the user asks to work in the visible terminal. For simple one-shot commands use bash instead.",
-				"在当前工作区创建具名常驻交互式 PTY。用 terminal_input 或 terminal_key 与之交互，用 terminal_read 查看增量输出。程序是交互式/TUI（REPL、vim/htop、y/n 提示）、要启动长驻服务并持续观察或中断、或用户明确要求在可见终端里操作时，优先用它而非 bash。简单的一次性命令请用 bash。",
-			),
-			promptSnippet: bilingual(
-				"run interactive programs or long-running servers in a persistent visible PTY (multi-step: create → input/key → read)",
-				"在常驻可见 PTY 中运行交互式程序或长驻服务（多步：create → input/key → read）",
-			),
+			description:
+				"Create a named persistent interactive PTY. Interact via terminal_input / terminal_key, inspect output via terminal_read. " +
+				"Prefer bash for one-shot commands; use this (or bash persist=true) for interactive/TUI programs (REPLs, vim/htop, y/n prompts) or long-running servers to observe or interrupt.",
+			promptSnippet:
+				"run interactive programs or long-running servers in a persistent visible PTY (multi-step: " +
+				"create → input/key → read)",
 			parameters: Type.Object({
-				terminalId: Type.String({ description: bilingual("Stable terminal name", "稳定的终端名称") }),
-				cwd: Type.Optional(Type.String({ description: bilingual("Workspace-relative directory", "工作区相对目录") })),
+				terminalId: Type.String({ description: "Stable terminal name" }),
+				cwd: Type.Optional(Type.String({ description: "Workspace-relative directory" })),
 				cols: Type.Optional(Type.Integer({ minimum: 2, maximum: 500 })),
 				rows: Type.Optional(Type.Integer({ minimum: 2, maximum: 200 })),
 			}),
@@ -1991,18 +2151,15 @@ export function makePersistentTerminalTools(
 		defineTool({
 			name: "terminal_list",
 			label: "List terminals",
-			description: bilingual(
-				"List all persistent PTY terminals owned by this conversation.",
-				"列出本对话拥有的全部常驻 PTY 终端。",
-			),
-			promptSnippet: bilingual("list persistent terminals", "列出常驻终端"),
+			description: "List all persistent PTY terminals owned by this conversation.",
+			promptSnippet: "list persistent terminals",
 			parameters: Type.Object({}),
 			execute: async () => result(JSON.stringify(terminals.list()), terminals.list()),
 		}),
 		defineTool({
 			name: "terminal_close",
 			label: "Close terminal",
-			description: bilingual("Close a persistent PTY and terminate its process tree.", "关闭常驻 PTY 并终止其进程树。"),
+			description: "Close a persistent PTY and terminate its process tree.",
 			parameters: Type.Object({ terminalId: Type.String() }),
 			execute: async (_id, p) => {
 				const lang = getLang();
@@ -2027,13 +2184,24 @@ export function makePersistentTerminalTools(
 		defineTool({
 			name: "terminal_input",
 			label: "Send terminal input",
-			description: bilingual(
-				"Send arbitrary text to a persistent PTY. Include newline when a command should be submitted.",
-				"向常驻 PTY 发送任意文本。需要提交命令时带上换行。",
-			),
+			description: "Send arbitrary text to a persistent PTY. Include newline when a command should be submitted.",
 			parameters: Type.Object({ terminalId: Type.String(), data: Type.String() }),
 			execute: async (_id, p) => {
 				const lang = getLang();
+				if (options?.checkSafety && (p.data.includes("\n") || p.data.includes("\r"))) {
+					const safety = options.checkSafety(p.data.trim());
+					if (safety.blocked) {
+						throw new Error(
+							pick(
+								lang,
+								`【终端输入命令被安全规则阻断】${safety.reason ? ` 原因：${safety.reason}` : ""}`,
+								`[Terminal command blocked by safety rule]${safety.reason ? ` Reason: ${safety.reason}` : ""}`,
+								"terminals.command.blocked",
+								{ reason: safety.reason ?? "" },
+							),
+						);
+					}
+				}
 				failIf(terminals.inputChecked(p.terminalId, p.data));
 				// AI 发了输入 = 在等结果，重开一个静默纪元。
 				terminals.noteAgentActivity(p.terminalId);
@@ -2051,14 +2219,11 @@ export function makePersistentTerminalTools(
 		defineTool({
 			name: "terminal_key",
 			label: "Send terminal key",
-			description: bilingual(
-				"Send Enter, Tab, arrows, function keys, or Ctrl/Alt combinations to a persistent PTY.",
-				"向常驻 PTY 发送 Enter、Tab、方向键、功能键或 Ctrl/Alt 组合键。",
-			),
+			description: "Send Enter, Tab, arrows, function keys, or Ctrl/Alt combinations to a persistent PTY.",
 			parameters: Type.Object({
 				terminalId: Type.String(),
 				key: Type.String({
-					description: bilingual("Enter, Tab, ArrowUp, c, etc.", "按键名，如 Enter、Tab、ArrowUp、c 等"),
+					description: "Enter, Tab, ArrowUp, c, etc.",
 				}),
 				modifiers: Type.Optional(
 					Type.Object({
@@ -2087,10 +2252,10 @@ export function makePersistentTerminalTools(
 		defineTool({
 			name: "terminal_read",
 			label: "Read terminal output",
-			description: bilingual(
-				"Read incremental output from a persistent PTY. Keep the returned cursor and pass it on the next read; optionally wait for new output or process exit.",
-				"从常驻 PTY 读取增量输出。保留返回的 cursor，下次读取时传回；可选择等待新输出或进程退出。",
-			),
+			description:
+				"Read incremental output from a persistent PTY. " +
+				"Keep the returned cursor and pass it on the next read; " +
+				"optionally wait for new output or process exit.",
 			parameters: Type.Object({
 				terminalId: Type.String(),
 				cursor: Type.Optional(Type.Integer({ minimum: 0 })),
@@ -2118,30 +2283,24 @@ export function makePersistentTerminalTools(
 		defineTool({
 			name: "terminal_wait",
 			label: "Wait for terminal command",
-			description: bilingual(
-				"Block until a command started THROUGH THE BASH TOOL finishes (its exit marker appears) or the timeout expires — no polling needed. Only applies to terminals with a pending bash-tool command; terminals driven manually via terminal_input (e.g. interactive programs) have no completion marker — use terminal_read(waitMs=…) to observe those instead. Returns {finished, exitCode} plus the output produced while waiting; finished=false means it is STILL running (call again to keep waiting).",
-				"阻塞等待经 BASH 工具启动的命令结束（出现退出标记）或超时——无需轮询。仅适用于有待决 bash 工具命令的终端；经 terminal_input 手动驱动的终端（如交互式程序）没有完成标记——观察它们请用 terminal_read(waitMs=…)。返回 {finished, exitCode} 及等待期间产生的输出；finished=false 表示仍在运行（可再次调用继续等）。",
-			),
-			promptSnippet: bilingual(
-				"block until a terminal's current command finishes (no polling)",
-				"阻塞等待终端当前命令结束（无需轮询）",
-			),
+			description:
+				"Block until a command started through the BASH TOOL finishes (exit marker appears) or timeout — no polling. " +
+				"Only applies to bash-tool commands; commands sent via terminal_input have no completion marker — use terminal_read(waitMs=…) for those. " +
+				"Returns {finished, exitCode} plus output produced while waiting; finished=false means still running (call again).",
+			promptSnippet: "block until a terminal's current command finishes (no polling)",
 			parameters: Type.Object({
 				terminalId: Type.String(),
 				cursor: Type.Optional(
 					Type.Integer({
 						minimum: 0,
-						description: bilingual(
-							"Ignore exit markers before this absolute offset (default: now)",
-							"忽略该绝对偏移之前的退出标记（默认：现在）",
-						),
+						description: "Ignore exit markers before this absolute offset (default: now)",
 					}),
 				),
 				maxWaitMs: Type.Optional(
 					Type.Integer({
 						minimum: 100,
 						maximum: 600000,
-						description: bilingual("Max wait in ms (default 300000)", "最长等待毫秒数（默认 300000）"),
+						description: "Max wait in ms (default 300000)",
 					}),
 				),
 			}),

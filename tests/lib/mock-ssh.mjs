@@ -12,7 +12,7 @@
  *   READDIR/OPEN/READ/WRITE/CLOSE/MKDIR/REMOVE/RMDIR/RENAME
  */
 import { join } from "node:path";
-import { cpSync, existsSync } from "node:fs";
+import { cpSync, existsSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { gzipSync } from "node:zlib";
 
@@ -35,11 +35,22 @@ export function ensurePluginSsh2Dep(plugDst, devPlugDir) {
 	}
 	if (!existsSync(join(plugDst, "node_modules", "ssh2", "package.json"))) {
 		console.log("[mock-ssh] 本地无 ssh2 依赖，回退 npm install…");
-		execFileSync(
-			"npm",
-			["install", "--prefix", plugDst, "ssh2@latest", "--no-audit", "--no-fund"],
-			{ stdio: "inherit", timeout: 180_000, shell: process.platform === "win32" },
-		);
+		// 临时目录算 project-scoped 安装（--prefix），而 `npm run test:smoke` 会把
+		// npm_config_* 注入子进程 env：其中的 allow-scripts 在 project-scoped 安装里是
+		// 硬报错 EALLOWSCRIPTS，于是本测试在冒烟聚合（经 npm run 启动）下假失败、单跑
+		// 又正常。两手都做：① 项目级 .npmrc 按 npm 官方指引声明 allowScripts；
+		// ② 抹掉继承来的 npm_config_* / NPM_CONFIG_*，让这次安装与调用者的 npm 上下文无关。
+		writeFileSync(join(plugDst, ".npmrc"), "allow-scripts=ssh2,cpu-features\naudit=false\nfund=false\n");
+		const env = { ...process.env };
+		for (const k of Object.keys(env)) {
+			if (/^npm_?config_/i.test(k)) delete env[k];
+		}
+		execFileSync("npm", ["install", "--prefix", plugDst, "ssh2@latest", "--no-audit", "--no-fund"], {
+			stdio: "inherit",
+			timeout: 180_000,
+			shell: process.platform === "win32",
+			env,
+		});
 	}
 	if (!existsSync(join(plugDst, "node_modules", "ssh2", "package.json"))) {
 		throw new Error("ssh2 依赖准备失败（拷贝与 npm install 均未成功）");
@@ -47,8 +58,10 @@ export function ensurePluginSsh2Dep(plugDst, devPlugDir) {
 }
 
 export const dirs = {
-	"/": ["home"], "/home": ["test"],
-	"/home/test": ["a.txt", "sub", "big.bin"], "/home/test/sub": [],
+	"/": ["home"],
+	"/home": ["test"],
+	"/home/test": ["a.txt", "sub", "big.bin"],
+	"/home/test/sub": [],
 };
 export const files = {
 	"/home/test/a.txt": Buffer.from("hello ssh\n第二行\n", "utf8"),
@@ -105,8 +118,10 @@ export async function startMockSsh(pluginDir, port) {
 	const req = createRequire(join(pluginDir, "package.json"));
 	const { Server } = req("ssh2");
 	// RSA PKCS#1 PEM（ed25519 只能导出 PKCS#8，ssh2 的 parseKey 不认）
-	const HOST_KEY = generateKeyPairSync("rsa", { modulusLength: 2048 })
-		.privateKey.export({ type: "pkcs1", format: "pem" });
+	const HOST_KEY = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({
+		type: "pkcs1",
+		format: "pem",
+	});
 
 	let handleSeq = 0;
 	const handles = new Map(); // handleStr → 句柄记录
@@ -135,14 +150,17 @@ export async function startMockSsh(pluginDir, port) {
 				return sftp.status(id, 1); // EOF
 			}
 			h.readAll = true;
-			sftp.name(id, dirs[h.path].map((n) => ({
-				filename: n,
-				longname: `-rw-r--r-- 1 u u 0 ${n}`,
-				attrs: {
-					mode: dirs[`${h.path}/${n}`] ? 0o040755 : 0o100644,
-					size: files[`${h.path}/${n}`]?.length ?? 0,
-				},
-			})));
+			sftp.name(
+				id,
+				dirs[h.path].map((n) => ({
+					filename: n,
+					longname: `-rw-r--r-- 1 u u 0 ${n}`,
+					attrs: {
+						mode: dirs[`${h.path}/${n}`] ? 0o040755 : 0o100644,
+						size: files[`${h.path}/${n}`]?.length ?? 0,
+					},
+				})),
+			);
 		});
 		sftp.on("OPEN", (id, path, flags) => {
 			if (flags & SFTP.READ && !(flags & (SFTP.WRITE | SFTP.CREAT | SFTP.TRUNC))) {
@@ -154,7 +172,9 @@ export async function startMockSsh(pluginDir, port) {
 			// 写路径：TRUNC 或新文件从空开始，否则续写已有内容
 			const h = Buffer.from(`f${handleSeq++}`);
 			handles.set(h.toString(), {
-				kind: "file", write: true, path,
+				kind: "file",
+				write: true,
+				path,
 				buf: !files[path] || flags & SFTP.TRUNC ? Buffer.alloc(0) : Buffer.from(files[path]),
 			});
 			sftp.handle(id, h);
@@ -292,11 +312,15 @@ export async function startMockSsh(pluginDir, port) {
 				});
 			});
 			srv.on("error", reject);
-			srv.listen(port, "127.0.0.1", () => resolve({
-				close() {
-					try { srv.close(); } catch {}
-				},
-			}));
+			srv.listen(port, "127.0.0.1", () =>
+				resolve({
+					close() {
+						try {
+							srv.close();
+						} catch {}
+					},
+				}),
+			);
 		} catch (err) {
 			reject(err);
 		}

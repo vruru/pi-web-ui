@@ -122,6 +122,8 @@ export default {
 			overwrite: false,
 			aiTools: true,
 			allowServerDeps: true,
+			// 写路由额外放行的 Origin（反代/远程访问场景同源对不上时用；小写）。
+			allowedOrigins: [],
 		};
 
 		/** 入库前归一化：坏值回默认值，绝不让脏配置把工具/视图带崩。 */
@@ -130,6 +132,7 @@ export default {
 			const fmt = String(r.defaultFormat ?? "keep");
 			const q = Number(r.quality ?? 0.82);
 			const maxDim = Number(r.maxDim ?? 0);
+			const origins = Array.isArray(r.allowedOrigins) ? r.allowedOrigins : [];
 			return {
 				defaultFormat: ["keep", "jpeg", "webp", "png", "avif"].includes(fmt) ? fmt : "keep",
 				quality: Number.isFinite(q) ? Math.min(1, Math.max(0.1, q)) : 0.82,
@@ -138,6 +141,7 @@ export default {
 				overwrite: r.overwrite === true,
 				aiTools: r.aiTools !== false,
 				allowServerDeps: r.allowServerDeps !== false,
+				allowedOrigins: origins.map((s) => String(s).trim().toLowerCase()).filter(Boolean),
 			};
 		}
 
@@ -476,7 +480,7 @@ export default {
 				label: "图片信息",
 				description:
 					"Inspect images in the workspace: format, pixel size, aspect ratio, file bytes, alpha, EXIF (camera/exposure/GPS), plus histogram/dominant colors on request. " +
-					"Use it before compressing or cropping so you know what you are dealing with. Accepts one path, several paths, or a directory to scan. 读取工作区图片的元数据（格式/尺寸/体积/透明/EXIF，可选直方图与主色），处理前先用它探明情况。",
+					"Use it before compressing or cropping so you know what you are dealing with. Accepts one path, several paths, or a directory to scan.",
 				promptSnippet: "image_info — inspect workspace image metadata (size/format/EXIF), also scans a directory",
 				promptGuidelines: [
 					"Before compressing or cropping an image, call image_info to learn its real dimensions and format.",
@@ -556,7 +560,7 @@ export default {
 				label: "图片几何/调色",
 				description:
 					"Transform workspace images: resize (width/height/longEdge/percent), crop, rotate 90/arbitrary, flip, and per-pixel adjust (brightness/contrast/saturation/hue/gamma/grayscale/sepia/invert/blur/sharpen/vignette). " +
-					"Writes new files (never overwrites unless asked). Supports batch via `paths`. PNG/JPEG/BMP only — WebP/GIF/AVIF belong in the 🖼 view. 对工作区图片做缩放/裁剪/旋转/翻转/滤镜调色，可批量；只支持 PNG/JPEG/BMP。",
+					"Writes new files (never overwrites unless asked). Supports batch via `paths`. PNG/JPEG/BMP only — WebP/GIF/AVIF belong in the 🖼 view.",
 				promptSnippet:
 					"image_transform — resize / crop / rotate / flip / adjust workspace images (PNG/JPEG/BMP, batch ok)",
 				promptGuidelines: [
@@ -569,7 +573,11 @@ export default {
 					type: "object",
 					properties: {
 						path: { type: "string", description: "Image path (relative to workspace)." },
-						paths: { type: "array", items: { type: "string" }, description: "Batch: several images with the same plan." },
+						paths: {
+							type: "array",
+							items: { type: "string" },
+							description: "Batch: several images with the same plan.",
+						},
 						resize: {
 							type: "object",
 							description: "Resize. Give one of: width/height (px), longEdge (px, the longer side), percent (%).",
@@ -578,7 +586,11 @@ export default {
 								height: { type: "number" },
 								longEdge: { type: "number" },
 								percent: { type: "number" },
-								noUpscale: { type: "boolean", description: "Default true: never enlarge beyond the source. Ignored when both width and height are given." },
+								noUpscale: {
+									type: "boolean",
+									description:
+										"Default true: never enlarge beyond the source. Ignored when both width and height are given.",
+								},
 							},
 						},
 						crop: {
@@ -593,8 +605,14 @@ export default {
 						},
 						rotate: { type: "number", description: "90/180/270 (clockwise degrees)." },
 						flip: { type: "string", enum: ["h", "v"], description: "Horizontal or vertical mirror." },
-						angle: { type: "number", description: "Arbitrary rotation in degrees (canvas expands, background param fills)." },
-						background: { type: "string", description: "Fill for arbitrary rotation, e.g. #ffffff or #ffffff00 (default transparent)." },
+						angle: {
+							type: "number",
+							description: "Arbitrary rotation in degrees (canvas expands, background param fills).",
+						},
+						background: {
+							type: "string",
+							description: "Fill for arbitrary rotation, e.g. #ffffff or #ffffff00 (default transparent).",
+						},
 						adjust: {
 							type: "object",
 							description: "Per-pixel adjustments. Percentages default to 100 (=unchanged), strength fields 0..100.",
@@ -612,11 +630,18 @@ export default {
 								vignette: { type: "number" },
 							},
 						},
-						format: { type: "string", enum: ["png", "jpeg", "bmp", "keep"], description: "Output format (default: plugin setting / keep)." },
+						format: {
+							type: "string",
+							enum: ["png", "jpeg", "bmp", "keep"],
+							description: "Output format (default: plugin setting / keep).",
+						},
 						quality: { type: "number", description: "JPEG quality 0.1..1 (ignored by PNG/BMP)." },
 						out: { type: "string", description: "Explicit output path (single file only)." },
 						outDir: { type: "string", description: "Directory for outputs (created if missing)." },
-						suffix: { type: "string", description: "Filename suffix (default -min; changeable in the 🖼 view ⚙ settings)." },
+						suffix: {
+							type: "string",
+							description: "Filename suffix (default -min; changeable in the 🖼 view ⚙ settings).",
+						},
 						overwrite: { type: "boolean", description: "Allow replacing an existing file." },
 					},
 				},
@@ -626,7 +651,10 @@ export default {
 					if (rels.length > 1 && params.out) throw new Error("批量处理时不能用 out（请用 outDir + suffix）");
 					const results = await processMany(rels, params, params);
 					// 服务端没写任何东西就告诉用户（水印走另一个工具）
-					return { content: [{ type: "text", text: summarize(results, `处理 ${results.length} 个文件：`) }], details: { results } };
+					return {
+						content: [{ type: "text", text: summarize(results, `处理 ${results.length} 个文件：`) }],
+						details: { results },
+					};
 				},
 			},
 			{
@@ -634,7 +662,7 @@ export default {
 				label: "压缩图片",
 				description:
 					"Compress workspace images: convert format (png/jpeg/bmp) and/or hit a target file size with a quality binary search (plus downscaling when quality alone is not enough). " +
-					"Use `targetKB` for 'under 300 KB' requests and `quality` for a fixed quality. Batch via `paths`. 压缩工作区图片：转格式 + 目标体积（二分逼近质量，必要时配合降尺寸），可批量。",
+					"Use `targetKB` for 'under 300 KB' requests and `quality` for a fixed quality. Batch via `paths`.",
 				promptSnippet: "image_compress — shrink workspace images to a quality or a target file size (batch ok)",
 				promptGuidelines: [
 					"To hit a size budget, pass targetKB — do not guess quality by hand, the tool binary-searches it.",
@@ -645,10 +673,20 @@ export default {
 					properties: {
 						path: { type: "string" },
 						paths: { type: "array", items: { type: "string" } },
-						quality: { type: "number", description: "JPEG quality 0.1..1 (default 0.82; changeable in the 🖼 view ⚙ settings)." },
+						quality: {
+							type: "number",
+							description: "JPEG quality 0.1..1 (default 0.82; changeable in the 🖼 view ⚙ settings).",
+						},
 						targetKB: { type: "number", description: "Desired maximum file size in KB. Overrides quality." },
-						format: { type: "string", enum: ["jpeg", "png", "bmp", "keep"], description: "Output format (default jpeg when compressing)." },
-						maxLongEdge: { type: "number", description: "Optional cap on the longer side in px (applied before encoding)." },
+						format: {
+							type: "string",
+							enum: ["jpeg", "png", "bmp", "keep"],
+							description: "Output format (default jpeg when compressing).",
+						},
+						maxLongEdge: {
+							type: "number",
+							description: "Optional cap on the longer side in px (applied before encoding).",
+						},
 						outDir: { type: "string" },
 						suffix: { type: "string" },
 						overwrite: { type: "boolean" },
@@ -670,9 +708,11 @@ export default {
 								const h = img.width >= img.height ? Math.round((img.height * le) / img.width) : le;
 								if (w < img.width || h < img.height) img = resizeImage(img, { width: w, height: h });
 							}
-							const outFormat = String(o.format) === "keep" ? (SERVER_ENCODE.has(srcFormat) ? srcFormat : "jpeg") : String(o.format);
+							const outFormat =
+								String(o.format) === "keep" ? (SERVER_ENCODE.has(srcFormat) ? srcFormat : "jpeg") : String(o.format);
 							if (!SERVER_ENCODE.has(outFormat)) throw new Error(`服务端不能写 ${outFormat}`);
-							if (outFormat === "jpeg" && !(await ensureJpeg())) throw new Error("需要 jpeg-js（🖼 视图右上角 ⚙ 设置里允许后重试）");
+							if (outFormat === "jpeg" && !(await ensureJpeg()))
+								throw new Error("需要 jpeg-js（🖼 视图右上角 ⚙ 设置里允许后重试）");
 							if (!SERVER_ENCODE.has(srcFormat) && srcFormat === "jpeg") await ensureJpeg();
 
 							let quality = Math.round(Math.min(1, Math.max(0.1, Number(params.quality ?? cfg.quality ?? 0.82))) * 100);
@@ -724,7 +764,10 @@ export default {
 							results.push({ in: pretty(host.cwd, rel), error: err instanceof Error ? err.message : String(err) });
 						}
 					}
-					return { content: [{ type: "text", text: summarize(results, `压缩 ${results.length} 个文件：`) }], details: { results } };
+					return {
+						content: [{ type: "text", text: summarize(results, `压缩 ${results.length} 个文件：`) }],
+						details: { results },
+					};
 				},
 			},
 			{
@@ -732,11 +775,11 @@ export default {
 				label: "图片水印",
 				description:
 					"Stamp an image (logo/PNG with alpha) onto workspace images: 9-grid position, opacity, scale, margin, or full tiling. " +
-					"Text watermarks with real fonts are browser-side only (🖼 view). 把一张图片水印（logo）盖到工作区图片上：九宫格位置、透明度、缩放、平铺；文字水印请在视图里做。",
+					"Text watermarks with real fonts are browser-side only (🖼 view).",
 				promptSnippet: "image_watermark — overlay a logo image onto workspace images (position/opacity/tile)",
 				promptGuidelines: [
 					"image_watermark takes an image overlay, not text — for text watermarks tell the user to use the 🖼 view (real fonts are browser-side).",
-					"A watermarked output defaults to <name>-wm.<ext> next to the source if you pass suffix=\"-wm\".",
+					'A watermarked output defaults to <name>-wm.<ext> next to the source if you pass suffix="-wm".',
 				],
 				parameters: {
 					type: "object",
@@ -744,7 +787,11 @@ export default {
 						path: { type: "string" },
 						paths: { type: "array", items: { type: "string" } },
 						watermarkPath: { type: "string", description: "Overlay image path (PNG with alpha works best)." },
-						position: { type: "string", enum: ["tl", "tc", "tr", "ml", "center", "mr", "bl", "bc", "br"], description: "Default br." },
+						position: {
+							type: "string",
+							enum: ["tl", "tc", "tr", "ml", "center", "mr", "bl", "bc", "br"],
+							description: "Default br.",
+						},
 						opacity: { type: "number", description: "0..1, default 0.8" },
 						scale: { type: "number", description: "Overlay scale factor, default 1." },
 						margin: { type: "number", description: "Margin in px from the edges (ignored when tiling)." },
@@ -762,7 +809,10 @@ export default {
 					if (!params.watermarkPath) throw new Error("缺少 watermarkPath（水印图片路径）");
 					const o = { ...params, suffix: params.suffix ?? "-wm" };
 					const results = await processMany(rels, { watermarkPath: params.watermarkPath, ...params }, o);
-					return { content: [{ type: "text", text: summarize(results, `加水印 ${results.length} 个文件：`) }], details: { results } };
+					return {
+						content: [{ type: "text", text: summarize(results, `加水印 ${results.length} 个文件：`) }],
+						details: { results },
+					};
 				},
 			},
 		];
@@ -796,31 +846,109 @@ export default {
 		// HTTP 路由（视图用）
 		// ------------------------------------------------------------------
 
-		/** 读请求体：JSON base64（小图）或原始二进制（大图，无 10mb JSON 上限）。 */
+		/** 请求体上限 15MB（与 office-preview 的文件上限口径一致）：收包循环内
+		 *  实时累计，超限立即停收并 413，绝不全量缓存完再查（防大包吃爆内存）。 */
+		const MAX_BODY_BYTES = 15 * 1024 * 1024;
+
+		/**
+		 * 读请求体：JSON base64（小图）或原始二进制（大图，无 10mb JSON 上限）。
+		 * 用事件方式收包：超限时暂停读端并抛 413，safeRoute 先把响应写回再销毁
+		 * 请求（顺序反了浏览器只会看到断连，看不到 413）。
+		 */
 		async function readBody(req) {
+			const tooLarge = () =>
+				Object.assign(new Error(`请求体超过 ${fmtBytes(MAX_BODY_BYTES)} 上限`), { statusCode: 413 });
 			const b = req.body;
 			if (b && typeof b === "object" && typeof b.dataBase64 === "string") {
-				return Buffer.from(b.dataBase64, "base64");
+				const buf = Buffer.from(b.dataBase64, "base64");
+				if (buf.length > MAX_BODY_BYTES) throw tooLarge();
+				return buf;
 			}
-			const chunks = [];
-			for await (const c of req) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
-			return Buffer.concat(chunks);
+			if (Buffer.isBuffer(b)) {
+				if (b.length > MAX_BODY_BYTES) throw tooLarge();
+				return b;
+			}
+			return new Promise((resolve, reject) => {
+				const chunks = [];
+				let total = 0;
+				let done = false;
+				const finish = (err, val) => {
+					if (done) return;
+					done = true;
+					if (err) {
+						req.pause(); // 停收（不销毁）：让 413 先送出去，safeRoute 再掐断
+						req.removeListener("data", onData);
+						reject(err);
+					} else resolve(val);
+				};
+				const onData = (c) => {
+					const chunk = Buffer.isBuffer(c) ? c : Buffer.from(c);
+					total += chunk.length;
+					if (total > MAX_BODY_BYTES) return finish(tooLarge());
+					chunks.push(chunk);
+				};
+				req.on("data", onData);
+				req.on("end", () => finish(null, Buffer.concat(chunks)));
+				req.on("error", (err) => finish(err));
+			});
+		}
+
+		// "host" / "host:port" → { hostname, port }，与主站 originAllowed 同口径。
+		function parseAuthority(a) {
+			try {
+				const u = new URL(`http://${a}`);
+				return { hostname: u.hostname.toLowerCase(), port: u.port || "80" };
+			} catch {
+				return { hostname: "", port: "" };
+			}
+		}
+
+		/**
+		 * 写类路由（POST/PUT/DELETE）同源门：浏览器发的写请求必须与 Host 同源，
+		 * 或命中白名单（主站 PI_WEB_ALLOW_ORIGINS + 插件配置 allowedOrigins）；
+		 * 无 Origin（curl 等本机客户端）放行，"null"（file:// 页面）与跨域一律拒绝。
+		 * 主站 HTTP 层只有 Token 鉴权没有 Origin 校验，/ws/save 这种盲写工作区的
+		 * 路由必须在插件侧自己设防。
+		 */
+		function writeOriginOk(req) {
+			const origin = req.headers?.origin;
+			if (!origin) return true; // 非浏览器客户端，靠监听地址（默认 loopback）兜底
+			const o = String(origin).toLowerCase();
+			if (o === "null") return false; // file:// 等不可信来源
+			const allowed = new Set(cfg.allowedOrigins);
+			for (const s of String(process.env.PI_WEB_ALLOW_ORIGINS ?? "").split(",")) {
+				const v = s.trim().toLowerCase();
+				if (v) allowed.add(v);
+			}
+			if (allowed.has(o)) return true;
+			const ori = parseAuthority(o.replace(/^[a-z]+:\/\//, ""));
+			const hostHdr = parseAuthority(String(req.headers?.host ?? "").toLowerCase());
+			return Boolean(ori.hostname) && ori.hostname === hostHdr.hostname && ori.port === hostHdr.port;
 		}
 
 		/**
 		 * 路由包装：handler 内部任何抛错（读文件失败、越界、编码失败…）都转成 HTTP 4xx/5xx，
 		 * 绝不让 promise reject 出去——宿主 handleHttp 只 try/catch 同步抛错，异步 handler 的
 		 * rejection 会变成 unhandledRejection 直接把整个服务打挂（已实测）。
+		 * 写类路由先过同源门（防恶意网页盲写工作区）；413 先回响应再销毁请求。
 		 */
 		function safeRoute(method, path, handler) {
+			const isWrite = method !== "GET" && method !== "HEAD";
 			return host.route(method, path, async (req, res) => {
 				try {
+					if (isWrite && !writeOriginOk(req)) {
+						res.status(403).json({ error: "跨源写请求已拒绝（Origin 校验失败）" });
+						return;
+					}
 					await handler(req, res);
 				} catch (err) {
+					const status = Number(err?.statusCode ?? 400);
 					const msg = err instanceof Error ? err.message : String(err);
 					host.log(`http ${method} ${path} 失败：`, err);
-					if (!res.headersSent) res.status(400).json({ error: msg });
+					if (!res.headersSent) res.status(status >= 400 && status < 600 ? status : 400).json({ error: msg });
 					else res.end();
+					// 体超限：响应已写回，再销毁读端停止继续上传（先销毁会把响应一起掐掉）
+					if (status === 413) req.destroy();
 				}
 			});
 		}
@@ -880,7 +1008,13 @@ export default {
 					});
 			await host.fs.write(relOut, data);
 			host.log(`已保存 ${pretty(host.cwd, relOut)}（${fmtBytes(data.length)}）`);
-			res.json({ ok: true, path: relOut, pretty: pretty(host.cwd, relOut), bytes: data.length, renamed: relOut !== rel });
+			res.json({
+				ok: true,
+				path: relOut,
+				pretty: pretty(host.cwd, relOut),
+				bytes: data.length,
+				renamed: relOut !== rel,
+			});
 		});
 
 		const offSettingsRoute = safeRoute("GET", "/ws/settings", async (_req, res) => {
@@ -889,8 +1023,7 @@ export default {
 
 		const offSaveSettings = safeRoute("POST", "/ws/settings", async (req, res) => {
 			const body = req.body && typeof req.body === "object" && !Buffer.isBuffer(req.body) ? req.body : {};
-			const patch =
-				body.values && typeof body.values === "object" && !Array.isArray(body.values) ? body.values : body;
+			const patch = body.values && typeof body.values === "object" && !Array.isArray(body.values) ? body.values : body;
 			res.json({ ok: true, cwd: host.cwd, settings: saveConfig(patch) });
 		});
 

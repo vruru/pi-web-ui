@@ -1,6 +1,6 @@
 import { CoreUpdateStatus } from "./CoreUpdateStatus";
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
-import { FiFolder } from "react-icons/fi";
+import { FiFolder, FiX } from "react-icons/fi";
 import type { ChatState } from "../use-chat";
 import { useT } from "../i18n";
 import { appSend, useAppField, useAppGlobals } from "../app-globals";
@@ -29,6 +29,7 @@ const FALLBACK_BOTTOMBAR: { id: string; align: "start" | "end" }[] = [
 	{ id: "host:generation-rate", align: "start" },
 	{ id: "host:msg-count", align: "start" },
 	{ id: "host:plugin-status", align: "start" },
+	{ id: "host:status-delegate", align: "start" },
 	{ id: "host:working", align: "start" },
 	{ id: "host:host-metrics", align: "end" },
 	{ id: "host:cwd", align: "end" },
@@ -156,7 +157,7 @@ export function FooterBar({ chat, bottombarItems, onUiAction }: FooterBarProps) 
 			: null;
 	const ctxText =
 		context.tokens !== null && ctxPercent !== null
-			? `${context.estimated ? "~" : ""}${formatTokens(context.tokens)} / ${formatTokens(effectiveMax)}`
+			? `${formatTokens(context.tokens)} / ${formatTokens(effectiveMax)}`
 			: "—";
 	const ctxBarClass = ctxPercent === null ? "" : ctxPercent >= 80 ? "warn" : ctxPercent >= 50 ? "mid" : "ok";
 
@@ -250,7 +251,7 @@ export function FooterBar({ chat, bottombarItems, onUiAction }: FooterBarProps) 
 			);
 		})(),
 		"host:cost": (
-			<span className="status-item" title={t("cumulativeCost")}>
+			<span className="status-item status-cost" title={t("cumulativeCost")}>
 				${formatCost(s.cost)}
 			</span>
 		),
@@ -264,7 +265,7 @@ export function FooterBar({ chat, bottombarItems, onUiAction }: FooterBarProps) 
 					input: formatTokens(cache.totalInput),
 				})}
 			>
-				{t("cacheHit")}
+				<span className="status-cache-label">{t("cacheHit")}</span>
 				<b className={`cache-pct ${hitClass}`}>{hitText}</b>
 			</span>
 		),
@@ -301,6 +302,25 @@ export function FooterBar({ chat, bottombarItems, onUiAction }: FooterBarProps) 
 					)}
 				</span>
 			</>
+		) : null,
+		// 审查者模式标识：开启时画一枚可点的徐标 —— 点开常驻执行对话看全文。
+		"host:status-delegate": state?.delegateMode ? (
+			<span
+				className="status-item delegate-badge"
+				title={state.delegateConvId ? t("delegateModeOpenTip") : t("delegateModeBadgeTip")}
+			>
+				🔎 {t("delegateModeBadge")}
+				{state.delegateConvId ? (
+					<button
+						type="button"
+						className="delegate-badge-open"
+						title={t("delegateModeOpenTip")}
+						onClick={() => appSend({ type: "switch_conversation", id: state.delegateConvId as string })}
+					>
+						↗
+					</button>
+				) : null}
+			</span>
 		) : null,
 		"host:host-metrics": (() => {
 			const metrics = chat.hostMetrics;
@@ -388,6 +408,15 @@ export function FooterBar({ chat, bottombarItems, onUiAction }: FooterBarProps) 
 								</button>
 							);
 						})()}
+						<button
+							type="button"
+							className="cwd-close"
+							title={t("close")}
+							aria-label={t("close")}
+							onClick={() => setEditing(false)}
+						>
+							<FiX />
+						</button>
 					</div>
 					<div className="cwd-picker-row">
 						<input

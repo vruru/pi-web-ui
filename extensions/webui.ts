@@ -17,8 +17,9 @@
  *   - 每个 pi 会话管理一个子进程；session_shutdown 时清理，避免孤儿进程。
  */
 
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import net from "node:net";
@@ -27,7 +28,63 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 // 本文件位于 <pkg>/extensions/webui.ts → 包根在上一级
 const PKG_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SERVER_ENTRY = join(PKG_ROOT, "dist", "server", "index.js");
-const NODE = process.execPath;
+
+/**
+ * 解析真实的 node 可执行路径。
+ *
+ * pi 0.87+ 的 TUI 版本是 Bun 打包的二进制（pi.exe），此时 process.execPath 指向
+ * pi.exe 而非 node。用 pi.exe 去 spawn(index.js) 会静默失败（pi.exe 不能当
+ * node 执行脚本）。此函数在 Bun 环境或 execPath 非 node 时，从 PATH 和常见安装
+ * 位置回退查找真实 node。
+ */
+function resolveNode(): string {
+	const base = process.execPath.toLowerCase();
+	// 普通 node 直接返回（未被 Bun 接管）
+	if (!(process as any).isBun && /(^|[/\\])(node|nodejs)(\.exe)?$/.test(base)) {
+		return process.execPath;
+	}
+
+	const candidates: string[] = [];
+	// 1. 从 PATH 里找（跨平台：Windows 用 where，其余用 which）
+	try {
+		const cmd = process.platform === "win32" ? "where node" : "which node";
+		const out = execSync(cmd, { windowsHide: true }).toString().trim();
+		for (const line of out.split(/\r?\n/)) {
+			const p = line.trim();
+			// 过滤掉 pi 自身
+			if (p && !/pi[/\\]pi(\.exe)?$/i.test(p)) candidates.push(p);
+		}
+	} catch {
+		/* node 不在 PATH */
+	}
+
+	// 2. 常见安装位置兜底（Windows 为主，也兼顾 Unix）
+	const home = homedir();
+	const extra: string[] = [];
+	if (process.env.PNPM_HOME) extra.push(join(process.env.PNPM_HOME, "node.exe"));
+	for (const rel of [
+		"scoop/apps/nodejs/current/node.exe",
+		"AppData/Roaming/nvm/current/node.exe",
+		".nvm/versions/node/current/bin/node",
+		".local/share/pnpm/node.exe",
+		".local/bin/node",
+	]) {
+		extra.push(join(home, ...rel.split("/")));
+	}
+	for (const c of extra) {
+		if (existsSync(c) && !/pi[/\\]pi(\.exe)?$/i.test(c)) candidates.push(c);
+	}
+
+	if (candidates.length > 0) return candidates[0];
+
+	console.warn(
+		"[webui] 未找到真实 node（当前 process.execPath 指向非 node 进程，疑似 Bun 环境）。" +
+			"将退回 process.execPath，子进程可能无法启动。请确保 node 在 PATH 中。",
+	);
+	return process.execPath;
+}
+
+const NODE = resolveNode();
 
 /** 每个会话的服务器子进程 + 元数据 */
 interface RunningServer {
@@ -161,6 +218,7 @@ export default function (pi: ExtensionAPI): void {
 			const env = {
 				...process.env,
 				PORT: String(port),
+				PI_WEB_PORT: String(port), // server/index.js 读取 PI_WEB_PORT
 				PI_WEB_CWD: cwd,
 				...(process.env.PI_WEB_DATA_DIR ? {} : { PI_WEB_DATA_DIR: join(cwd, ".pi-web") }),
 			};

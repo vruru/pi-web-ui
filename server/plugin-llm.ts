@@ -88,76 +88,83 @@ export async function completeWithIsolatedSession(env: PluginLlmEnv, req: Plugin
 	);
 
 	inflight += 1;
-	try {
-		const run = (async (): Promise<PluginLlmResult> => {
-			let dispose: (() => void) | undefined;
-			try {
-				const services = await createAgentSessionServices({
-					cwd: env.cwd,
-					agentDir: env.agentDir,
-					// 技能全剥：纯补全不需要技能上下文（省 token，结果可预测）。
-					resourceLoaderOptions: {
-						skillsOverride: (res) => ({ ...res, skills: [] }),
-					},
-					modelRuntime: await ModelRuntime.create({
-						authPath: join(env.agentDir, "auth.json"),
-						modelsPath: join(env.agentDir, "models.json"),
-					}),
-				});
-				// 模型：显式指定 > 主会话回落 > 会话默认（与 reviewer 同优先级）。
-				let model;
-				let modelName = "default";
-				const spec = parseModelSpec(req?.model);
-				if (spec) {
-					model = services.modelRuntime.getModel(spec.provider, spec.id);
-					if (!model) return fail(`llm.complete: 找不到模型 ${spec.spec}`);
-					modelName = spec.spec;
-				}
-				if (!model && env.fallbackModel) {
-					model = services.modelRuntime.getModel(env.fallbackModel.provider, env.fallbackModel.id);
-					if (model) modelName = `${env.fallbackModel.provider}/${env.fallbackModel.id}`;
-				}
-				const srv = await createAgentSessionFromServices({
-					services,
-					sessionManager: SessionManager.inMemory(env.cwd),
-					...(model ? { model } : {}),
-					// 全部工具关闭（"all"）：纯补全，无副作用（SDK 的 noTools 是 "builtin"|"all" 枚举）。
-					noTools: "all",
-				});
-				dispose = () => {
-					try {
-						srv.session.dispose();
-					} catch {
-						/* dispose 尽力而为 */
-					}
-				};
-				const text = system.trim() ? `系统指令：${system.trim()}\n\n---\n\n任务：${prompt}` : prompt;
-				await srv.session.prompt(text, { expandPromptTemplates: false });
-				const raw = srv.session.getLastAssistantText() ?? "";
-				let usage: { input: number; output: number } | undefined;
+	const run = (async (): Promise<PluginLlmResult> => {
+		let dispose: (() => void) | undefined;
+		try {
+			const services = await createAgentSessionServices({
+				cwd: env.cwd,
+				agentDir: env.agentDir,
+				// 技能全剥：纯补全不需要技能上下文（省 token，结果可预测）。
+				resourceLoaderOptions: {
+					skillsOverride: (res) => ({ ...res, skills: [] }),
+				},
+				modelRuntime: await ModelRuntime.create({
+					authPath: join(env.agentDir, "auth.json"),
+					modelsPath: join(env.agentDir, "models.json"),
+				}),
+			});
+			// 模型：显式指定 > 主会话回落 > 会话默认（与 reviewer 同优先级）。
+			let model;
+			let modelName = "default";
+			const spec = parseModelSpec(req?.model);
+			if (spec) {
+				model = services.modelRuntime.getModel(spec.provider, spec.id);
+				if (!model) return fail(`llm.complete: 找不到模型 ${spec.spec}`);
+				modelName = spec.spec;
+			}
+			if (!model && env.fallbackModel) {
+				model = services.modelRuntime.getModel(env.fallbackModel.provider, env.fallbackModel.id);
+				if (model) modelName = `${env.fallbackModel.provider}/${env.fallbackModel.id}`;
+			}
+			const srv = await createAgentSessionFromServices({
+				services,
+				sessionManager: SessionManager.inMemory(env.cwd),
+				...(model ? { model } : {}),
+				// 全部工具关闭（"all"）：纯补全，无副作用（SDK 的 noTools 是 "builtin"|"all" 枚举）。
+				noTools: "all",
+			});
+			dispose = () => {
 				try {
-					const stats = srv.session.getSessionStats();
-					usage = { input: stats.tokens.input, output: stats.tokens.output };
-				} catch {
-					/* usage 尽力而为 */
-				}
-				return { ok: true, text: raw.slice(0, maxChars), model: modelName, ...(usage ? { usage } : {}) };
-			} finally {
-				// 会话回收跟 run 走：超时竞速输了 run 还在飞，run 落定才 dispose，不留孤儿。
-				try {
-					dispose?.();
+					srv.session.dispose();
 				} catch {
 					/* dispose 尽力而为 */
 				}
+			};
+			const text = system.trim() ? `系统指令：${system.trim()}\n\n---\n\n任务：${prompt}` : prompt;
+			await srv.session.prompt(text, { expandPromptTemplates: false });
+			const raw = srv.session.getLastAssistantText() ?? "";
+			let usage: { input: number; output: number } | undefined;
+			try {
+				const stats = srv.session.getSessionStats();
+				usage = { input: stats.tokens.input, output: stats.tokens.output };
+			} catch {
+				/* usage 尽力而为 */
 			}
-		})();
+			return { ok: true, text: raw.slice(0, maxChars), model: modelName, ...(usage ? { usage } : {}) };
+		} finally {
+			// 会话回收跟 run 走：超时竞速输了 run 还在飞，run 落定才 dispose，不留孤儿。
+			try {
+				dispose?.();
+			} catch {
+				/* dispose 尽力而为 */
+			}
+		}
+	})();
+	// 并发计数跟**真实 run** 走，而不是外层函数的 finally：超时竞速返回后 run 还在飞，
+	// 计数必须继续占着 MAX_INFLIGHT 的位 —— 否则每次超时都「腾出」一路并发，
+	// 连续超时的插件能把在飞会话越堆越多，护栏失效。catch 挂在分支上兜住 run 的
+	// 拒绝（竞速已由 timer 赢时，外层 catch 不会再收到它）。
+	void run
+		.catch(() => {})
+		.finally(() => {
+			inflight -= 1;
+		});
+	try {
 		const timer = new Promise<PluginLlmResult>((resolve) =>
 			setTimeout(() => resolve(fail(`llm.complete: 超时（约${Math.round(timeoutMs / 1000)}s）`)), timeoutMs),
 		);
 		return await Promise.race([run, timer]);
 	} catch (err) {
 		return fail(`llm.complete: ${(err as Error).message}`);
-	} finally {
-		inflight -= 1;
 	}
 }

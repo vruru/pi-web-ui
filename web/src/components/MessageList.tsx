@@ -12,6 +12,7 @@ import { collectQuestionAttachments } from "../question-attachments";
 
 import { parseSkillBlock } from "../skill-block";
 import { CollapsedMessage } from "./CollapsedMessage";
+import { reviewFoldKind } from "../goal-review-fold";
 import { LazyMount } from "./LazyMount";
 import {
 	applyPlan,
@@ -238,7 +239,9 @@ export function MessageList({
 	 * question-attachments.ts (unit-tested).
 	 */
 	const questionAttachments = useMemo(() => collectQuestionAttachments(state.messages), [state.messages]);
-	const lastId = messages.length > 0 ? messages[messages.length - 1].id : null;
+	// system 消息不进渲染(见 serialize.ts)：去掉后再取末尾，否则空 SYSTEM 占住 isLast。
+	const lastVisible = [...messages].reverse().find((m) => m.role !== "system");
+	const lastId = lastVisible ? lastVisible.id : null;
 	// Only the last KEEP_RECENT persisted messages are fully rendered; older
 	// ones collapse to summary rows (unless the user expanded them).
 	const recentStart = state.messages.length > COLLAPSE_MIN ? Math.max(0, state.messages.length - KEEP_RECENT) : 0;
@@ -659,6 +662,27 @@ export function MessageList({
 					</div>
 				)}
 				{state.messages.map((m, i) => {
+					// system 不占位——旧快照残留的空 SYSTEM 气泡直接丢掉，不进折叠行也不进 LazyMount。
+					if (m.role === "system") return null;
+					// 目标审查回合的指令与纯 verdict 结论默认折叠成摘要行（结论卡已有人话
+					// 翻译，裸 JSON 只留审计入口；点开展开看原文，记忆沿用 expanded）。
+					const fold = reviewFoldKind(m);
+					if (fold && !expanded.has(m.id)) {
+						return (
+							<CollapsedMessage
+								key={m.id}
+								message={m}
+								onExpand={expand}
+								summary={
+									fold.kind === "prompt"
+										? t("goalBarReviewing")
+										: fold.verdict === "pass"
+											? t("goalBarPassed")
+											: t("goalBarFailed")
+								}
+							/>
+						);
+					}
 					const isOld = i < recentStart;
 					const isExpandedOld = isOld && expanded.has(m.id);
 					if (isOld && !isExpandedOld) {
@@ -777,8 +801,17 @@ export function MessageList({
 				))}
 			</div>
 			{!stickBottom && (
-				<button type="button" className="scroll-bottom" onClick={scrollToBottom}>
-					<FiArrowDown /> {t("backToBottom")}
+				<button
+					type="button"
+					className="scroll-bottom"
+					title={t("backToBottom")}
+					aria-label={t("backToBottom")}
+					onClick={scrollToBottom}
+				>
+					<FiArrowDown />
+					{/* 文字包 span：窄屏（≤380px）只藏它退成纯图标（.scroll-bottom-label），
+					    藏的是标签而不是整块，按钮本体的点击区与 title/aria 都在。 */}
+					<span className="scroll-bottom-label">{t("backToBottom")}</span>
 				</button>
 			)}
 			<SearchBar

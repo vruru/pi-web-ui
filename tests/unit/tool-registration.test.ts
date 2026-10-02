@@ -7,7 +7,8 @@
  *
  * 规则：agent-service.ts 里调用的每个 make*Tool(s) 工厂，必须在 FACTORY_TOOLS 里
  * 登记它的产出；每个产出的工具名要么在目录里（可开关），要么在 INTRINSIC 内核
- * 白名单里（bash/read：覆盖 SDK 内置，关了 agent 就残，不给关；锁死、永不入目录）。
+ * 白名单里（bash/read：覆盖 SDK 内置，与 write/edit 一起走设置页「核心工具」区开关、
+ * 不占目录行——见 tool-manager.ts 的 CORE_BUILTIN_TOOL_NAMES）。
  * 加新工具 = 在这里给它的工厂登记一行，逼着你当场决定：入目录还是内核。
  * 插件工具走 enabledPluginToolDefs 动态区，不经过 make*Tool 调用，不管。
  */
@@ -19,10 +20,15 @@ import {
 	ASK_USER_QUESTION_TOOL_NAME,
 	BROWSER_PAGE_TOOL_NAME,
 	CLAIM_FILES_TOOL_NAME,
+	COMPACT_CONTEXT_TOOL_NAME,
 	CONVERSATION_READ_TOOL_NAME,
 	DELEGATE_TASK_TOOL_NAME,
 	EDIT_SOFT_TOOL_NAME,
+	EVAL_TOOL_NAME,
+	LSP_TOOL_NAME,
 	MARKERS_LIST_TOOL_NAME,
+	PATCH_TOOL_NAME,
+	PLAN_UPDATE_TOOL_NAME,
 	PRESENT_FILES_TOOL_NAME,
 	SCHEDULE_CANCEL_TOOL_NAME,
 	SCHEDULE_LIST_TOOL_NAME,
@@ -34,7 +40,8 @@ import {
 
 const AGENT_SERVICE_SRC = readFileSync(join(__dirname, "..", "..", "server", "agent-service.ts"), "utf8");
 
-/** 注册了但永远不给开关的内核工具（覆盖 SDK 内置；目录里有它们 = 用户能把 agent 变砖）。 */
+/** 覆盖 SDK 内置的内核工具（与 write/edit 同走设置页「核心工具」区，不占目录行；
+ *  目录行是 OTHER_AGENT_TOOLS 自动渲染的细粒度开关，核心四件套不在其中）。 */
 const INTRINSIC = new Set(["bash", "read"]);
 
 /** 工厂 → 它注册的工具名（与各工厂的 name: 对齐；makeSubagentTools 产出 7 个子代理工具，见 subagents.ts）。 */
@@ -52,9 +59,14 @@ const FACTORY_TOOLS: Record<string, string[]> = {
 	makeBrowserPageTool: [BROWSER_PAGE_TOOL_NAME],
 	makeConversationReadTool: [CONVERSATION_READ_TOOL_NAME],
 	makeClaimFilesTool: [CLAIM_FILES_TOOL_NAME],
+	makePlanUpdateTool: [PLAN_UPDATE_TOOL_NAME],
 	makePresentFilesTool: [PRESENT_FILES_TOOL_NAME],
 	makeSkillTool: [SKILL_TOOL_NAME],
+	makeCompactContextTool: [COMPACT_CONTEXT_TOOL_NAME],
 	makeScheduleTools: [SCHEDULE_TASK_TOOL_NAME, SCHEDULE_LIST_TOOL_NAME, SCHEDULE_CANCEL_TOOL_NAME],
+	makeEvalTool: [EVAL_TOOL_NAME],
+	makePatchTool: [PATCH_TOOL_NAME],
+	makeLspTool: [LSP_TOOL_NAME],
 };
 
 /** agent-service.ts 里实际调用的工厂（去注释、防定义行，只认 `makeXxxTool(` 调用）。 */
@@ -100,7 +112,7 @@ describe("注册→目录", () => {
 		).toEqual([]);
 	});
 
-	it("bash/read 永不入目录（关了 agent 就残，不给关）", () => {
+	it("核心内置工具不入目录（它们走设置页「核心工具」区，不占 OTHER_AGENT_TOOLS 目录行）", () => {
 		const known = new Set(AGENT_TOOL_CATALOG.map((t) => t.name));
 		expect([...INTRINSIC].filter((n) => known.has(n))).toEqual([]);
 	});

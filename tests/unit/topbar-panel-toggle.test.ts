@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react-dom/test-utils";
@@ -23,6 +26,9 @@ import { setAppSend, setAppGlobals, resetAppGlobals } from "../../web/src/app-gl
  * 零 token / 零端口：真 jsdom + 真 React 渲染，只断言 DOM 结构与回调。
  */
 
+// 锚到仓库根（不用 process.cwd()）：静态守卫要读 web/src/styles.css。
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
 // TopBar 只读 chat 的这几个字段（其余快照流内容用不到），stub 到「已连接」即可。
 const chatStub = {
 	status: "open",
@@ -31,6 +37,7 @@ const chatStub = {
 	activeConversationId: "",
 	terminals: [],
 	bgServers: [],
+	schedulerTasks: [],
 	tabs: undefined,
 	update: null,
 	updatesAll: [],
@@ -167,6 +174,21 @@ describe("TopBar 是单一扁直流（无按种类包裹的容器、无贴边例
 		expect(spacerIndexes(container)).toEqual([]);
 	});
 
+	it("全部条目设为居中时，条目两侧各有一个 spacer（平分空间，真正居中而非偏右）", () => {
+		const { container } = mount("chat", [
+			{ ...hostEntry("host:chat"), align: "center" },
+			{ ...hostEntry("host:terminal"), align: "center" },
+		]);
+		const [sp1, sp2] = spacerIndexes(container);
+		expect(sp1).toBe(0);
+		expect(sp2).toBe(3);
+		const kids = flowKids(container);
+		expect(kids[0].classList.contains("tb-spacer")).toBe(true);
+		expect(kids[1].classList.contains("tb-tab")).toBe(true);
+		expect(kids[2].classList.contains("tb-tab")).toBe(true);
+		expect(kids[3].classList.contains("tb-spacer")).toBe(true);
+	});
+
 	it("☰/📁 不再是贴边例外：位置只由 slot 顺序决定，点击仍开对侧抽屉", () => {
 		// files 排在 chat 之前 → 它就是第一个条目（旧版无论如何都钉在顶栏最右）
 		const { container, opened } = mount("chat", [
@@ -201,6 +223,20 @@ describe("TopBar 是单一扁直流（无按种类包裹的容器、无贴边例
 		expect(container.querySelector(".brand-name")).toBeTruthy();
 		const files = container.querySelector(".topbar-flow .panel-toggle.has-label");
 		expect(files?.querySelector("span")).toBeTruthy();
+	});
+
+	it("用 emoji 当图标的顶栏按钮带 .chip-emoji（免被「只显示图标」的 span 隐藏规则误杀）", () => {
+		// 静态锁：豁免必须写在 no-labels 的隐藏规则里（改了 CSS 忘了加 :not 就会红）。
+		const css = readFileSync(join(ROOT, "web", "src", "styles.css"), "utf8");
+		const rule = css.match(/\.topbar\.no-labels[\s\S]{0,600}?\.brand-name/);
+		expect(rule?.[0]).toContain(":not(.chip-emoji)");
+
+		// 回归：临时对话按钮采用虚线对话气泡图标（LuMessageSquareDashed），在 no-labels 模式下原生保留 SVG 图标
+		const { container } = mount("chat", undefined, undefined, undefined, {
+			settings: { uiLayout: { topbarText: false } },
+		});
+		const ephemSvg = container.querySelector(".topbar-flow .ephemeral-chat-btn svg");
+		expect(ephemSvg).toBeTruthy();
 	});
 
 	it("顶栏所有可点控件都带 data-tip（悬浮即时说明），唯品牌徽标例外", () => {

@@ -39,9 +39,10 @@ const DEFAULT_CONFIG = {
 };
 
 function esc(s) {
-	return String(s ?? "").replace(/[&<>"']/g, (c) => (
-		{ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
-	));
+	return String(s ?? "").replace(
+		/[&<>"']/g,
+		(c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+	);
 }
 
 async function loadConfig(dir) {
@@ -152,7 +153,9 @@ export default {
 					}
 				}
 				if (migrated) {
-					try { await saveConfig(host.dir, cfg); } catch {} // 剥离后的干净配置回写
+					try {
+						await saveConfig(host.dir, cfg);
+					} catch {} // 剥离后的干净配置回写
 					host.log("已将明文密码迁移到加密存储");
 				}
 			}
@@ -292,7 +295,10 @@ export default {
 		// IMAP 基础设施：互斥串行 + 惰性连接
 		// ------------------------------------------------------------------
 		function serialized(fn) {
-			const run = st.chain.then(() => fn(), () => fn());
+			const run = st.chain.then(
+				() => fn(),
+				() => fn(),
+			);
 			st.chain = run.then(
 				() => {},
 				() => {},
@@ -391,16 +397,14 @@ export default {
 		}
 
 		async function searchMails({ query, folder = "INBOX", limit = 20 } = {}) {
-			const q = String(query ?? "").trim().toLowerCase();
+			const q = String(query ?? "")
+				.trim()
+				.toLowerCase();
 			if (!q) return [];
 			// 客户端过滤信封（subject/from/to），避开各家 IMAP SEARCH 方言差异
 			const pool = await listMails({ folder, limit: SEARCH_SCAN });
 			return pool
-				.filter((m) =>
-					[m.subject, m.from, m.fromName, m.to].some((s) =>
-						String(s).toLowerCase().includes(q),
-					),
-				)
+				.filter((m) => [m.subject, m.from, m.fromName, m.to].some((s) => String(s).toLowerCase().includes(q)))
 				.slice(0, Math.min(Number(limit) || 20, 50));
 		}
 
@@ -409,11 +413,7 @@ export default {
 			return withMailbox(folder, async (client) => {
 				// 注意：第三个参数 {uid:true} 才表示按 UID 取信——放查询参数里
 				// 会被当成序号，导致“列表能看、点开未找到”（UID > 邮件总数时必现）。
-				const msg = await client.fetchOne(
-					String(uid),
-					{ envelope: true, flags: true, source: true },
-					{ uid: true },
-				);
+				const msg = await client.fetchOne(String(uid), { envelope: true, flags: true, source: true }, { uid: true });
 				if (!msg || !msg.source) throw new Error(`未找到 uid=${uid}`);
 				const meta = summarize(msg);
 				const raw = msg.source;
@@ -525,10 +525,7 @@ export default {
 						/* 拿不到主题就只报数量 */
 					}
 					if (st.config.notifyEnabled !== false) {
-						host.notify(
-							"info",
-							`📬 ${fresh.length} 封新邮件${subjects.length ? ` — ${subjects.join(" · ")}` : ""}`,
-						);
+						host.notify("info", `📬 ${fresh.length} 封新邮件${subjects.length ? ` — ${subjects.join(" · ")}` : ""}`);
 					}
 					host.broadcast({
 						kind: "new-mail",
@@ -585,7 +582,7 @@ export default {
 		// ------------------------------------------------------------------
 		const FOLDER_PARAM = {
 			type: "string",
-			description: "邮箱文件夹路径，默认 INBOX",
+			description: "Mailbox folder path, default INBOX",
 		};
 
 		function aiTools() {
@@ -594,13 +591,13 @@ export default {
 					name: "mail_list",
 					label: "列出新邮件",
 					description:
-						"列出邮箱里的最近邮件摘要（发件人/主题/日期/是否已读）。用户让你查邮件、看收件箱时用它。",
+						"List summaries of recent emails (sender/subject/date/read status). Use it when the user asks to check mail or look at the inbox.",
 					parameters: {
 						type: "object",
 						properties: {
 							folder: FOLDER_PARAM,
-							limit: { type: "number", description: "返回条数，默认 30，最大 200" },
-							unseen_only: { type: "boolean", description: "只看未读，默认 false" },
+							limit: { type: "number", description: "Number of results, default 30, max 200" },
+							unseen_only: { type: "boolean", description: "Only unread mail, default false" },
 						},
 					},
 					execute: async (_id, args) => {
@@ -617,11 +614,11 @@ export default {
 				{
 					name: "mail_read",
 					label: "读一封邮件",
-					description: "按 uid 读取一封邮件的完整正文（纯文本，超长截断）。",
+					description: "Read the full body of one email by uid (plain text, truncated when very long).",
 					parameters: {
 						type: "object",
 						properties: {
-							uid: { type: "number", description: "mail_list 返回的 #编号" },
+							uid: { type: "number", description: "#id returned by mail_list" },
 							folder: FOLDER_PARAM,
 						},
 						required: ["uid"],
@@ -643,13 +640,13 @@ export default {
 				{
 					name: "mail_search",
 					label: "搜索邮件",
-					description: "在最近邮件里按关键词搜索（匹配主题/发件人/收件人）。",
+					description: "Search recent emails by keyword (matches subject/sender/recipients).",
 					parameters: {
 						type: "object",
 						properties: {
-							query: { type: "string", description: "关键词" },
+							query: { type: "string", description: "Keyword" },
 							folder: FOLDER_PARAM,
-							limit: { type: "number", description: "返回条数，默认 20" },
+							limit: { type: "number", description: "Number of results, default 20" },
 						},
 						required: ["query"],
 					},
@@ -667,17 +664,15 @@ export default {
 				{
 					name: "mail_send",
 					label: "发送邮件",
-					description: "通过已配置的 SMTP 发一封文本邮件。",
-					promptGuidelines: [
-						"发送前把收件人/主题/正文给用户确认一次再调用。",
-					],
+					description: "Send a plain-text email via the configured SMTP.",
+					promptGuidelines: ["Confirm recipient/subject/body with the user once before sending."],
 					parameters: {
 						type: "object",
 						properties: {
-							to: { type: "string", description: "收件人邮箱地址" },
-							cc: { type: "string", description: "抄送（可选）" },
-							subject: { type: "string", description: "主题" },
-							body: { type: "string", description: "正文（纯文本）" },
+							to: { type: "string", description: "Recipient email address" },
+							cc: { type: "string", description: "CC (optional)" },
+							subject: { type: "string", description: "Subject" },
+							body: { type: "string", description: "Body (plain text)" },
 						},
 						required: ["to", "body"],
 					},
@@ -689,16 +684,16 @@ export default {
 				{
 					name: "mail_manage",
 					label: "管理邮件状态",
-					description: '批量标记已读/未读或删除邮件。action 取 "seen" | "unseen" | "delete"。',
+					description: 'Batch-mark mail as read/unread or delete it. action is "seen" | "unseen" | "delete".',
 					parameters: {
 						type: "object",
 						properties: {
 							action: {
 								type: "string",
 								enum: ["seen", "unseen", "delete"],
-								description: "操作类型",
+								description: "Operation type",
 							},
-							uids: { type: "array", items: { type: "number" }, description: "邮件 uid 列表" },
+							uids: { type: "array", items: { type: "number" }, description: "List of mail uids" },
 							folder: FOLDER_PARAM,
 						},
 						required: ["action", "uids"],
@@ -715,7 +710,7 @@ export default {
 				{
 					name: "mail_folders",
 					label: "列出文件夹",
-					description: "列出邮箱的全部文件夹路径（收件箱/归档/废纸篓等）。",
+					description: "List all mailbox folder paths (inbox/archive/trash etc.).",
 					parameters: { type: "object", properties: {} },
 					execute: async () => {
 						return withMailbox("INBOX", async (client) => {
@@ -808,9 +803,7 @@ export default {
 							host.notify("info", `📬 已发送给 ${msg.to}`);
 							host.broadcast({ kind: "result", ok: true, action: "send" });
 						})
-						.catch((err) =>
-							host.notify("error", `📬 发送失败：${err?.message ?? err}`),
-						);
+						.catch((err) => host.notify("error", `📬 发送失败：${err?.message ?? err}`));
 					break;
 				default:
 					host.log("unknown action:", msg.action);
@@ -842,9 +835,13 @@ export default {
 
 		return () => {
 			offMsg();
-			try { offAttach?.(); } catch {}
+			try {
+				offAttach?.();
+			} catch {}
 			st.toolUnregister?.();
-			try { st.bgTask?.unregister?.(); } catch {}
+			try {
+				st.bgTask?.unregister?.();
+			} catch {}
 			if (st.pollTimer) clearInterval(st.pollTimer);
 			try {
 				st.installChild?.kill(); // 进行中的依赖安装一并终止，不残留写手

@@ -73,12 +73,19 @@ export async function safeDestination(root: string, name: string): Promise<strin
 	return path;
 }
 
-function byteLimit() {
+/**
+ * Transform that enforces the 1 GiB expanded-size cap on the bytes that
+ * actually flow through it. `total` makes several transforms share one global
+ * counter — for ZIP extraction the header-declared uncompressedSize is
+ * attacker-controlled, so the cap must be enforced on REAL decompressed output.
+ */
+function byteLimit(total?: { bytes: number }) {
 	let bytes = 0;
 	return new Transform({
 		transform(chunk: Buffer, _encoding, done) {
 			bytes += chunk.length;
-			done(bytes > MAX_BYTES ? new Error("Archive exceeds 1 GiB expanded size") : null, chunk);
+			if (total) total.bytes += chunk.length;
+			done((total ? total.bytes : bytes) > MAX_BYTES ? new Error("Archive exceeds 1 GiB expanded size") : null, chunk);
 		},
 	});
 }
@@ -127,7 +134,10 @@ async function unzip(source: string, stage: string): Promise<void> {
 		yauzl.open(source, { lazyEntries: true, strictFileNames: true }, (err, z) => (err ? fail(err) : ok(z!))),
 	);
 	let count = 0;
-	let bytes = 0;
+	// 全局实量字节计数：zip 头声明的 uncompressedSize 可被伪造（头写小、解压输出
+	// 无限膨胀的 zip 炸弹），上限必须按每个条目实际解压输出累加，超限抛错 ——
+	// extractArchive 的 finally 会清理临时目录。tar 分支不受影响。
+	const total = { bytes: 0 };
 	const paths = new Set<string>();
 	await new Promise<void>((ok, fail) => {
 		const abort = (err: unknown) => {
@@ -142,8 +152,7 @@ async function unzip(source: string, stage: string): Promise<void> {
 				trackEntry(paths, name);
 				const type = (entry.externalFileAttributes >>> 16) & 0o170000;
 				if (type && type !== 0o100000 && type !== 0o040000) throw new Error("Archive contains a link or special file");
-				if (++count > MAX_ENTRIES || (bytes += entry.uncompressedSize) > MAX_BYTES)
-					throw new Error("Archive limit exceeded (20,000 entries / 1 GiB)");
+				if (++count > MAX_ENTRIES) throw new Error("Archive limit exceeded (20,000 entries / 1 GiB)");
 				const dest = join(stage, name);
 				if (entry.fileName.endsWith("/")) await mkdir(dest, { recursive: true });
 				else {
@@ -151,7 +160,7 @@ async function unzip(source: string, stage: string): Promise<void> {
 					const stream = await new Promise<import("node:stream").Readable>((resolveStream, reject) =>
 						zip.openReadStream(entry, (err, s) => (err ? reject(err) : resolveStream(s!))),
 					);
-					await pipeline(stream, byteLimit(), createWriteStream(dest, { flags: "wx", mode: 0o600 }));
+					await pipeline(stream, byteLimit(total), createWriteStream(dest, { flags: "wx", mode: 0o600 }));
 				}
 				zip.readEntry();
 			})().catch(abort);

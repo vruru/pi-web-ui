@@ -46,7 +46,8 @@ describe("MarkdownBody rawHtml — HTML 渲染", () => {
 		const html = render('<b>bold</b> <em>em</em> <span style="color:red">red</span>');
 		expect(html).toContain("<b>bold</b>");
 		expect(html).toContain("<em>em</em>");
-		expect(html).toContain('<span style="color:red">red</span>');
+		// sanitize（GitHub 式白名单）剥掉 style 属性，但 span 元素与文本保留。
+		expect(html).toContain("<span>red</span>");
 	});
 
 	it("rawHtml=true：HTML 表格渲染", () => {
@@ -114,5 +115,58 @@ describe("MarkdownBody rawHtml — HTML 渲染", () => {
 		expect(html).toContain("<strong>strong</strong>");
 		expect(html).toContain("<b>html-b</b>");
 		expect(html).toContain("<em>html-em</em>");
+	});
+});
+
+/**
+ * sanitize 专项（rehype-sanitize 默认 schema = GitHub 式白名单）：rawHtml 的信任
+ * 模型再宽也是"模型输出"，危险节点必须被剥 —— 脚本/事件属性/白名单外元素/
+ * javascript: 协议一个都不能活；常用标签与 markdown 管线（KaTeX/高亮/任务清单）
+ * 的产物原样保留。
+ */
+describe("MarkdownBody rawHtml — sanitize 白名单", () => {
+	it("<script> 连内容一起被剥掉，其余文本照常", () => {
+		const html = render("hello <script>alert(1)</script> world");
+		expect(html).not.toContain("<script");
+		expect(html).not.toContain("alert(1)");
+		expect(html).toContain("hello");
+		expect(html).toContain("world");
+	});
+
+	it("事件属性（onerror 等）被剥掉，img 元素本身保留", () => {
+		const html = render('<img src="https://example.com/x.png" onerror="alert(1)">');
+		expect(html).not.toContain("onerror");
+		expect(html).toContain("<img");
+		expect(html).toContain("x.png");
+	});
+
+	it("白名单外的元素（iframe）被剥掉", () => {
+		const html = render('<iframe src="https://evil.example"></iframe><p>stay</p>');
+		expect(html).not.toContain("<iframe");
+		expect(html).toContain("stay");
+	});
+
+	it("javascript: 链接协议被剥掉（href 移除，文本保留）", () => {
+		const html = render("[click](javascript:alert(1))");
+		expect(html).not.toContain("javascript:");
+		expect(html).toContain("click");
+	});
+
+	it("raw HTML 的 target 属性被剥掉，MdLink 的安全默认（_blank + noreferrer noopener）兜底", () => {
+		const html = render('<a href="https://example.com" target="_self">x</a>');
+		expect(html).toContain('target="_blank"');
+		expect(html).toContain('rel="noreferrer noopener"');
+		expect(html).not.toContain("_self");
+	});
+
+	it("数学公式（KaTeX 路径）不被 sanitize 破坏", () => {
+		const html = render("$E=mc^2$");
+		expect(html).toContain("katex");
+	});
+
+	it("常用标签（b/strong/code/pre）与代码高亮保留", () => {
+		const html = render("<b>b</b> `code`");
+		expect(html).toContain("<b>b</b>");
+		expect(html).toContain("<code>code</code>");
 	});
 });

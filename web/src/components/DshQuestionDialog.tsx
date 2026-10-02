@@ -1,9 +1,26 @@
 import { useEffect, useRef, useState } from "react";
 import { useT } from "../i18n";
 import { appSend } from "../app-globals";
+import { useEscapeKey } from "../shortcut-stack";
 import { hoverCapable } from "../tip-position";
 import { HoverDetail } from "./HoverDetail";
 import { Markdown } from "./Markdown";
+
+interface QuestionItem {
+	id: string;
+	question: string;
+	detail?: string;
+	header?: string;
+	options?: { label: string; description?: string; preview?: string }[];
+	multiSelect?: boolean;
+	/** 级联依赖（Waterfall）：仅当指定 questionId 选中了特定值（未给 value 则表示只要已作答）时本题才展示；不满足则跳过。 */
+	dependsOn?: {
+		questionId: string;
+		value?: string | string[];
+	};
+	/** 动态级联选项映射：根据前序依赖题的所选值动态提供候选选项列表。 */
+	optionsMap?: Record<string, { label: string; description?: string; preview?: string }[]>;
+}
 
 interface DshQuestionDialogProps {
 	question: {
@@ -12,14 +29,7 @@ interface DshQuestionDialogProps {
 		deadline?: number;
 		conversationId?: string;
 		conversationTitle?: string;
-		questions: {
-			id: string;
-			question: string;
-			detail?: string;
-			header?: string;
-			options?: { label: string; description?: string; preview?: string }[];
-			multiSelect?: boolean;
-		}[];
+		questions: QuestionItem[];
 	};
 	/** 跨页作答时持有方会话 id：答案转交过去（question_answer 带 owner）。 */
 	owner?: string;
@@ -57,8 +67,20 @@ export function DshQuestionDialog({ question, owner, conversationTitle }: DshQue
 		setSelections({});
 		setCustoms({});
 		setStep(0);
-		setRemainSec(question.deadline ? Math.max(0, Math.ceil((question.deadline - Date.now()) / 1000)) : -1);
-	}, [question.id, question.deadline]);
+		const remain = question.deadline ? Math.max(0, Math.ceil((question.deadline - Date.now()) / 1000)) : -1;
+		setRemainSec(remain);
+		// 审查 #9：挂载时已过期的提问立即取消 —— 下面的定时器分支（s > 0 才发）
+		// 永远不会触发，过期提问会一直挂着等用户手点或服务端超时。
+		if (question.deadline && remain <= 0) {
+			appSend({
+				type: "question_answer",
+				id: question.id,
+				answers: [],
+				cancelled: true,
+				...(owner ? { owner } : {}),
+			});
+		}
+	}, [question.id, question.deadline, owner]);
 
 	useEffect(() => {
 		if (!question.deadline) return;
@@ -82,18 +104,79 @@ export function DshQuestionDialog({ question, owner, conversationTitle }: DshQue
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [question.id, question.deadline]);
 
-	useEffect(() => {
-		const onKey = (e: KeyboardEvent) => {
-			if (e.key === "Escape") cancel();
-		};
-		document.addEventListener("keydown", onKey);
-		return () => document.removeEventListener("keydown", onKey);
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [question.id]);
+	/** 取消提问：✕ / Esc / 底部「取消」与自动取消共用同一出口。 */
+	const cancel = () => {
+		appSend({ type: "question_answer", id: question.id, answers: [], cancelled: true, ...(owner ? { owner } : {}) });
+	};
 
-	const total = question.questions.length;
-	const q = question.questions[step];
-	if (!q) return null;
+	// 审查 #12：Esc 改走 shortcut-stack 分层栈（与 Modal 同一调度）——
+	// 多层弹窗叠开时内层优先消费，不再裸 document 监听抢 Esc。
+	useEscapeKey(() => {
+		cancel();
+	});
+
+	const isQuestionVisible = (qq: QuestionItem, sel: Record<string, string[]>): boolean => {
+		if (!qq.dependsOn) return true;
+		const depSelected = sel[qq.dependsOn.questionId] ?? [];
+		if (qq.dependsOn.value === undefined) return depSelected.length > 0;
+		const expected = Array.isArray(qq.dependsOn.value) ? qq.dependsOn.value : [qq.dependsOn.value];
+		return depSelected.some((ans) => expected.includes(ans));
+	};
+
+	const visibleQuestions = question.questions.filter((qq) => isQuestionVisible(qq, selections));
+	const total = visibleQuestions.length;
+
+	// 审查 #10：dependsOn 依赖链全不满足 → 一道可回答的题都没有。短暂展示提示后
+	// 自动取消（question_answer cancelled），防止模型干等到服务端超时才恢复对话。
+	useEffect(() => {
+		if (question.questions.length === 0 || total > 0) return;
+		const id = setTimeout(() => {
+			appSend({
+				type: "question_answer",
+				id: question.id,
+				answers: [],
+				cancelled: true,
+				...(owner ? { owner } : {}),
+			});
+		}, 1500);
+		return () => clearTimeout(id);
+	}, [question.id, question.questions.length, total, owner]);
+	const currentStep = Math.min(step, Math.max(0, total - 1));
+	const q = visibleQuestions[currentStep];
+	if (!q) {
+		// 审查 #10：无可回答的题（dependsOn 全不满足）→ 明确提示并自动取消
+		// （见上方 effect），不再整块消失让模型干等。
+		return (
+			<div className="dialog-inline" data-dialog-kind="select">
+				<div className="dialog-head">
+					<span className="dialog-badge">{t("modelQuestion")}</span>
+					{convTitle && (
+						<span className="question-conv-title" title={convTitle}>
+							{convTitle}
+						</span>
+					)}
+					<button type="button" className="dialog-dismiss" title={t("cancel")} onClick={cancel}>
+						✕
+					</button>
+				</div>
+				<div className="set-section">
+					<div className="set-hint">{t("questionNoneAvailable")}</div>
+				</div>
+			</div>
+		);
+	}
+
+	/** 当前题目的有效选项：如果定义了 optionsMap，根据前序依赖题所选动态取对应候选 */
+	const effectiveOptions = (() => {
+		if (!q) return [];
+		if (q.optionsMap && q.dependsOn) {
+			const depAnswers = selections[q.dependsOn.questionId] ?? [];
+			for (const ans of depAnswers) {
+				if (q.optionsMap[ans]) return q.optionsMap[ans];
+			}
+		}
+		return q.options ?? [];
+	})();
 
 	/** 把（可能刚更新、尚未落 state 的）选中结果连同全部题的答案一并提交。 */
 	const submitSelections = (sel: Record<string, string[]>) => {
@@ -103,10 +186,6 @@ export function DshQuestionDialog({ question, owner, conversationTitle }: DshQue
 			return { id: qq.id, selected, ...(custom ? { custom } : {}) };
 		});
 		appSend({ type: "question_answer", id: question.id, answers, ...(owner ? { owner } : {}) });
-	};
-
-	const cancel = () => {
-		appSend({ type: "question_answer", id: question.id, answers: [], cancelled: true, ...(owner ? { owner } : {}) });
 	};
 
 	const toggleOption = (qid: string, label: string) => {
@@ -127,17 +206,18 @@ export function DshQuestionDialog({ question, owner, conversationTitle }: DshQue
 		}
 		const sel = { ...selections, [qid]: [label] };
 		setSelections(sel);
-		if (step === total - 1) {
+		const nextVisible = question.questions.filter((qq) => isQuestionVisible(qq, sel));
+		if (currentStep >= nextVisible.length - 1) {
 			submitSelections(sel);
 		} else {
-			setStep(step + 1);
+			setStep(currentStep + 1);
 		}
 	};
 
 	/** 「下一步/提交」：供多选、自由文本题推进；最后一题提交。 */
 	const onNext = () => {
-		if (step === total - 1) submitSelections(selections);
-		else setStep(step + 1);
+		if (currentStep >= total - 1) submitSelections(selections);
+		else setStep(currentStep + 1);
 	};
 
 	/** 当前题是否可提交：
@@ -145,12 +225,12 @@ export function DshQuestionDialog({ question, owner, conversationTitle }: DshQue
 	 *  - 无选项（纯自由文本/可跳过）：无需任何输入即可提交，空提交 = 跳过。 */
 	const answered = (qid: string) => {
 		const qq = question.questions.find((x) => x.id === qid);
-		if ((qq?.options?.length ?? 0) === 0) return true;
+		if (effectiveOptions.length === 0 && (qq?.options?.length ?? 0) === 0) return true;
 		return (selections[qid]?.length ?? 0) > 0 || (customs[qid] ?? "").trim() !== "";
 	};
 
 	/** 已选中且带 `preview` 的选项预览（当前题；多选选中多个则逐个叠加）。 */
-	const previews = (q.options ?? [])
+	const previews = effectiveOptions
 		.filter((o) => (selections[q.id] ?? []).includes(o.label) && o.preview)
 		.map((o) => o.preview as string);
 
@@ -163,7 +243,7 @@ export function DshQuestionDialog({ question, owner, conversationTitle }: DshQue
 						{convTitle}
 					</span>
 				)}
-				{total > 1 && <span className="question-progress">{t("questionStep", { cur: step + 1, total })}</span>}
+				{total > 1 && <span className="question-progress">{t("questionStep", { cur: currentStep + 1, total })}</span>}
 				{remainSec >= 0 && (
 					<span className="question-timer">
 						{remainSec > 0 ? t("questionTimeout", { s: remainSec }) : t("questionTimeoutExpired")}
@@ -174,7 +254,7 @@ export function DshQuestionDialog({ question, owner, conversationTitle }: DshQue
 				</button>
 			</div>
 			<div className="set-section" key={q.id}>
-				<div className="set-section-title">{q.header ?? `${t("modelQuestion")} ${step + 1}`}</div>
+				<div className="set-section-title">{q.header ?? `${t("modelQuestion")} ${currentStep + 1}`}</div>
 				<div className="question-head">
 					<Markdown text={q.question} rawHtml />
 				</div>
@@ -183,9 +263,9 @@ export function DshQuestionDialog({ question, owner, conversationTitle }: DshQue
 						<Markdown text={q.detail} rawHtml />
 					</div>
 				)}
-				{(q.options?.length ?? 0) > 0 && (
+				{effectiveOptions.length > 0 && (
 					<div className="set-list">
-						{q.options!.map((o) => {
+						{effectiveOptions.map((o) => {
 							const active = (selections[q.id] ?? []).includes(o.label);
 							return (
 								<QuestionOption
@@ -229,11 +309,16 @@ export function DshQuestionDialog({ question, owner, conversationTitle }: DshQue
 					{t("cancel")}
 				</button>
 				<div className="dialog-nav-right">
-					<button type="button" className="dialog-prev" disabled={step === 0} onClick={() => setStep(step - 1)}>
+					<button
+						type="button"
+						className="dialog-prev"
+						disabled={currentStep === 0}
+						onClick={() => setStep(currentStep - 1)}
+					>
 						{t("previous")}
 					</button>
 					<button type="button" className="dialog-submit" disabled={!answered(q.id)} onClick={onNext}>
-						{step === total - 1 ? t("modelQuestionSubmit") : t("next")}
+						{currentStep === total - 1 ? t("modelQuestionSubmit") : t("next")}
 					</button>
 				</div>
 			</div>

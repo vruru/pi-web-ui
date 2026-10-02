@@ -13,13 +13,13 @@
 // 到期执行走 index.ts 的 executor：目标对话还在 → steer 语义唤醒它（不切用户
 // 当前对话）；不在了（关闭/重启）→ 回落原有无头执行；单次任务触发后自动删除。
 //
-// 双语约定（issue #91）：definition 走 bilingual(en, zh) 内联双语；per-call
+// 文案约定：工具 definition（description/promptSnippet/promptGuidelines）为纯英文；per-call
 // 返回文本按 lang 取 pick(lang, zh, en, key, vars)，缺表回落英文内联。
 // ---------------------------------------------------------------------------
 
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { bilingual, pick, type ServerLang } from "./i18n.js";
+import { pick, type ServerLang } from "./i18n.js";
 import { SCHEDULE_CANCEL_TOOL_NAME, SCHEDULE_LIST_TOOL_NAME, SCHEDULE_TASK_TOOL_NAME } from "./tool-manager.js";
 import {
 	computeNextFire,
@@ -153,20 +153,12 @@ export function makeScheduleTools(
 	const taskTool = defineTool({
 		name: SCHEDULE_TASK_TOOL_NAME,
 		label: "Schedule a wake-up in this conversation",
-		description: bilingual(
-			"Create a scheduled wake-up in the CURRENT conversation: at the given cron time or after the given delay, the scheduler automatically delivers your prompt back into this conversation so you continue the work and report to the user. " +
-				"Use it when the user asks for periodic checks, delayed reminders, or scheduled summaries — do NOT fake it with sleep loops (a sleeping script can never push a message back). " +
-				'Schedule accepts a 5-field cron ("0 * * * *" = hourly) or a relative delay ("in 30m", "in 1h", "30m"); minimum interval is 60s. ' +
-				"One-shot by default (recurring=false auto-deletes the task after it fires); pass recurring=true for repeats. " +
-				"The wake-up binds the originating conversation AND its persisted session file: after context compaction or a restart the scheduler re-binds to the same session automatically; if the original conversation is gone it first falls back to the project's active conversation (and visibly reports the move), and only runs headless (report in panel history) when no live conversation exists for the project. " +
-				"Manage with schedule_list / schedule_cancel; the user can also cancel from the background-tasks panel.",
-			"在**当前对话**里创建一个定时唤醒：到指定 cron 时间或延迟后，调度器自动把你的 prompt 投回本对话，你继续执行并向用户汇报。" +
-				"用户要求定时巡检、延时提醒、定时汇总时用它 —— 不要用 sleep 死循环假装答应（休眠的脚本推不回任何消息）。" +
-				"时间写法收 5 字段 cron（“0 * * * *”=每小时）或相对延迟（“in 30m”“in 1h”“30m”）；最短间隔 60s。" +
-				"默认单次（recurring=false 触发后自动删除）；传 recurring=true 做周期任务。" +
-				"唤醒绑定发起对话与其落盘会话文件：上下文压缩或重启后自动重绑到同一会话；原对话不在时先回落到同项目的活跃对话（并明确提示迁移），同项目无存活对话才无头执行，报告留在调度面板历史里。" +
-				"用 schedule_list / schedule_cancel 管理；用户也可从后台任务面板取消。",
-		),
+		description:
+			"Create a scheduled wake-up in the CURRENT conversation: at the cron time or after the delay, your prompt is delivered back into this conversation so you continue and report. " +
+			"Use for periodic checks, delayed reminders, scheduled summaries — never sleep loops (they cannot push messages back). " +
+			'schedule: 5-field cron ("0 * * * *" hourly) or delay ("in 30m"); minimum 60s. One-shot by default; recurring=true repeats. ' +
+			"Re-binds to the same session after compaction/restart; if the conversation is gone it falls back to the project's active conversation (visibly reported), headless only when none exists. " +
+			"Manage with schedule_list / schedule_cancel.",
 		promptSnippet: "schedule a wake-up in this conversation (cron or delay), auto-report on fire",
 		parameters: Type.Object({
 			schedule: Type.String({
@@ -293,10 +285,10 @@ export function makeScheduleTools(
 	const listTool = defineTool({
 		name: SCHEDULE_LIST_TOOL_NAME,
 		label: "List scheduled tasks",
-		description: bilingual(
-			"List all built-in scheduled tasks (all projects): id, name, cron/interval, on/paused, one-shot, target conversation, next fire, last run. Use it to inspect before cancelling, or to answer the user about what is scheduled.",
-			"列出全部内置定时任务（跨项目）：id、名称、cron/间隔、启用/暂停、单次、目标对话、下次触发、上次结果。取消前先看，或回答用户“排了什么”时用。",
-		),
+		description:
+			"List all built-in scheduled tasks (all projects): " +
+			"id, name, cron/interval, on/paused, one-shot, target conversation, next fire, last run. " +
+			"Use it to inspect before cancelling, or to answer the user about what is scheduled.",
 		promptSnippet: "list scheduled wake-up tasks",
 		parameters: Type.Object({}),
 		execute: async () => {
@@ -330,10 +322,9 @@ export function makeScheduleTools(
 	const cancelTool = defineTool({
 		name: SCHEDULE_CANCEL_TOOL_NAME,
 		label: "Cancel a scheduled task",
-		description: bilingual(
-			"Delete a scheduled task by id (see schedule_list). Deleting stops all future fires; use it when the user says the schedule is no longer needed.",
-			"按 id 删除定时任务（id 见 schedule_list）。删除后不再触发；用户说不用排了时用它。",
-		),
+		description:
+			"Delete a scheduled task by id (see schedule_list). " +
+			"Deleting stops all future fires; use it when the user says the schedule is no longer needed.",
 		promptSnippet: "cancel a scheduled task by id",
 		parameters: Type.Object({
 			id: Type.String({ description: "Task id from schedule_list." }),

@@ -78,7 +78,7 @@ QQ群 1126050727
 - **Prompt templates** — the empty chat state shows a one-click template gallery (repo init, code review, research, merge conflicts…); click a card to fill the input, or save the current draft as your own template.
 - **Auto-retry on model errors** — configurable retry count per conversation (default 6, `0` = fail immediately); when retries run out the failed turn is marked red with a one-click Retry button.
 - **Queue control** — a queued steer/follow-up bubble can be dropped (✕) or **recalled (↩)**, which pulls its text back into the composer (appended on a new line if you already typed something — it never overwrites your draft).
-- **Message anatomy** — each message header shows the role, the model that produced it and a local `HH:MM` timestamp, and every text block has a copy button. Attachments render as their own collapsible card with a mode chip (`lines` / `ref` / `bridged` / `inline n lines`), a copy button and a vision-bridge “transcribed” note; a skill invocation becomes a skill card with the full `SKILL.md`, next to the arguments you typed.
+- **Message anatomy** — each message header shows the role, the model that produced it and a local `HH:MM` timestamp, and every text block has a copy button. Attachments render as their own collapsible card with a mode chip (`lines` / `ref` / `bridged`), a copy button and a vision-bridge “transcribed” note; a skill invocation becomes a skill card with the full `SKILL.md`, next to the arguments you typed.
 - **Compaction, visible** — compacted context shows up as a card (“compacted from N tokens”) that auto-expands and jumps when it arrives, and a live banner counts up (“compacting context · 12s”) naming the trigger (manual / threshold / overflow).
 
 ### 🗂️ Projects & sessions
@@ -108,14 +108,14 @@ QQ群 1126050727
 
 ### 🖼️ Files, images & attachments
 
-- Three attachment modes: `inline` (≤12 KB), `reference` (path only), `lines` (selected ranges) — over-limit ones degrade automatically.
+- Path references only: `reference` (path) and `lines` (selected range, carried as a `lines` attribute) — file content is **never** injected into the prompt; the model reads what it needs with its own read tool (the old `inline` full-content mode is gone; a legacy `inline` from an old client is treated as `reference`).
 - Paste / drag-drop / upload images — resized client-side and sent as image content when the model supports vision (warning otherwise).
 - **Vision bridge** — when the current model is text-only, images are transcribed into text evidence by an auto-discovered vision model (cached per batch; model & on/off configurable in Settings).
-- Attach arbitrary files without a workspace path — stored in a global uploads dir, inlined when small, referenced by absolute path otherwise.
+- Attach arbitrary files without a workspace path — stored in a global uploads dir and referenced by absolute path (never inlined).
 - File preview — line numbers, click/drag/Shift selection (add to chat as `lines`), GBK fallback decoding, binary hex view, media preview over HTTP with Range support, and a download button.
 - Live file tree — the server watches the listed directory (`fs.watch`) and re-lists on change; oversized directories show a truncation warning.
 - **Browse anywhere** — the tree climbs past the workspace root to a 💻 “This computer” level that lists every mounted drive (`/` on POSIX), the breadcrumb jumps straight to any level, `..` goes up, and a listing that vanished or lost its permissions degrades into an empty list plus a warning instead of an error page.
-- **Row actions** — hover a file for download / attach inline (＋) / attach as reference (🔗) / copy name / copy path; folders offer reference-attach, copy name and copy path (copying falls back to a hidden textarea on plain-HTTP origins where the clipboard API is unavailable).
+- **Row actions** — hover a file for download / attach as reference (🔗) / copy name / copy path; folders offer reference-attach, copy name and copy path (copying falls back to a hidden textarea on plain-HTTP origins where the clipboard API is unavailable).
 - **Upload from the tree** — right-click a **folder row** → **Upload files to this folder** (that folder's menu also offers **Open as project**), or right-click a file row / the panel body → **Upload files to current directory** (the directory you are browsing). Dragging OS files onto a folder row uploads into exactly that folder (the row highlights), dropping them on the panel uploads into the browsed directory, and dragging a _folder_ warns that folders aren't supported instead of doing nothing. Uploads accept one file up to 100 MB, refuse empty files, strip the name to a basename with Windows-illegal characters replaced (200-char clamp), create the target directory if needed, and refresh the listing afterwards even if you are browsing somewhere else.
 - **Listings that stay honest** — on Windows/macOS a recursive watcher on the workspace root refreshes the tree for changes in _any_ subdirectory (400 ms debounce), with a 10 s polling fallback — announced once per workspace — on network drives where watching isn't supported; POSIX hides build noise (`node_modules`, `.git`, `dist`, `.venv`, …) and caps at 500 entries, Windows hides only dependency/VCS/data directories and caps at 2000, and both say when they truncated.
 - **The preview is an editor too** — text files can be edited in place and saved with Ctrl/Cmd+S (2 MB cap, dirty-guarded; closing with unsaved changes asks first), Markdown toggles between rendered and source, HTML renders in a sandboxed iframe through a directory-mapped URL so relative CSS/images resolve (with a per-file “enable scripts” opt-in that never grants same-origin), images and videos stream over HTTP Range, binaries get a hex dump, and text gets line numbers, selection by click/drag/Shift (add to chat as `lines`), zoom 50–200 %, a word-wrap toggle and fullscreen.
@@ -308,6 +308,32 @@ silences the warning):
 ```bash
 npm i -g --allow-scripts=node-pty,@google/genai,protobufjs pi-web-ui@latest
 ```
+
+### 🐧 Linux build prerequisites
+
+`node-pty` (the built-in terminal) publishes prebuilds only for macOS and Windows,
+so on Linux `npm install` always falls back to `node-gyp` and compiles it from
+source. Install a C/C++ toolchain **before** installing pi-web-ui:
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install -y build-essential python3
+# Fedora / RHEL
+sudo dnf install -y python3 make gcc-c++
+# Arch
+sudo pacman -S --needed base-devel python
+```
+
+Without it the whole install aborts with:
+
+```
+npm error path .../node_modules/node-pty
+npm error command sh -c node scripts/prebuild.js || node-gyp rebuild
+npm error > Rebuilding because directory .../node_modules/node-pty/prebuilds/linux-x64 does not exist
+npm error make: g++: No such file or directory
+```
+
+Android / Termux is a special case — see [Termux (Android)](#termux-android).
 
 ### 🖥️ Desktop app (Windows installer)
 
@@ -706,7 +732,6 @@ All optional — the defaults are what the app is developed against. Full refere
 | `PI_WEB_STALL_NOTIFY_MS`       | `180000` (3 min)   | Warn — without aborting — when a streaming run produces no event at all; `0` disables.                                                                                                                           |
 | `PI_WEB_TERMINAL_IDLE_MS`      | `15000`            | Nudge the AI when a terminal it opened goes silent for this long; `0` disables.                                                                                                                                  |
 | `PI_WEB_TERMINAL_IDLE_LINES`   | `10`               | How many trailing terminal lines that nudge quotes back (1–500).                                                                                                                                                 |
-| `PI_WEB_INLINE_FILE_MAX`       | `12288` (12 KB)    | Size under which a path-less uploaded file is inlined instead of referenced.                                                                                                                                     |
 | `PI_WEB_VISION_TIMEOUT_MS`     | `90000`            | Timeout for one whole vision-bridge transcription batch.                                                                                                                                                         |
 | `PI_WEB_UPLOAD_RETENTION_DAYS` | `14`               | Retention for `<dataDir>/uploads/`; `0` never sweeps.                                                                                                                                                            |
 | `PI_WEB_SHELL`                 | auto               | Windows only: which shell node-pty spawns (auto: `PI_WEB_SHELL` → `$SHELL` → Git Bash → bundled busybox → `%COMSPEC%` → PowerShell).                                                                             |

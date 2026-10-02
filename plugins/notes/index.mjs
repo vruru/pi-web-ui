@@ -59,7 +59,11 @@ export default {
 						);
 					} catch (e2) {
 						// 隔离都失败就**不要**落盘（persist() 会覆盖），只在内存里跑本次会话
-						host.log("error", "笔记库解析失败且隔离失败，本次不写盘以免覆盖：", e2 instanceof Error ? e2.message : String(e2));
+						host.log(
+							"error",
+							"笔记库解析失败且隔离失败，本次不写盘以免覆盖：",
+							e2 instanceof Error ? e2.message : String(e2),
+						);
 						readonly = true;
 					}
 				}
@@ -163,10 +167,13 @@ export default {
 				if (delta > NEAR_WINDOW_MS) continue;
 				nearTimers.set(
 					rem.id,
-					setTimeout(() => {
-						nearTimers.delete(rem.id);
-						fire(rem.id);
-					}, Math.max(0, delta) + 50),
+					setTimeout(
+						() => {
+							nearTimers.delete(rem.id);
+							fire(rem.id);
+						},
+						Math.max(0, delta) + 50,
+					),
 				);
 			}
 		}
@@ -266,11 +273,13 @@ export default {
 			return { ok: false, error: `${kind} not found` };
 		}
 
-		/** 跑一个操作并处理落盘/唤醒（op 里声明过 changed=false 的不重复落盘）。 */
+		/** 跑一个操作并处理落盘/唤醒（op 里声明过 changed=false 的不重复落盘）。
+		 *  提醒的定时触发由每分钟 cron 巡检（host.schedule）负责，commitChange
+		 *  不接收任何「是否重建定时」参数——refreshNearTimers 只是近处的快速路径。 */
 		function apply(op, payload) {
 			const out = runOp(op, payload);
 			const changed = out.changed ?? out.ok;
-			if (out.ok && changed) commitChange(out.schedules === true);
+			if (out.ok && changed) commitChange();
 			return out;
 		}
 
@@ -283,7 +292,8 @@ export default {
 						handler(req, res);
 					} catch (err) {
 						host.log("error", `http ${method} ${path} 失败：`, err instanceof Error ? err.message : String(err));
-						if (!res.headersSent) res.status(400).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
+						if (!res.headersSent)
+							res.status(400).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
 					}
 				}),
 			);
@@ -354,7 +364,11 @@ export default {
 			});
 		} catch (err) {
 			// 宿主对非法 cron/id 是抛错；一条定时排不上不该把整插件的路由/工具/命令全带走
-			host.log("error", "每分钟巡检排不上，提醒不会自动触发（其它功能照常）：", err instanceof Error ? err.message : String(err));
+			host.log(
+				"error",
+				"每分钟巡检排不上，提醒不会自动触发（其它功能照常）：",
+				err instanceof Error ? err.message : String(err),
+			);
 		}
 		// 启动就扫一次：停机期间到点的提醒立刻补送（不必等下一个整分钟）
 		sweep();
@@ -366,24 +380,27 @@ export default {
 		);
 
 		// ------------------------------------------------------------ AI 工具
-		const t = (en, zh) => `${en} ${zh}`;
 		const toolOffs = [
 			host.registerAgentTool({
 				name: "notes_list",
 				label: "读笔记/待办/提醒",
 				promptGuidelines: [
-					"用户问「我今天要做什么」「接下来有什么安排」时，先用 notes_list（kind=agenda）看一眼再回答，别让用户自己去找。",
-					"要改/删某一条之前先用 notes_list 拿到它的 id（id 是 notes_update / notes_todo / notes_reminder 的入参）。",
+					"When the user asks what's on their plate today or what's coming up, call notes_list (kind=agenda) first and answer from it instead of making the user look for themselves.",
+					"Before editing or deleting an item, get its id via notes_list (ids are the input to notes_update / notes_todo / notes_reminder).",
 				],
-				description: t(
+				description:
 					"List notes, todos and reminders from the user's personal notes store (this machine). Use it whenever the user asks what is on their plate, or before editing an item to learn its id. Returns compact lines with the id needed by notes_update / notes_todo / notes_reminder.",
-					"读取用户本机的笔记/待办/提醒列表（含每条的 id），用于回答「我今天要做什么」或改某条之前先拿到 id。",
-				),
-				promptSnippet: "notes_list — 读用户的笔记/待办/提醒（带 id；kind=agenda = 今天与接下来要做的）",
+				promptSnippet:
+					"notes_list — list the user's notes/todos/reminders with ids (kind=agenda = what is due today and upcoming)",
 				parameters: {
 					type: "object",
 					properties: {
-						kind: { type: "string", enum: ["all", "agenda", "note", "todo", "reminder"], description: "all = every collection; agenda = what is due now (overdue + today + next 7 days + reminders in the next 14 days); note/todo/reminder = one collection only." },
+						kind: {
+							type: "string",
+							enum: ["all", "agenda", "note", "todo", "reminder"],
+							description:
+								"all = every collection; agenda = what is due now (overdue + today + next 7 days + reminders in the next 14 days); note/todo/reminder = one collection only.",
+						},
 						query: { type: "string", description: "Case-insensitive substring filter over text/title/body/tags." },
 						tag: { type: "string", description: "Only items carrying this tag." },
 						include_done: { type: "boolean", description: "Include completed todos (default false)." },
@@ -398,14 +415,13 @@ export default {
 				name: "notes_add",
 				label: "新建笔记",
 				promptGuidelines: [
-					"用户说「记一下」「帮我记住」「存个备忘 / 想法 / 会议记录」时直接调 notes_add 写进去，不要在回复里只复述一遍就完事。",
-					"分清楚三件事：「一条笔记」用 notes_add，「要做的事」用 notes_todo，「几点提醒我」用 notes_reminder。",
+					"When the user says 'note this down', 'remember this', or asks to save a memo/idea/meeting note, call notes_add instead of just restating it in the reply.",
+					"Distinguish the three: a piece of information → notes_add; something to do → notes_todo; a timed alert → notes_reminder.",
 				],
-				description: t(
-					"Save a note (Markdown body) into the user's personal notes store. Use it for 'note this down', meeting minutes, ideas, or when the user dictates something worth keeping.",
-					"把一条笔记（Markdown 正文）存进用户的笔记库。用户说「记一下…」时用它。",
-				),
-				promptSnippet: "notes_add — 新建一条**笔记**（备忘/想法/会议记录）；待办用 notes_todo、提醒用 notes_reminder",
+				description:
+					"Save a note (Markdown body) into the user's personal notes store. Use it for 'note this down', meeting minutes, ideas, or anything the user dictates worth keeping.",
+				promptSnippet:
+					"notes_add — save a note (memo/idea/meeting minutes); to-dos go to notes_todo, timed alerts to notes_reminder",
 				parameters: {
 					type: "object",
 					properties: {
@@ -425,11 +441,11 @@ export default {
 			host.registerAgentTool({
 				name: "notes_update",
 				label: "改/删笔记",
-				promptGuidelines: ["用户要「把刚才那条改成…」「删掉那条笔记」时，先 notes_list 找到 id，再调 notes_update（删就带 delete:true）。"],
-				description: t(
+				promptGuidelines: [
+					"When the user wants to change or delete a note, find its id with notes_list first, then call notes_update (pass delete:true to remove).",
+				],
+				description:
 					"Update or delete an existing note by id. `append` adds text to the end of the body (handy for appending a log). Get ids from notes_list.",
-					"按 id 修改或删除一篇笔记；`append` 追加到正文末尾。id 从 notes_list 拿。",
-				),
 				parameters: {
 					type: "object",
 					properties: {
@@ -454,7 +470,8 @@ export default {
 					const patch = { id };
 					if (params.title !== undefined) patch.title = params.title;
 					if (params.body !== undefined) patch.body = params.body;
-					if (params.append !== undefined) patch.body = `${note.body}${note.body.endsWith("\n") || !note.body ? "" : "\n"}${params.append}`;
+					if (params.append !== undefined)
+						patch.body = `${note.body}${note.body.endsWith("\n") || !note.body ? "" : "\n"}${params.append}`;
 					if (params.tags !== undefined) patch.tags = params.tags;
 					if (params.pinned !== undefined) patch.pinned = params.pinned;
 					const out = apply("note.save", { item: patch });
@@ -465,30 +482,40 @@ export default {
 				name: "notes_todo",
 				label: "待办",
 				promptGuidelines: [
-					"用户说「待会儿要做…」「别忘了…」「给我记个待办」时用 notes_todo（action 可以省略，默认就是新建）。",
-					"有明确时间点时：「什么时候该做」→ notes_todo 的 due；「到点提醒我」→ 用 notes_reminder。",
+					"Use notes_todo when the user wants to remember an action item ('I need to… later', 'don't forget…'); action can be omitted (defaults to add).",
+					"With a specific time: 'when should this be done' → notes_todo's due; 'remind me at a time' → notes_reminder instead.",
 				],
-				description: t(
+				description:
 					"Add / update / complete / delete todos in the user's personal list. Use it for action items the user wants to remember (especially with a due date), not for things you can just finish yourself right now.",
-					"增 / 改 / 勾选 / 删用户的待办（可带截止时间与重复）。用户说「提醒我做…」「记个待办」时用它。",
-				),
-				promptSnippet: "notes_todo — 用户的待办清单（新建/改/勾选/删）",
+				promptSnippet: "notes_todo — the user's todo list (add/update/toggle/delete)",
 				parameters: {
 					type: "object",
 					properties: {
-						action: { type: "string", enum: ["add", "update", "done", "undone", "remove", "clear_done"], description: "What to do. Optional: no action + no id = add; no action + id = update." },
+						action: {
+							type: "string",
+							enum: ["add", "update", "done", "undone", "remove", "clear_done"],
+							description: "What to do. Optional: no action + no id = add; no action + id = update.",
+						},
 						id: { type: "string", description: "Todo id (required except for add/clear_done)." },
 						text: { type: "string" },
-						due: { type: "string", description: "Due time: 'YYYY-MM-DD HH:MM', 'YYYY-MM-DD' or ISO 8601 (empty string clears it)." },
+						due: {
+							type: "string",
+							description: "Due time: 'YYYY-MM-DD HH:MM', 'YYYY-MM-DD' or ISO 8601 (empty string clears it).",
+						},
 						priority: { type: "number", description: "0 normal … 3 urgent." },
-						repeat: { type: "string", enum: ["none", "daily", "weekly", "monthly"], description: "Repeating todo: ticking it advances the due date instead of completing it." },
+						repeat: {
+							type: "string",
+							enum: ["none", "daily", "weekly", "monthly"],
+							description: "Repeating todo: ticking it advances the due date instead of completing it.",
+						},
 						tags: { type: "array", items: { type: "string" } },
 					},
 					required: [],
 				},
 				async execute(_id, params) {
 					// action 可省：给了 id 就是改，没给 id 就是新建（模型少填一个字段就少一次失败）
-					const action = String(params.action ?? "").toLowerCase() || (String(params.id ?? "").trim() ? "update" : "add");
+					const action =
+						String(params.action ?? "").toLowerCase() || (String(params.id ?? "").trim() ? "update" : "add");
 					const common = {};
 					if (params.text !== undefined) common.text = params.text;
 					if (params.priority !== undefined) common.priority = params.priority;
@@ -528,25 +555,31 @@ export default {
 				name: "notes_reminder",
 				label: "提醒",
 				promptGuidelines: [
-					"用户给了具体时间（「明天 9 点」「每天 9 点」「每周五 18:00」）时用 notes_reminder —— 到点会在他的浏览器里弹通知。",
-					"用简单档位：at / daily_at / weekly_at + weekdays / monthly_at + day_of_month / every_minutes，别一上来写 cron。",
-					"提醒只负责「叫醒用户」；要让 AI 到点自己干活（写日报、跑脚本）请改用内置的 schedule_task 工具，不要建笔记提醒。",
+					"Use notes_reminder when the user gives a specific time ('tomorrow 9am', 'daily at 9', 'Fridays 18:00') — it fires a toast/desktop notification in the user's browser.",
+					"Prefer the simple forms: at / daily_at / weekly_at + weekdays / monthly_at + day_of_month / every_minutes; don't jump straight to raw cron.",
+					"Reminders only wake the user up; for the AI to do work on schedule (write reports, run scripts), use the built-in schedule_task tool instead of a notes reminder.",
 				],
-				description: t(
+				description:
 					"Manage scheduled reminders (they fire on the SERVER's local clock and show up as a toast/desktop notification in the user's browser; nothing is fired while no browser is open — those are delivered on next open). Prefer the simple forms (at / daily_at / weekly_at / monthly_at / every_minutes) over raw cron.",
-					"管理定时提醒（按服务器本地时间触发，浏览器里弹通知；没有浏览器在线时下次打开补送）。优先用 at/daily_at/weekly_at/monthly_at/every_minutes，别一上来就写 cron。",
-				),
-				promptSnippet: "notes_reminder — 到点提醒用户（一次性/每天/每周/每月/间隔）",
+				promptSnippet: "notes_reminder — remind the user at a given time (one-off/daily/weekly/monthly/interval)",
 				parameters: {
 					type: "object",
 					properties: {
-						action: { type: "string", enum: ["add", "update", "remove", "snooze"], description: "What to do. Optional: no action + no id = add; no action + id = update." },
+						action: {
+							type: "string",
+							enum: ["add", "update", "remove", "snooze"],
+							description: "What to do. Optional: no action + no id = add; no action + id = update.",
+						},
 						id: { type: "string", description: "Reminder id (except for add)." },
 						text: { type: "string", description: "What to remind about." },
 						at: { type: "string", description: "One-off time: 'YYYY-MM-DD HH:MM' or ISO 8601." },
 						daily_at: { type: "string", description: "Daily at 'HH:MM'." },
 						weekly_at: { type: "string", description: "Time 'HH:MM' for weekdays given in weekdays." },
-						weekdays: { type: "array", items: { type: "string" }, description: "Weekdays for weekly_at: mon..sun (or numbers 0=Sun..6=Sat)." },
+						weekdays: {
+							type: "array",
+							items: { type: "string" },
+							description: "Weekdays for weekly_at: mon..sun (or numbers 0=Sun..6=Sat).",
+						},
 						monthly_at: { type: "string", description: "Time 'HH:MM' on day_of_month." },
 						day_of_month: { type: "number", description: "1-31 for monthly_at (default 1)." },
 						every_minutes: { type: "number", description: "Repeat every N minutes (1-1440)." },
@@ -560,7 +593,8 @@ export default {
 				},
 				async execute(_id, params) {
 					// action 可省：给了 id 就是改，没给 id 就是新建
-					const action = String(params.action ?? "").toLowerCase() || (String(params.id ?? "").trim() ? "update" : "add");
+					const action =
+						String(params.action ?? "").toLowerCase() || (String(params.id ?? "").trim() ? "update" : "add");
 					const id = String(params.id ?? "").trim();
 					if (action === "remove") {
 						if (!id) return "缺少 id";
@@ -576,12 +610,16 @@ export default {
 					if (built.error) return built.error;
 					// 可运行性判定 = 能不能算出「下一次到点时刻」（与调度器同一口径）。
 					// 例如 cron `0 0 31 2 *`（2 月没有 31 号）排不出 → 拒绝，别存成「设好了但不会响」。
-					if (built.schedule && S.nextDueStamp({ enabled: true, schedule: built.schedule }, Date.now(), "now") === null) {
+					if (
+						built.schedule &&
+						S.nextDueStamp({ enabled: true, schedule: built.schedule }, Date.now(), "now") === null
+					) {
 						return "这个时间排不出可运行的定时（例如 2 月 31 日这种永远不存在的日期），请换一个档位";
 					}
 					if (action === "add") {
 						if (!String(params.text ?? "").trim()) return "提醒内容不能为空";
-						if (!built.schedule) return "缺少时间：用 at / daily_at / weekly_at / monthly_at / every_minutes / cron 之一";
+						if (!built.schedule)
+							return "缺少时间：用 at / daily_at / weekly_at / monthly_at / every_minutes / cron 之一";
 						const out = apply("reminder.save", {
 							item: {
 								text: params.text,
@@ -756,7 +794,10 @@ export default {
 					join(dir, MIRROR_INDEX),
 					JSON.stringify({ v: 1, at: new Date().toISOString(), files: [...wanted.keys()] }, null, "\t"),
 				);
-				host.log("info", `镜像同步完成（${reason}）：写 ${written} 个${removed ? `，清理 ${removed} 个` : ""} → ${dir}`);
+				host.log(
+					"info",
+					`镜像同步完成（${reason}）：写 ${written} 个${removed ? `，清理 ${removed} 个` : ""} → ${dir}`,
+				);
 			} catch (err) {
 				host.log("warn", "镜像同步失败：", err instanceof Error ? err.message : String(err));
 			} finally {
@@ -901,7 +942,9 @@ export default {
 						return Number.isInteger(n) && n >= 0 && n <= 6 ? n : null;
 					})
 					.filter((x) => x !== null);
-				return dow.length ? { schedule: { type: "weekly", time, dow } } : { error: "weekly_at 需要 weekdays（如 [\"mon\",\"fri\"]）" };
+				return dow.length
+					? { schedule: { type: "weekly", time, dow } }
+					: { error: 'weekly_at 需要 weekdays（如 ["mon","fri"]）' };
 			}
 			if (params.monthly_at !== undefined) {
 				const time = timeOf(params.monthly_at);
@@ -975,7 +1018,11 @@ export default {
 			// + 接下来 14 天的提醒（一次性提醒有过期未响的也算「欠着」）。
 			if (kind === "agenda") {
 				const now = Date.now();
-				const endToday = new Date(new Date(now).getFullYear(), new Date(now).getMonth(), new Date(now).getDate() + 1).getTime();
+				const endToday = new Date(
+					new Date(now).getFullYear(),
+					new Date(now).getMonth(),
+					new Date(now).getDate() + 1,
+				).getTime();
 				const week = now + 7 * 86400000;
 				const overdue = [];
 				const today = [];
@@ -1028,14 +1075,22 @@ export default {
 				lines.push("", `## 笔记（${store.notes.length}）`);
 				lines.push(
 					...(notes.length
-						? notes.map((n) => `- ${n.pinned ? "📌 " : ""}${n.title}（id ${n.id}${n.tags.length ? ` · ${n.tags.map((x) => `#${x}`).join(" ")}` : ""} · ${n.updatedAt.replace("T", " ")}）\n  ${firstLine(n.body)}`)
+						? notes.map(
+								(n) =>
+									`- ${n.pinned ? "📌 " : ""}${n.title}（id ${n.id}${n.tags.length ? ` · ${n.tags.map((x) => `#${x}`).join(" ")}` : ""} · ${n.updatedAt.replace("T", " ")}）\n  ${firstLine(n.body)}`,
+							)
 						: ["（无）"]),
 				);
 			}
 			if (kind === "all" || kind === "reminder") {
 				const rems = S.searchItems(store, { tab: "reminder", query, tag }).slice(0, limit);
-				lines.push("", `## 提醒（启用 ${store.reminders.filter((r) => r.enabled).length} / 共 ${store.reminders.length}）`);
-				lines.push(...(rems.length ? rems.map((r) => `- ${r.enabled ? "🔔" : "🔕"} ${describeReminder(r)}`) : ["（无）"]));
+				lines.push(
+					"",
+					`## 提醒（启用 ${store.reminders.filter((r) => r.enabled).length} / 共 ${store.reminders.length}）`,
+				);
+				lines.push(
+					...(rems.length ? rems.map((r) => `- ${r.enabled ? "🔔" : "🔕"} ${describeReminder(r)}`) : ["（无）"]),
+				);
 			}
 			if (!lines.length) return "（库里没有匹配的条目）";
 			return lines.join("\n");

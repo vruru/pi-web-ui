@@ -68,6 +68,14 @@ export class ComposerDraftsStore {
 		try {
 			raw = JSON.parse(readFileSync(this.filePath, "utf8")) as Record<string, unknown>;
 		} catch {
+			// 坏文件改名留存而非直接覆盖：先有留存，后续 save 落盘的才是新数据
+			//（否则一次解析失败 → 空表 → 下次 save 把全部草稿的原始记录抹掉）。
+			try {
+				renameSync(this.filePath, `${this.filePath}.corrupt-${Date.now()}`);
+				console.warn(`[composer-drafts] 草稿文件解析失败，已改名留存：${this.filePath}（丢草稿可重打，不留坏副本）`);
+			} catch {
+				// 改名失败（占用等）也无妨：空表继续，save 时照常覆盖
+			}
 			raw = {};
 		}
 		const now = Date.now();

@@ -14,6 +14,8 @@
  * 路由（挂载在 `/plugins-api/voice-input/*`，需 manifest `permissions` 含 `http`）：
  *   GET    /settings      → { lang, serverFallback, engine, localModel,
  *                             serverReady, localReady, localModels }（绝不下发密钥）
+ *   POST   /engine        → 改「转写引擎」（body {engine: auto|local|remote}，
+ *                             浮层里的切换面板用；白名单校验后写回声明式设置）
  *   POST   /transcribe    → 音频字节（WAV 最佳，?lang= 可选），回 { text, engine }
  *   GET    /local-status  → { installing, progress, error, ready, models, loaded }
  *   POST   /local-install → {started:true}（body {model?}；单飞，后台慢慢装）
@@ -24,7 +26,7 @@
  * 服务打挂（image-toolkit 踩过的坑）。
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -36,7 +38,8 @@ const MAX_REMOTE_AUDIO_BYTES = 25 * 1024 * 1024;
 /** 本地 WAV 上限 15MB（16k 单声道 ≈ 8 分钟，足够口述）。 */
 const MAX_LOCAL_AUDIO_BYTES = 15 * 1024 * 1024;
 /** transformers.js 运行时（ONNX 预编译，win/mac/linux 全平台，CPU 可跑）。 */
-const TRANSFORMERS_SPEC = "@xenova/transformers@2.17.2";
+const TRANSFORMERS_PKG = "@xenova/transformers";
+const TRANSFORMERS_SPEC = `${TRANSFORMERS_PKG}@2.17.2`;
 
 /**
  * 本地模型档位 → HuggingFace 模型 id。白名单：install 接口只认这俩，
@@ -99,6 +102,39 @@ export function whisperFullLang(lang) {
 /** 基址 + 路径拼接（容忍末尾斜杠）。纯函数，单测覆盖。 */
 export function joinUrl(base, path) {
 	return `${str(base).replace(/\/+$/, "")}${path}`;
+}
+
+/**
+ * package.json → 入口文件候选（相对路径，按优先级）。纯函数，单测覆盖。
+ *
+ * 不能只信 `exports`：`exports["."]` 可能是字符串，也可能是带条件
+ * （import / require / default / node / browser…）的对象，形状没对齐就取空。
+ * 这里把常见形状摊平，再兜几个 transformers.js 的历史布局名。
+ */
+export function pkgEntryCandidates(pkg) {
+	const out = [];
+	const push = (v) => {
+		const s = str(v);
+		if (s && !out.includes(s)) out.push(s);
+	};
+	const p = pkg && typeof pkg === "object" ? pkg : {};
+	const root = p.exports;
+	const dot = typeof root === "string" ? root : root && typeof root === "object" ? root["."] : undefined;
+	if (typeof dot === "string") push(dot);
+	else if (dot && typeof dot === "object") {
+		for (const cond of ["import", "module", "default", "require", "node", "browser"]) push(dot[cond]);
+	}
+	push(p.module);
+	push(p.main);
+	for (const guess of ["dist/transformers.js", "dist/transformers.mjs", "dist/transformers.cjs"]) push(guess);
+	return out;
+}
+
+/** 权重下载源：设置里的 hfEndpoint > 环境变量 HF_ENDPOINT > 官方（空 = 不改）。
+ *  国内直连 huggingface.co 常超时，hf-mirror.com 是社区镜像。非 http(s) 一律忽略。 */
+export function hfEndpointHost(setting, env = process.env.HF_ENDPOINT) {
+	const s = str(setting || env).replace(/\/+$/, "");
+	return /^https?:\/\/\S+$/i.test(s) ? s : "";
 }
 
 /* ------------------------------------------------------------------ */
@@ -254,26 +290,80 @@ export default {
 				try {
 					await handler(req, res);
 				} catch (err) {
+					const status = Number(err?.statusCode ?? 500);
 					const msg = err instanceof Error ? err.message : String(err);
 					host.log(`voice-input ${method} ${path} 失败:`, err);
-					if (!res.headersSent) res.status(500).json({ error: msg || "internal error" });
+					if (!res.headersSent)
+						res.status(status >= 400 && status < 600 ? status : 500).json({ error: msg || "internal error" });
 					else res.end();
+					// 体超限（413）：响应已写回，再销毁读端停止继续上传
+					if (status === 413) req.destroy();
 				}
 			});
 
-		/** 读原始请求体（JSON 小包或二进制大包，抄 image-toolkit 的 readBody）。 */
+		/** 读原始请求体（JSON 小包或二进制大包，抄 image-toolkit 的 readBody）。
+		 *  收包循环内实时累计，超过远端转写上限立即停收并 413，不全量缓存完再查。 */
 		async function readRaw(req) {
+			const tooLarge = () =>
+				Object.assign(new Error(`录音超过 ${MAX_REMOTE_AUDIO_BYTES / 1048576}MB 上限`), { statusCode: 413 });
 			const b = req.body;
 			if (b && typeof b === "object" && typeof b.dataBase64 === "string") {
-				return Buffer.from(b.dataBase64, "base64");
+				const buf = Buffer.from(b.dataBase64, "base64");
+				if (buf.length > MAX_REMOTE_AUDIO_BYTES) throw tooLarge();
+				return buf;
 			}
-			if (Buffer.isBuffer(b)) return b;
-			const chunks = [];
-			for await (const c of req) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
-			return Buffer.concat(chunks);
+			if (Buffer.isBuffer(b)) {
+				if (b.length > MAX_REMOTE_AUDIO_BYTES) throw tooLarge();
+				return b;
+			}
+			return new Promise((resolve, reject) => {
+				const chunks = [];
+				let total = 0;
+				let done = false;
+				const finish = (err, val) => {
+					if (done) return;
+					done = true;
+					if (err) {
+						req.pause(); // 停收（不销毁）：让 413 先送出去，safe() 再掐断
+						req.removeListener("data", onData);
+						reject(err);
+					} else resolve(val);
+				};
+				const onData = (c) => {
+					const chunk = Buffer.isBuffer(c) ? c : Buffer.from(c);
+					total += chunk.length;
+					if (total > MAX_REMOTE_AUDIO_BYTES) return finish(tooLarge());
+					chunks.push(chunk);
+				};
+				req.on("data", onData);
+				req.on("end", () => finish(null, Buffer.concat(chunks)));
+				req.on("error", (err) => finish(err));
+			});
 		}
 
 		/* ---------------- 本地引擎：装 / 状态 / 卸 ---------------- */
+
+		/**
+		 * transformers.js 入口文件：先按 package.json 拼绝对路径，绕开 CJS 解析缓存。
+		 *
+		 * `createRequire().resolve()` 走 Node 的进程级解析，package.json 路径缓存会把
+		 * 「文件不存在」记成**负结果**且不随 npm install 失效（issue #383：明明装成功
+		 * 却恒报「运行时装不上」，只能重启服务）。盘上判据不受影响，所以先读
+		 * package.json 自己定位入口；读不到（exports 怪形状 / 文件损坏）再回落老路。
+		 */
+		function transformersEntry() {
+			const pkgDir = join(dir, "node_modules", ...TRANSFORMERS_PKG.split("/"));
+			try {
+				const pkg = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf8"));
+				for (const rel of pkgEntryCandidates(pkg)) {
+					const abs = join(pkgDir, rel);
+					if (existsSync(abs)) return abs;
+				}
+			} catch {
+				/* package.json 读不到 / 坏了：走下面的 resolve 回落 */
+			}
+			return createRequire(join(dir, "index.mjs")).resolve(TRANSFORMERS_PKG);
+		}
 
 		async function importTransformers() {
 			const ok = await host.ensureDeps?.([TRANSFORMERS_SPEC], {
@@ -282,18 +372,24 @@ export default {
 				},
 			});
 			if (!ok) throw new Error("本地语音运行时安装失败（npm install 没跑通，请检查网络后重试）");
-			// ESM 不支持目录 import（ERR_UNSUPPORTED_DIR_IMPORT）：先用 createRequire
-			// 走 exports map 解出入口文件，再 import（文件 URL 恒可 import）。
-			const req = createRequire(join(dir, "index.mjs"));
+			// ESM 不支持目录 import（ERR_UNSUPPORTED_DIR_IMPORT），且 import() 也要一个
+			// 真实文件路径 —— 所以先定位入口文件，再按 file URL import（URL 恒可 import）。
 			let entry;
 			try {
-				entry = req.resolve("@xenova/transformers");
+				entry = transformersEntry();
 			} catch {
 				throw new Error("本地语音运行时装上了但解析不到入口（node_modules 可能损坏，删了重装）");
 			}
 			const mod = await import(pathToFileURL(entry).href);
 			if (!mod || !mod.pipeline) throw new Error("本地语音运行时加载失败（依赖装上了但 import 不到）");
 			mod.env.cacheDir = cacheDir;
+			// 权重下载源：transformers.js v2 只认自己的 env.remoteHost，不读 HF_ENDPOINT
+			// （v3 才读），所以手工接上，否则国内直连 huggingface.co 会卡到超时。
+			const endpoint = hfEndpointHost(cfg.hfEndpoint);
+			if (endpoint && mod.env) {
+				mod.env.remoteHost = endpoint;
+				mod.env.remotePathTemplate = `${endpoint}/{model}/resolve/{revision}/`;
+			}
 			return mod;
 		}
 
@@ -496,6 +592,32 @@ export default {
 
 		const offStatus = safe("GET", "/local-status", async (_req, res) => {
 			res.json(localStatus());
+		});
+
+		/**
+		 * 客户端改「转写引擎」（麦克风浮层里的切换面板，issue #383）。
+		 *
+		 * 直写声明式设置（storage.json 的 settings 键）—— 与宿主设置面板的
+		 * saveSettingsValues 同一个键，host.storage.set 内部已用同一把文件级 RMW 锁
+		 * 且写前重读，两边交替保存不会互相抹掉。
+		 *
+		 * 刻意只 RMW `engine` 这一个键、而不是把 getSettings() 的合并值整份写回：
+		 * 整份写回会把「用户从没设过」的字段固化成当前默认值，以后改 schema 默认值
+		 * 对老用户就不生效了。值只认白名单三档。
+		 */
+		const offEngine = safe("POST", "/engine", async (req, res) => {
+			const want = str((req.body ?? {}).engine).toLowerCase();
+			if (!["auto", "local", "remote"].includes(want)) {
+				res.status(400).json({ error: `未知的转写引擎：${want || "（空）"}` });
+				return;
+			}
+			const stored = host.storage.get("settings", {});
+			const next = stored && typeof stored === "object" ? { ...stored } : {};
+			next.engine = want;
+			host.storage.set("settings", next);
+			// 内存里的快照同步跟上（本进程后续的 host.getSettings() 也会从磁盘读到新值）。
+			cfg = { ...cfg, engine: want };
+			res.json({ ok: true, engine: want });
 		});
 
 		const offInstall = safe("POST", "/local-install", async (req, res) => {
@@ -741,7 +863,7 @@ export default {
 			} catch {
 				/* ignore */
 			}
-			for (const off of [offGet, offStatus, offInstall, offUninstall, offPost]) {
+			for (const off of [offGet, offStatus, offEngine, offInstall, offUninstall, offPost]) {
 				try {
 					off();
 				} catch {

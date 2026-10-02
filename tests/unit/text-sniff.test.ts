@@ -43,6 +43,21 @@ describe("decodeText", () => {
 		expect(decodeText(Buffer.from(s, "utf8"))).toBe(s);
 	});
 
+	it("UTF-8 尾部截断 1~3 字节时不回退 GBK 乱码，仍正确解码前文 (issue #392)", () => {
+		const full = Buffer.from("这是一段超过截断限制的中文测试文本🎉", "utf8");
+		// 砍掉末尾 1 字节（落在 emoji 4 字节内）
+		expect(decodeText(full.subarray(0, full.length - 1))).toBe("这是一段超过截断限制的中文测试文本");
+		// 砍掉末尾 2 字节
+		expect(decodeText(full.subarray(0, full.length - 2))).toBe("这是一段超过截断限制的中文测试文本");
+		// 砍掉末尾 3 字节
+		expect(decodeText(full.subarray(0, full.length - 3))).toBe("这是一段超过截断限制的中文测试文本");
+
+		// 中文字符（3 字节）末尾被砍 1 字节和 2 字节
+		const chinese = Buffer.from("开发环境说明", "utf8");
+		expect(decodeText(chinese.subarray(0, chinese.length - 1))).toBe("开发环境说");
+		expect(decodeText(chinese.subarray(0, chinese.length - 2))).toBe("开发环境说");
+	});
+
 	it("GBK 字节回退到 GBK 解码（Windows 老中文文件）", () => {
 		const gbk = Buffer.from([
 			0xd6,

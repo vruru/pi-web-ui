@@ -25,6 +25,7 @@ function client(...convs: Conversation[]): Internal {
 		convs: new Map(convs.map((c) => [c.id, c])),
 		activeId: convs[0].id,
 		isQuiesced: () => false,
+		turnEndWaiters: new Map(),
 		getSubagentSnapshot: (id: string) => ({ state: "done", output: `result ${id}` }),
 		emit: vi.fn(),
 		emitRun: vi.fn(),

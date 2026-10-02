@@ -155,6 +155,10 @@ export interface UiState {
 	desktopDir?: string;
 	/** Id of the ACTIVE conversation (see `conversations` message). */
 	conversationId: string;
+	/** 当前对话是临时对话（inMemory、不落盘、关闭即销毁；issue #285）。
+	 *  提示条与「保存为正式对话」按钮读它 —— 不能改读 `conversations` 列表，
+	 *  因为空白的临时对话不在那个列表里（刚新建时提示条必须就能看到）。 */
+	isEphemeral?: boolean;
 	/** Monotonic snapshot revision — increments on every snapshot/snapshot_delta
 	 *  emission. snapshot_delta.baseRev must equal the client's current rev;
 	 *  a mismatch means the client missed an update and must get_state resync. */
@@ -224,6 +228,28 @@ export interface UiState {
 	 */
 	pendingQuestion?: UiPendingQuestion | null;
 	/**
+	 * 待用户审批的高危工具调用（Edit & Run 人机协同）。当前对话有待审批时携带，切会话/刷新恢复。
+	 */
+	pendingApproval?: UiToolApproval | null;
+	/**
+	 * 子代理同行交接协同关系链（Peer-to-Peer Handoff relationships: fromRunId -> toRunId）。
+	 */
+	subagentHandoffs?: Array<{ fromRunId: string; toRunId: string; timestamp: number }>;
+	/**
+	 * 当前会话的任务计划看板状态（Plan Mode / Step State Machine）。
+	 */
+	plan?: PlanState | null;
+	/**
+	 * 当前会话是否处于计划模式（只规划不实施）。会话级开关，随快照下发；
+	 * 缺省 = false。会话无内容时恒为 false（新建对话不带过来）。
+	 */
+	planMode?: boolean;
+	/** 审查者模式（自动委派）已开：主对话只审阅，用户请求由服务端转给
+	 *  一个常驻落盘执行对话执行（会话级开关，默认关）。 */
+	delegateMode?: boolean;
+	/** 审查者模式下的常驻执行对话 id（供 UI 「打开执行对话」用；null/缺省 = 还没建）。 */
+	delegateConvId?: string | null;
+	/**
 	 * 当前对话的未发送输入框草稿（issue #166，单中心文件方案）。
 	 *  只在**全量快照**里携带（切会话 / new_chat / get_state）：增量
 	 *  snapshot_delta 永远不带 —— 同一标签页的草稿本来就是自己打的，不需要
@@ -262,8 +288,8 @@ export interface UiState {
 			tokens: number | null;
 			contextWindow: number;
 			percent: number | null;
-			/** true = 压缩后 SDK 暂报 null（下轮模型响应前不可信），此处用
-			 *  compaction_end 的 estimatedTokensAfter 回填的约数，UI 加 `~` 标识。 */
+			/** 遗留字段：现恒为 false（服务端所有分支——含压缩回填——都按当前配置实时
+			 *  算出 tokens/percent，不再有「约数」态），前端已不读。保留只为旧客户端兼容。 */
 			estimated?: boolean;
 			/** 当前模型的生效压缩软上限（tokens；null = 关闭，底栏不画标记线）。 */
 			softCap?: number | null;
@@ -318,16 +344,21 @@ export interface SlashCommandInfo {
 }
 
 /** Attachment spec shared by "prompt" and "edit_message" client messages:
- *  workspace-path attachments (inline/reference/lines), an already-granted web
+ *  workspace-path attachments (reference/lines), an already-granted web
  *  page (page), raw pasted/dropped images (imageData) and raw uploaded files
- *  (fileData). */
+ *  (fileData). Files are never injected into the prompt — the model gets a
+ *  path reference and reads on demand. */
 export interface PromptAttachment {
 	/** Workspace path — except for mode "page", where it is the page's origin
 	 *  (e.g. "https://example.com"), which is also the browser_page `target`,
 	 *  and mode "conversation", where it is unused ("") — the reference
 	 *  travels in conversationId/sessionPath instead. */
 	path: string;
-	/** "page" = a web page granted to the AI via the page-picker extension:
+	/** "reference" = path-only aside（默认；文件内容不进 prompt）。
+	 *  "lines" = same reference plus the 1-based inclusive range the user picked.
+	 *  "inline" = LEGACY alias of "reference"（旧客户端/旧草稿会发它，服务端不再
+	 *  注入内容，按 reference 处理）。
+	 *  "page" = a web page granted to the AI via the page-picker extension:
 	 *  the server never stats/reads it — it only tells the model which
 	 *  browser_page target to use. `name` carries the page title.
 	 *  "conversation" = another conversation quoted by the user (left-panel
@@ -351,8 +382,8 @@ export interface PromptAttachment {
 	/**
 	 * Raw uploaded file bytes (base64, no data: prefix) for files dropped/
 	 * uploaded directly in the browser — no workspace path involved. The
-	 * server persists them under the data dir and attaches as a path
-	 * reference (or inlines small text files).
+	 * server persists them under the data dir and attaches the absolute
+	 * path as a reference (never inlined).
 	 */
 	fileData?: string;
 	/**
@@ -502,7 +533,7 @@ export type ClientMessage =
 	 *  Answered exactly once by an scm_data with kind "commitmsg" — text
 	 *  carries the generated single-line message; ok:false on any failure. */
 	| { type: "scm_commitmsg"; reqId: number }
-	| { type: "new_chat"; preset?: string }
+	| { type: "new_chat"; preset?: string; ephemeral?: boolean }
 	/** Edit a past user question and re-ask it (forks a new session at that point). */
 	| {
 			type: "edit_message";
@@ -517,6 +548,22 @@ export type ClientMessage =
 			 * pasted/dropped images and files.
 			 */
 			attachments?: PromptAttachment[];
+	  }
+	/** 从历史消息中的指定位置派生新分支会话（Session Fork） */
+	| {
+			type: "fork_session";
+			messageId: string;
+			/** "before" 截取该消息之前（默认）；"at" 包含该消息及之前 */
+			position?: "before" | "at";
+			conversationId?: string;
+	  }
+	/** 回滚会话至指定消息检查点（丢弃后续轮次，在当前会话继续）。 */
+	| {
+			type: "rollback_session";
+			messageId: string;
+			conversationId?: string;
+			/** 是否联动还原工作区文件至该检查点时刻（Dual-State Rollback） */
+			restoreWorkspace?: boolean;
 	  }
 	| { type: "cycle_model" }
 	| { type: "cycle_thinking" }
@@ -589,6 +636,8 @@ export type ClientMessage =
 	/** Check the npm registry for a newer pi-web-ui version. */
 	| { type: "check_update" }
 	| { type: "check_updates_all"; force?: true } // webui + direct pi extensions (manifest)
+	/** Check updates for installed UI plugins (<dataDir>/plugins). */
+	| { type: "check_plugin_updates" }
 	/** Restart the supervised service (same effect as `pi-web-ui server restart`:
 	 *  this process exits and its supervisor brings it back). The server refuses
 	 *  when no supervisor manages this instance (foreground / dev / Docker). */
@@ -658,6 +707,21 @@ export type ClientMessage =
 			authHeader?: boolean;
 			/** api type: openai-completions / openai-responses / anthropic-messages / google-generative-ai. */
 			api?: string;
+			/** 正在编辑的服务商 id：apiKey 留空时服务端按它回落到已保存的密钥
+			 *  （明文不再下发浏览器，编辑存量服务商的探测靠这个保持可用）。 */
+			providerId?: string;
+	  }
+	/** Lightweight connectivity and auth probe for a provider endpoint.
+	 *  Runs SERVER-side and returns latencyMs or error in test_model_connection_result. */
+	| {
+			type: "test_model_connection";
+			reqId: number;
+			baseUrl: string;
+			apiKey?: string;
+			authHeader?: boolean;
+			api?: string;
+			/** 同 fetch_models：apiKey 留空时按它回落到已保存的密钥。 */
+			providerId?: string;
 	  }
 	/** Re-probe a SAVED provider's /models endpoint and merge the result into
 	 *  its models.json entry. Credentials stay server-side (the browser never
@@ -702,13 +766,26 @@ export type ClientMessage =
 			reqId?: number;
 	  }
 	// -- goal / review -------------------------------------------------------
-	/** Set (or clear) the active goal. When set, each finished agent run is
-	 *  reviewed by an isolated reviewer agent; a failing review steers the main
-	 *  session to revise until `maxRounds` runs out. `locked: true` keeps the
-	 *  goal active across every subsequent turn; `false` clears it after the
-	 *  next turn (single-shot). `reviewModel` ("provider/id", optional) selects
-	 *  a different model for the reviewer. */
-	| { type: "set_goal"; goal: string; reviewModel?: string; maxRounds: number; locked: boolean }
+	/** Set (or clear) the active goal. When set, the SERVER drives the loop
+	 *  (goal mode 2.0, the only path): it spawns a persistent executor
+	 *  conversation, and the MAIN conversation plays the reviewer — it gets a
+	 *  read-only verify prompt each round and answers with
+	 *  `{"verdict":"pass|fail","feedback":…}`, which the server turns into
+	 *  pass / another round / circuit-break. Rounds are capped by `maxRounds`
+	 *  (0 = unlimited). `locked: true` keeps the goal active across every
+	 *  subsequent turn; `false` clears it after the next turn (single-shot).
+	 *  `reviewModel` ("provider/id", optional) is remembered as the goal WIZARD
+	 *  model; the reviewer is the main conversation itself (no separate model).
+	 *  `execModel` ("provider/id", optional) picks the executor's model. */
+	| {
+			type: "set_goal";
+			goal: string;
+			reviewModel?: string;
+			maxRounds: number;
+			locked: boolean;
+			/** 执行者模型（"provider/id"；空 = 跟随主对话）。 */
+			execModel?: string;
+	  }
 	| { type: "clear_goal" }
 	/** Start the collaborative target wizard: a user requirement goes into an
 	 *  ISOLATED wizard session which questions the user (multiple-choice + free
@@ -726,6 +803,8 @@ export type ClientMessage =
 			reviewModel?: string;
 			maxRounds?: number;
 			locked?: boolean;
+			/** 执行者模型偏好（"provider/id"；空 = 跟随），全局记忆。 */
+			execModel?: string;
 	  }
 	// -- settings (system prompt / skills / extensions / presets) ------------
 	/** Request the current settings state (also pushed automatically on attach). */
@@ -760,6 +839,8 @@ export type ClientMessage =
 			/** 终端接管 bash 开关 + 静默解阻阈值毫秒（0 = 一直等到命令结束）。 */
 			terminalBash?: boolean;
 			terminalBashIdleMs?: number;
+			/** 终端接管 bash 前台最长等待毫秒（0 = 不限；达到后无论是否有输出均自动转后台）。 */
+			terminalBashMaxForegroundMs?: number;
 			/** 工具执行看门狗超时（毫秒，0 = 禁用；默认 20 分钟即 1200000）。 */
 			toolWatchdogTimeoutMs?: number;
 			/** read 工具读目录开关（默认开）。开 → read(目录路径) 列出目录条目，
@@ -770,6 +851,9 @@ export type ClientMessage =
 			editSoftEnabled?: boolean;
 			/** 问卷提问（ask_user_question）开关（默认开）。关 → 模型不再弹问卷。 */
 			questionnaireEnabled?: boolean;
+			/** 工具执行审批（人机协同）总开关（默认开）。关 → 一切审批都不弹：内置高危
+			 *  检测直接放行、插件 pre guard 的 ask 也按放行处理（纯运行开关，live 生效，无需 reload）。 */
+			toolApprovalEnabled?: boolean;
 			/** 同项目并行提醒开关（默认开）。关 → 同项目另有对话在跑时不发 notice、不给 AI 注提醒、不通知对端。纯运行开关，无需 reload。 */
 			parallelReminderEnabled?: boolean;
 			/** 目标模式（目标条 + 调研向导 + 审查循环）总开关（默认开）。关 → 目标条
@@ -798,6 +882,10 @@ export type ClientMessage =
 			 *  + 自定义文本（空 = 内置默认）。pi 引擎的 scm_commitmsg 生成用。 */
 			scmCommitMsgPromptMode?: "append" | "replace";
 			scmCommitMsgPrompt?: string;
+			/** 计划模式提示词：模式（append/replace，语义同 promptMode）+ 自定义
+			 *  文本（空 = 内置默认）。仅主会话计划模式注入用（硬闸门不受影响）。 */
+			planModePromptMode?: "append" | "replace";
+			planModePrompt?: string;
 			/** Extra instructions and independently disabled skills for review. */
 			reviewPrompt?: string;
 			reviewDisabledSkills?: string[];
@@ -828,9 +916,15 @@ export type ClientMessage =
 	 *  ones, bump the epoch and re-push the catalog. Same spirit as
 	 *  extensions_reload but for pi-web-ui's own UI plugins. */
 	| { type: "plugins_reload" }
-	/** 特权 DOM 访问授权（wantsDom 插件）：granted=true 即写入 <dataDir>/plugin-dom.json
-	 *  并 epoch+1 重推清单（浏览器按新 epoch 重拉 bundle）；false = 撤销。 */
+	/** 特权 DOM 访问授权（wantsDom 插件）：granted=true 走两步握手——服务端生成
+	 *  在途 consent 请求（plugin_dom_consent_request 广播），收到绑定来源的
+	 *  plugin_dom_consent_response 才写入 <dataDir>/plugin-dom.json 并 epoch+1
+	 *  重推清单（浏览器按新 epoch 重拉 bundle）；granted=false = 撤销，单步直达
+	 *  （降权方向不值得拖 120s 窗口）。 */
 	| { type: "plugin_dom_consent"; pluginId: string; granted: boolean }
+	/** plugin_dom_consent 两步握手的应答：id 回显 plugin_dom_consent_request.id。
+	 *  服务端校验应答连接属于请求广播时的在线端才落盘（防陌生连接代答）。 */
+	| { type: "plugin_dom_consent_response"; id: string; ok: boolean }
 	/** Save the CURRENT settings as a named preset (overwrites if it exists). */
 	| { type: "save_preset"; name: string }
 	/** Upsert 一个子代理模板（同名覆盖；全局共享，所有客户端一致）。停用标记
@@ -838,6 +932,15 @@ export type ClientMessage =
 	| { type: "save_subagent_template"; template: UiSubagentTemplate }
 	/** 删除一个子代理模板。 */
 	| { type: "delete_subagent_template"; name: string }
+	// -- approval rules (<dataDir>/approval-rules.json) -----------------------
+	/** 保存或更新一条审批规则（全局共享）。 */
+	| { type: "save_approval_rule"; rule: UiApprovalRule }
+	/** 批量更新审批规则列表（重排或批量保存，全局共享）。 */
+	| { type: "save_approval_rules"; rules: UiApprovalRule[] }
+	/** 删除一条自定义审批规则（内置规则不可删除）。 */
+	| { type: "delete_approval_rule"; id: string }
+	/** 恢复某条内置审批规则到系统默认设定。 */
+	| { type: "reset_builtin_approval_rule"; id: string }
 	/** Save a UI plugin's declarative settings (manifest "settings" schema).
 	 *  The host validates against the schema, persists to storage.json and
 	 *  notifies the plugin (host.onSettingsChanged). */
@@ -882,6 +985,13 @@ export type ClientMessage =
 	/** Cancel a running plugin job (kills its process tree; finished jobs are
 	 *  unaffected). */
 	| { type: "plugin_job_cancel"; jobId: string }
+	/** 安装前先读 spec（DSH 对照 P0-3 引导式安装）：在动 CLI 之前做形状分类 +
+	 *  本地已装判定 + （GitHub 源）一次远端 manifest 探测，把失败归到七种 problem
+	 *  之一。`requestId` 回显在 plugin_install_inspect_result 上。
+	 *  `explicitId` = 用户填的落盘 id（缺省由来源推导）；`force` = 已装不再是问题。 */
+	| { type: "plugin_install_inspect"; requestId: string; source: string; explicitId?: string; force?: boolean }
+	/** 拉取机器可读的注册面目录（P2-7：slot/工具/宿主方法表+当前占用者，按需查，不进快照）。 */
+	| { type: "plugin_api_catalog"; requestId: string }
 	/** 用户对「插件请求访问工作区外目录」的答复（id 回显 plugin_path_request.id）。
 	 *  remember=true 时把授权记进 <dataDir>/plugin-grants.json（下次不再问）。 */
 	| { type: "plugin_path_response"; id: string; ok: boolean; remember?: boolean }
@@ -942,6 +1052,43 @@ export type ClientMessage =
 			cancelled?: boolean;
 			owner?: string;
 	  }
+	/** 用户对高危工具调用的审批答复（tool_approval_pending 回复）。
+	 *  decision: "approve" 放行原参数；"deny" 拒绝执行；"edit" 修改参数并放行（Edit & Run）。
+	 *  scope（仅 approve 有效，缺省 = 单次）："category" = 顺带记住本对话的该同类档位；
+	 *  "all" = 本对话后续全部允许审批（同类/全部记忆都是内存态，重启即失效）。 */
+	| {
+			type: "tool_approval_response";
+			id: string;
+			decision: "approve" | "deny" | "edit";
+			editedParams?: Record<string, unknown> | unknown;
+			reason?: string;
+			scope?: "once" | "category" | "all";
+	  }
+	/** 设置当前对话的审批放行策略（设置面板「已记住的放行」撤销用；纯内存态）。
+	 *  conversationId 缺省 = 当前对话；只应用给出的字段：allowAll 直接赋值，
+	 *  categories 给出时作为「保留名单」整体替换（空数组 = 清掉全部同类记忆）。 */
+	| {
+			type: "set_approval_policy";
+			conversationId?: string;
+			allowAll?: boolean;
+			categories?: string[];
+	  }
+	/** 客户端更新任务计划看板（或清空计划）。 */
+	| {
+			type: "plan_update";
+			conversationId?: string;
+			steps: PlanStep[];
+			activeStepId?: string | null;
+	  }
+	/** 计划模式开关（会话级）：开启后本对话**只调研 + 出实施计划，不实施**。
+	 *  服务端在写类工具与非常规 bash 上加硬闸门（拒绝并把原因回给模型），
+	 *  并向系统提示词追加计划模式约束（先 plan_update 列步骤，再给计划正文）；
+	 *  关掉即恢复普通对话。conversationId 缺省 = 当前对话。 */
+	| { type: "set_plan_mode"; enabled: boolean; conversationId?: string }
+	/** 审查者模式开关（会话级，默认关）：开启后本对话**只审阅不施工**，用户的
+	 *  每条 prompt 由服务端转给一个常驻落盘执行对话执行；写类/派发类工具加硬闸门。
+	 *  conversationId 缺省 = 当前对话。计划模式优先（两者同开时不自动派活）。 */
+	| { type: "set_delegate_mode"; enabled: boolean; conversationId?: string }
 	/** Answer to page_request (id echoes page_request.id). `ok:false` carries a
 	 *  human-readable `error` — no browser/extension, page not allowed, or the
 	 *  action itself failed. The server never inspects `result`'s shape; it is
@@ -979,12 +1126,22 @@ export type ClientMessage =
 	/** 将一个内存子代理（inMemory）固化为普通持久化对话：写入磁盘 .jsonl 文件，
 	 *  清除 isSubagent 标记，使其进入历史会话列表并长久保留。 */
 	| { type: "persist_conversation"; id: string }
+	/** 钉住 / 取消钉住运行中的对话：钉住后切换到其他对话也不从「运行的对话」
+	 *  释放（空闲无终端亦然），直到显式移出。pinned=false 时取消钉住。 */
+	| { type: "pin_conversation"; id: string; pinned: boolean }
 	/** Bulk-dismiss FINISHED subagents from the running list (right-click menu).
 	 *  parentId omitted = all finished subagents; given = the transitive
 	 *  subagent descendants of that conversation (children, grandchildren, …),
 	 *  plus the parent itself when it is a finished subagent. Running
 	 *  (streaming/retained) subagents are never touched. */
 	| { type: "dismiss_finished_subagents"; parentId?: string }
+	/** 子代理同行直接交接（Peer-to-Peer Subagent Hand-off） */
+	| {
+			type: "subagent_handoff";
+			fromRunId: string;
+			toRunId: string;
+			payload: string;
+	  }
 	// -- scheduled tasks (issue #184, server/scheduler-tasks.ts) -----------------
 	/** Re-push the built-in scheduler task list (also pushed on attach / change). */
 	| { type: "schedule_list" }
@@ -995,7 +1152,14 @@ export type ClientMessage =
 	/** Manually trigger a task once right now (does not shift its next fire). */
 	| { type: "schedule_run"; id: string }
 	/** Enable / disable a scheduled task (re-arms its next fire). */
-	| { type: "schedule_toggle"; id: string; enabled: boolean };
+	| { type: "schedule_toggle"; id: string; enabled: boolean }
+	// -- compacted history retrieval (issue #398) ----------------------------
+	/** 查询被某个上下文压缩卡片折叠的历史消息（按需惰性加载，issue #398）。 */
+	| {
+			type: "get_compacted_messages";
+			compactionMessageId: string;
+			conversationId?: string;
+	  };
 
 // ---------------------------------------------------------------------------
 // Server -> Client
@@ -1053,6 +1217,13 @@ export interface UiQuestion {
 	header?: string;
 	options?: UiQuestionOption[];
 	multiSelect?: boolean;
+	/** 级联依赖（Waterfall）：仅当指定 questionId 选中了特定值（未给 value 则表示只要已作答）时本题才展示；不满足则跳过。 */
+	dependsOn?: {
+		questionId: string;
+		value?: string | string[];
+	};
+	/** 动态级联选项映射：根据前序依赖题的所选值动态提供候选选项列表。 */
+	optionsMap?: Record<string, UiQuestionOption[]>;
 }
 
 /** 一道题的用户回答（question_answer 回传）。selected 为选中的选项 label
@@ -1078,6 +1249,73 @@ export interface UiPendingQuestion {
 	conversationId?: string;
 	/** 所属会话标题/名称（可选），用于在提问弹窗中展示来源对话。 */
 	conversationTitle?: string;
+}
+
+/** 审批规则档位（「允许同类审批」的粒度）：稳定 id + 双语名（前端按 locale 自选）。
+ *  id 是记忆/撤销的键，不得随文案改名（内置档位见 server/tool-approval.ts 的规则表）。 */
+export interface UiApprovalCategory {
+	id: string;
+	label: string;
+	labelEn: string;
+}
+
+/** 审批规则定义（前后台共享；<dataDir>/approval-rules.json 持久化）。 */
+export interface UiApprovalRule {
+	id: string;
+	enabled: boolean;
+	tools: string[];
+	field: "command" | "path" | "params";
+	match: "regex" | "glob" | "contains" | "prefix" | "outside_workspace";
+	value: string;
+	action: "ask" | "deny" | "allow";
+	label: string;
+	labelEn?: string;
+	reason?: string;
+	reasonEn?: string;
+	categoryId?: string;
+	builtin?: boolean;
+}
+
+/** 当前对话的审批放行策略（仅内存、不落盘；重启/新对话即恢复询问）。 */
+export interface UiApprovalPolicyState {
+	/** 策略所属对话（设置面板撤销区只展示当前对话的）。 */
+	conversationId?: string;
+	/** 本对话「全部允许审批」。 */
+	allowAll: boolean;
+	/** 本对话已记住的同类档位。 */
+	categories: UiApprovalCategory[];
+}
+
+/** 待用户审批的高危工具调用（Edit & Run 人机协同）。 */
+export interface UiToolApproval {
+	id: string;
+	toolCallId: string;
+	toolName: string;
+	params: Record<string, unknown> | unknown;
+	reason?: string;
+	reasonEn?: string;
+	/** 命中的规则档位（有档位时弹窗提供「允许同类」；无档位只能单次批准/本对话全部允许）。 */
+	category?: UiApprovalCategory;
+	conversationId?: string;
+	conversationTitle?: string;
+}
+
+/** 任务计划步骤状态。 */
+export type PlanStepStatus = "pending" | "in_progress" | "done" | "failed";
+
+/** 任务计划单个步骤（Plan Step）。 */
+export interface PlanStep {
+	id: string;
+	title: string;
+	status: PlanStepStatus;
+	description?: string;
+}
+
+/** 任务步骤状态机看板状态（Plan State）。 */
+export interface PlanState {
+	steps: PlanStep[];
+	activeStepId?: string | null;
+	updatedAt?: number;
 }
 
 /** A background server the agent left running (listening-port diff around a
@@ -1228,13 +1466,41 @@ export interface ModelInfo {
 // Goal / review status (server -> client snapshot)
 // ---------------------------------------------------------------------------
 
+/** 目标模式下的一个「角色对话」（只有执行者槽：审查者就是主对话本身）。 */
+export interface GoalRoleRef {
+	/** 承载该角色的对话 id（左栏可点开）。 */
+	convId: string;
+	/** true = 服务端拉起的角色对话（落盘普通对话，完成/清目标时可移出）。 */
+	spawned: boolean;
+	/** 执行者上次取样时是否正在跑（goal_status 下发时点的值；轮次边界刷新，非每 token）。 */
+	streaming?: boolean;
+	/** 执行者最近动态（一句话：跑什么工具 / 自述头，≤120 字；轮次边界刷新）。 */
+	activity?: string;
+	/** activity 的英文版（客户端按 locale 二选一，与 status/statusEn 同口径）。 */
+	activityEn?: string;
+}
+
+/** 一条已终结的目标（目标条「历史」下拉用；内存态，随重启丢失）。 */
+export interface GoalHistoryEntry {
+	/** 目标全文（截断 200 字）。 */
+	goal: string;
+	/** 终态：通过 / 未通过（预算用尽）/ 受阻。 */
+	verdict: "pass" | "fail" | "blocked";
+	/** 跑到的轮次。 */
+	rounds: number;
+	/** 终态原因（结论/熔断文案，截断 200 字）。 */
+	feedback: string;
+	/** 终结时间（Date.now()）。 */
+	finishedAt: number;
+}
+
 /** Current state of the goal-review loop, shown in the goal bar UI. */
 export interface GoalStatus {
 	/** Conversation that owns this goal; null when no goal is set. */
 	conversationId: string | null;
 	/** Active goal text; null when no goal is set. */
 	goal: string | null;
-	/** Reviewer model id ("provider/id"), or null to use the main model. */
+	/** 模型 id ("provider/id")；pi 引擎语义为**调研（向导）模型**记忆位，DSH 仍用它选审查模型。 */
 	reviewModel: string | null;
 	/** Maximum number of review rounds per goal run. */
 	maxRounds: number;
@@ -1248,14 +1514,24 @@ export interface GoalStatus {
 	status: string;
 	/** English status line (client shows it when locale is en). */
 	statusEn?: string;
-	/** Latest review verdict: "pending" | "pass" | "fail". */
-	verdict: "pending" | "pass" | "fail";
+	/** Latest review verdict: "pending" | "pass" | "fail" | "blocked". */
+	verdict: "pending" | "pass" | "fail" | "blocked";
 	/** Latest review feedback text (reviewer's verdict reason, pass or fail). */
 	feedback?: string;
 	/** Collaborative target-wizard progress (null when no wizard is running).
 	 *  The wizard turns a raw user requirement into a refined goal by asking
 	 *  questions, then auto-sets the goal. */
 	wizard: WizardStatus;
+	/** 2.0：循环相位。 */
+	phase?: "idle" | "executing" | "reviewing" | "blocked";
+	/** 本目标累计用量（执行者各轮 + 审查者各轮的输入/输出 token；轮次边界累计）。 */
+	usage?: { inputTokens: number; outputTokens: number };
+	/** 本对话的目标历史（终态落袋，cap 20；内存态，与目标状态同寿命；清目标不清空）。 */
+	history?: GoalHistoryEntry[];
+	/** 2.0：执行者模型（"provider/id"；null = 跟随主对话）。 */
+	execModel?: string | null;
+	/** 2.0：角色对话（审查者就是主对话，故这里只有 executor）。 */
+	roles?: { executor?: GoalRoleRef };
 }
 
 /** Progress of the collaborative target wizard (see GoalStatus.wizard). */
@@ -1322,7 +1598,13 @@ export interface UiProviderConfig {
 	/** api type: openai-completions / openai-responses / anthropic-messages / google-generative-ai. */
 	api?: string;
 	baseUrl?: string;
+	/** 【只写】save_model_config 提交的新 apiKey；服务端下发（models_config /
+	 *  clone_provider_result）时**永不填充**——明文不回传浏览器。留缺 = 保留
+	 *  已存旧值，显式空串 = 清除。 */
 	apiKey?: string;
+	/** 【只读】服务端下发的"是否已保存 apiKey"，与 headers 一样是单向字段：
+	 *  客户端保存时无需也不应携带。 */
+	hasApiKey?: boolean;
 	authHeader?: boolean;
 	/** headers are NOT returned to the browser — they can contain Authorization
 	 *  / API-key values; saveModelConfig preserves them server-side. */
@@ -1332,6 +1614,19 @@ export interface UiProviderConfig {
 // ---------------------------------------------------------------------------
 // Plugins (optional UI components dropped into <dataDir>/plugins/<id>/)
 // ---------------------------------------------------------------------------
+
+export interface UiPluginUpdateInfo {
+	id: string;
+	name?: string;
+	version?: string;
+	latestVersion?: string | null;
+	source: string;
+	localSha: string | null;
+	remoteSha: string | null;
+	updatable: boolean;
+	builtin?: boolean;
+	error?: string;
+}
 
 /** One installed pi-web-ui plugin (see server/plugins.ts). A plugin is a
  *  directory under <dataDir>/plugins/<id>/ with a manifest.json and optional
@@ -1366,6 +1661,73 @@ export interface UiPluginSettingField {
 	optionsFrom?: "models" | "thinkingLevels";
 	/** 帮助文案（悬浮提示/小字）。 */
 	hint?: string;
+}
+
+/** manifest "requires" 硬依赖声明（P2-8）：任一条不满足即拒绝激活 +
+ *  教学式错误（区别于 peerPlugins 的缺失只警告）。决定启动时机的是依赖，
+ *  不是目录顺序：ensureLoaded 按依赖拓扑排序激活，环/缺失直接拒。 */
+export interface PluginRequires {
+	/** 宿主 API 下限（> 宿主 PLUGIN_API_VERSION 即拒+请升级；与 apiVersion 的精确代际不同，这是下限）。 */
+	hostApi?: number;
+	/** 必须可用的宿主能力族：须是已知族（拼写错/要新版宿主即拒），且须同时在自家
+	 *  permissions 里声明（否则运行时必被门控拒绝，不如启动时就说清楚）。 */
+	families?: string[];
+	/** 必须已安装且激活成功的对等插件（硬依赖；缺失/失败/被删即拒+点名）。 */
+	plugins?: string[];
+}
+
+/** 机器可读的注册面目录（P2-7）：slot/工具/宿主方法表 + 当前占用者。
+ *  类型唯一事实源在这里（装配见 server/plugin-api-catalog.ts）；
+ *  下发走 WS 只读查询 `plugin_api_catalog` → `plugin_api_catalog_result`（不进快照）。 */
+export interface CatalogSlotOccupant {
+	pluginId: string;
+	/** 该插件在这个 slot 上的条目数（manifest 基线 + 运行时注册合并后）。 */
+	items: number;
+}
+export interface CatalogSlotEntry {
+	/** 完整槽位名（如 "topbar.primary"）。 */
+	slot: string;
+	/** 自然简写（如 "topbar" → "topbar.primary"；manifest 与运行时注册通用）。 */
+	aliases: string[];
+	/** 可用的条目种类（缺省 action；settings.pages 缺省 page）。 */
+	kinds: string[];
+	/** 当前占用者（只含条目数，不含条目内容；按插件 id 排序）。 */
+	occupants: CatalogSlotOccupant[];
+	/** 替换风险：谁能动这里的条目，一句话。 */
+	replaceRisk: string;
+	/** manifest 最小例子（能直接抄）。 */
+	example: string;
+}
+export interface CatalogAgentTool {
+	name: string;
+	group: string;
+	defaultOn: boolean;
+	dshVisible: boolean;
+}
+export interface CatalogHostMethod {
+	/** 如 "ui.register" / "registerAgentTool" / "fs.readText"。 */
+	name: string;
+	/** 需要的能力族（"-" = 无需声明，旧全权/观察类）。 */
+	needs: string;
+	summary: string;
+	/** 最小调用例子（一行）。 */
+	example: string;
+}
+export interface PluginApiCatalog {
+	/** 目录 schema 版本（以后加字段即 +1，读取方按 version 兼容）。 */
+	version: 1;
+	slots: CatalogSlotEntry[];
+	agentTools: CatalogAgentTool[];
+	hostMethods: CatalogHostMethod[];
+}
+
+/** 插件按扩展名接管文件单击预览的声明（实际渲染由 client/entry.mjs 提供）。 */
+export interface UiPluginFileHandler {
+	id: string;
+	extensions: string[];
+	priority: number;
+	label?: string;
+	labelEn?: string;
 }
 
 export interface UiPluginInfo {
@@ -1403,11 +1765,17 @@ export interface UiPluginInfo {
 	engines?: Record<string, string>;
 	/** 可选对等依赖（其它插件 id，缺失只警告不断活）。 */
 	peerPlugins?: string[];
+	/** 硬依赖声明（manifest "requires"）：不满足即拒绝激活（区别于 peerPlugins 的软警告）。 */
+	requires?: PluginRequires;
 	/** Declarative settings schema from manifest.json "settings" — rendered as a
 	 *  form in the main ⚙ panel (type/label/default/min/max/options). */
 	settingsSchema?: UiPluginSettingField[];
 	/** Current stored values (storage.json "settings" key, defaults applied). */
 	settingsValues?: Record<string, unknown>;
+	/** 每个设置值的来源层（P2-9 层式组合）：default = schema 缺省 / override =
+	 *  用户 overlay（<dataDir>/plugin-overrides/<id>.json，不 fork 改官方默认）/
+	 *  stored = 面板保存的 storage.json 值（最高）。secret 字段永为 default/stored。 */
+	settingsSources?: Record<string, "default" | "override" | "stored">;
 	/** Install source recorded by `pi-web-ui install` (<dir>/.pi-source.json):
 	 *  the original spec the user typed (owner/repo, URL or local path). The
 	 *  settings panel offers an Update button only when this exists. */
@@ -1431,6 +1799,8 @@ export interface UiPluginInfo {
 	attachmentCards?: string[];
 	/** 输入框补全源（manifest "composerProviders"，预留：@提及/斜杠补全增补）。 */
 	composerProviders?: string[];
+	/** 文件单击查看器声明；扩展名统一为小写并带点。 */
+	fileHandlers?: UiPluginFileHandler[];
 	/** Whether the plugin exposes a standalone view tab (manifest "view",
 	 *  default true). Renderer-only plugins set false so the frontend skips
 	 *  eagerly loading their bundle for the tab and only loads it on demand. */
@@ -1515,6 +1885,15 @@ export type UiSlotId =
 	| "notice.actions"
 	/** 弹窗（插件声明 kind="view" 的条目，经宿主桥 openModal 按需打开）。 */
 	| "modal.dialog";
+
+/** 插件 UI 挂载点的组合语义。list 允许多个条目并列；single 只允许一个可见条目。 */
+export type UiSlotCardinality = "list" | "single";
+
+/** 宿主对一个挂载点的静态语义描述。挂载点由宿主定义，插件不能自行改变其 cardinality。 */
+export interface UiSlotSpec {
+	slot: UiSlotId;
+	cardinality: UiSlotCardinality;
+}
 
 /** 条目行为种类（决定宿主怎么渲染、点击怎么分发）。 */
 export type UiItemKind =
@@ -1732,6 +2111,13 @@ export interface UiPluginCatalogEntry {
 	/** true = from the shipped catalog; false = user added in the UI
 	 *  (only custom entries can be removed). */
 	builtin: boolean;
+	/** true = a custom entry whose id replaced a shipped-catalog entry with the
+	 *  same id: the display fields (name/icon/description) come from a
+	 *  user-supplied source and may imitate the official entry, so surfaces
+	 *  should mark it as user-supplied. The source field always keeps the real
+	 *  (custom) install source — it cannot impersonate the official one.
+	 *  Optional, purely additive; derived at merge time, not persisted. */
+	overridesBuiltin?: boolean;
 	/** Optional project/homepage URL. */
 	homepage?: string;
 }
@@ -1829,6 +2215,16 @@ export interface ConversationSummary {
 	questionId?: string;
 	/** 等答复问卷的简短标题/题目（首题 header 或 question 文本），供横幅与列表展示。 */
 	questionTitle?: string;
+	/** 临时会话（不落盘、关闭即销毁、不进历史；不占持久会话名额）。 */
+	isEphemeral?: boolean;
+	/** 用户钉住（常驻运行列表）：切走也不释放，左栏行带 📌 标记。 */
+	pinned?: boolean;
+	/** 派生源信息（若本会话是从另一会话的消息派生而来）。 */
+	forkFrom?: {
+		conversationId: string;
+		messageId?: string;
+		title?: string;
+	};
 }
 
 /** A conversation open on ANOTHER client (different tab / device) —
@@ -1858,6 +2254,9 @@ export interface ElsewhereRunning {
 	hasQuestion?: boolean;
 	/** 等答复问卷的简短标题/题目，供横幅与列表展示。 */
 	questionTitle?: string;
+	/** 是否为无头伪客户端（定时任务 scheduler: / 插件 plugin:）。
+	 *  定时任务可接管到浏览器；插件拥有的会话保持只读。 */
+	pseudo?: boolean;
 }
 
 /** DSH Agent 预设名录行（字段以运行时树为准；broken = 名录可见但不可挂载）。 */
@@ -1865,8 +2264,13 @@ export interface UiAgentPreset {
 	id: string;
 	trust: "system" | "user";
 	isDefault: boolean;
+	/** 文案（服务端默认语言，pi 内置五档为中文）。非中文界面取 *En ?? *。 */
 	name?: string;
 	description?: string;
+	/** 非中文界面的文案（与审批规则的 labelEn/reasonEn 同一约定）：
+	 *  服务端把两种语言都带上，界面按当前语言取，不再把中文硬塞给英文用户。 */
+	nameEn?: string;
+	descriptionEn?: string;
 	order?: number;
 	broken?: string;
 }
@@ -1875,8 +2279,12 @@ export interface UiAgentPreset {
 export interface DshPermissionOption {
 	/** 预设值（read-only/workspace-write(-never)/danger-full-access/custom）。 */
 	value: string;
+	/** 文案（服务端默认语言）；非中文界面取 nameEn ?? name。 */
 	name: string;
 	description?: string;
+	/** 非中文界面的文案（见 UiAgentPreset.nameEn）。 */
+	nameEn?: string;
+	descriptionEn?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1989,6 +2397,8 @@ export interface UiSettingsState {
 	terminalBash: boolean;
 	/** 接管模式下 bash 的静默解阻阈值毫秒数（0 = 一直等到命令结束）。 */
 	terminalBashIdleMs: number;
+	/** 接管模式下 bash 前台最长等待毫秒数（0 = 不限；达到后自动转后台）。 */
+	terminalBashMaxForegroundMs: number;
 	/** 工具执行看门狗超时毫秒数（0 = 禁用；默认 20 分钟即 1200000）。 */
 	toolWatchdogTimeoutMs: number;
 	/** read 工具读目录开关（默认开）：开 → read(目录路径) 列出目录条目（见
@@ -1998,6 +2408,13 @@ export interface UiSettingsState {
 	editSoftEnabled: boolean;
 	/** 问卷提问开关（默认开）。关 → 模型不再弹问卷对话框。 */
 	questionnaireEnabled: boolean;
+	/** 工具执行审批（人机协同）总开关（默认开）。关 → 一切审批都不弹：内置高危检测
+	 *  直接放行、插件 pre guard 的 ask 也按放行处理（纯运行开关，不进预设、无需 reload）。 */
+	toolApprovalEnabled: boolean;
+	/** 当前对话的审批放行策略（仅内存，不落盘；设置面板「已记住的放行」撤销区）。 */
+	approvalPolicy: UiApprovalPolicyState;
+	/** 审批规则列表（全局共享；<dataDir>/approval-rules.json；支持自定义拦截/放行/直接拒绝）。 */
+	approvalRules: UiApprovalRule[];
 	/** 同项目并行提醒开关（默认开）。关 → 同项目并行时不发 notice、不给 AI 注提醒、不通知对端。纯运行开关，无需 reload。 */
 	parallelReminderEnabled: boolean;
 	/** 目标模式（目标条 + 调研向导 + 审查循环）总开关（默认开）。关 → 目标条
@@ -2029,6 +2446,10 @@ export interface UiSettingsState {
 	scmCommitMsgPromptMode: "append" | "replace";
 	/** SCM「AI 生成提交信息」自定义提示词。 */
 	scmCommitMsgPrompt: string;
+	/** 计划模式提示词模式：追加/替换内置默认（空文本 = 内置默认）。 */
+	planModePromptMode: "append" | "replace";
+	/** 计划模式自定义提示词。 */
+	planModePrompt: string;
 	/** Extra instructions appended to the built-in goal-review prompt. */
 	reviewPrompt: string;
 	/** Skills disabled only for the isolated goal-reviewer. */
@@ -2055,6 +2476,8 @@ export interface UiSettingsState {
 	visionBridgeDefaultPrompt: string;
 	/** SCM「AI 生成提交信息」的内置默认提示词（设置面板 replace 模式预填用）。 */
 	scmCommitMsgDefaultPrompt: string;
+	/** 计划模式的内置默认提示词（设置面板 replace 模式预填用）。 */
+	planModeDefaultPrompt: string;
 	/** Vision-capable configured models available on this machine. */
 	visionModels: UiVisionBridgeModel[];
 	skills: UiSkillInfo[];
@@ -2089,6 +2512,14 @@ export interface UiSettingsState {
 	subagentDefaultTemplates: string[];
 }
 export type ServerMessage =
+	| {
+			/** 子代理同行直接交接协同通知（Peer-to-Peer Handoff Event） */
+			type: "subagent_handoff";
+			fromRunId: string;
+			toRunId: string;
+			payload: string;
+			timestamp: number;
+	  }
 	| {
 			type: "ready";
 			uiZoomPercent?: number;
@@ -2342,6 +2773,15 @@ export type ServerMessage =
 			models?: UiModelConfigEntry[];
 			error?: string;
 	  }
+	/** Result of a test_model_connection probe: ok + roundtrip latency in ms,
+	 *  or an error string. */
+	| {
+			type: "test_model_connection_result";
+			reqId: number;
+			ok: boolean;
+			latencyMs?: number;
+			error?: string;
+	  }
 	/** Progress notification for enrich_models while downloading catalogs or matching. */
 	| {
 			type: "enrich_models_progress";
@@ -2469,7 +2909,7 @@ export type ServerMessage =
 			type: "update_status_all";
 			items: {
 				name: string;
-				kind: "webui" | "pi-core" | "package" | "git-extension";
+				kind: "webui" | "pi-core" | "package" | "git-extension" | "plugin";
 				current: string;
 				latest: string | null;
 				latestPublishedAt?: string | null;
@@ -2477,7 +2917,18 @@ export type ServerMessage =
 				error?: string;
 				/** git-extension only: `host/path` shorthand (prepend `git:` for the `pi update` command). */
 				source?: string;
+				/** plugin only: directory/install id, matches pluginId. */
+				pluginId?: string;
+				/** plugin only: whether this is a shipped built-in plugin. */
+				builtin?: boolean;
 			}[];
+			/** issue #321: pi SDK 副本状态快照，随每次 update_status_all 下发。
+			 *  `running` = 本进程实际加载的版本（可能是自带副本，也可能是跟随的全局副本）；
+			 *  `bundledInUse` = 加载的是随包自带那份（未跟随机器上的全局副本）；
+			 *  `newerInstalled` = 机器上比 running 更新的 pi 版本（全局 pi CLI / 被遮蔽副本），
+			 *  没有则 null —— 更新面板的 pi-core 行探测的是全局 CLI（`npm i -g` 更新的那份），
+			 *  会话实际跑哪份此前在 UI 里不可见，#321 即由此而来。 */
+			piSdk?: { running: string; bundledInUse: boolean; newerInstalled: string | null };
 	  }
 	// -- goal / review -------------------------------------------------------
 	/** Goal status pushed whenever it changes (set / review start-end / verdict).
@@ -2497,6 +2948,9 @@ export type ServerMessage =
 	 *  reload; the frontend uses it as an import-cache buster so changed
 	 *  bundles are actually re-fetched. */
 	| { type: "plugins"; plugins: UiPluginInfo[]; epoch: number }
+	/** Result of a check_plugin_updates run or an all-source update check
+	 *  containing UI plugins. Broadcast to all clients so plugin badges stay in sync. */
+	| { type: "plugin_updates"; updates: UiPluginUpdateInfo[] }
 	/** Installable-plugin list (marketplace). Pushed on attach and after every
 	 *  plugin_catalog_add/remove. Merges the shipped catalog
 	 *  (<pkgRoot>/plugins/catalog.json) with user-added entries
@@ -2525,9 +2979,34 @@ export type ServerMessage =
 			/** phase="done": output tail (bounded), for inline details. */
 			output?: string;
 	  }
+	/** 安装前先读 spec 的回执（plugin_install_inspect 的响应，requestId 回显）。
+	 *  `problem` 非空 = 装了也是白装（先把这一条修掉）；`installed` = 已装（UI 转成「更新」）。
+	 *  `manifest` = 远端/本地探到的展示字段（让用户确认装的是什么）。 */
+	| {
+			type: "plugin_install_inspect_result";
+			requestId: string;
+			source: string;
+			kind: "npm" | "github" | "url" | "path" | "invalid";
+			suggestedId: string;
+			installed: boolean;
+			problem?:
+				"invalid-spec" | "already-installed" | "not-found" | "not-a-package" | "not-a-bundle" | "network" | "unknown";
+			detail?: string;
+			manifest?: { id?: string; name?: string; version?: string; description?: string; permissions?: string[] };
+	  }
+	/** 注册面目录回执（plugin_api_catalog 的响应，requestId 回显；只读装配，无副作用）。 */
+	| {
+			type: "plugin_api_catalog_result";
+			requestId: string;
+			catalog: PluginApiCatalog;
+	  }
 	/** 插件请求访问工作区外的目录：宿主弹确认（文案按 kind 本地化），用户答复经
 	 *  plugin_path_response 回传。未答复超时视为拒绝。 */
 	| { type: "plugin_path_request"; id: string; pluginId: string; path: string; reason?: string }
+	/** DOM 授权两步握手的在途请求（设置面板的授权点击触发服务端生成并广播）：
+	 *  id 供 plugin_dom_consent_response 回显；from = 发起端 clientId（前端只自动
+	 *  应答自己发起的授权）。120s 未应答视为拒绝。 */
+	| { type: "plugin_dom_consent_request"; id: string; pluginId: string; from: string }
 	/** 插件目录授权表（设置面板展示 + 撤销后刷新）。 */
 	| { type: "plugin_grants"; grants: { pluginId: string; paths: string[] }[] }
 	/** 插件请求能力授权（net 主机 / llm 模型作用域）：宿主弹确认，用户答复经
@@ -2597,6 +3076,28 @@ export type ServerMessage =
 			/** 所属会话标题/名称（可选），用于在提问弹窗中展示来源对话。 */
 			conversationTitle?: string;
 	  }
+	/** 高危工具拦截触发待审批（Human-in-the-Loop）：弹窗/内联卡片等待用户批准、拒绝或就地修改参数（Edit & Run）。 */
+	| {
+			type: "tool_approval_pending";
+			id: string;
+			toolCallId: string;
+			toolName: string;
+			params: Record<string, unknown> | unknown;
+			reason?: string;
+			reasonEn?: string;
+			/** 命中的规则档位（「允许同类」按它记忆）。 */
+			category?: UiApprovalCategory;
+			conversationId?: string;
+			conversationTitle?: string;
+	  }
+	/** 审批已完成或被取消/撤回（前端关闭审批弹窗）。 */
+	| { type: "tool_approval_resolved"; id: string }
+	/** 任务计划更新推送（增量或全量广播）。 */
+	| {
+			type: "plan_updated";
+			conversationId?: string;
+			plan: PlanState | null;
+	  }
 	/** 待答问卷被搬走/取消：前端若正展示该 id 的对话框立即收起（不过户/不恢复）。
 	 *  手动过户把问卷搬到另一会话时，源页面靠它收起旧对话框（快照为 null 只能收
 	 *  snapshot 来源的面板，即时通道弹出的收不到 —— 见 pending-question.ts）。 */
@@ -2645,4 +3146,13 @@ export type ServerMessage =
 	// -- scheduled tasks (issue #184) ----------------------------------------
 	/** Built-in scheduler task list (global, all projects). Pushed on attach,
 	 *  on request (schedule_list) and on every change (save/delete/toggle/run). */
-	| { type: "scheduler_tasks"; tasks: SchedulerTaskView[] };
+	| { type: "scheduler_tasks"; tasks: SchedulerTaskView[] }
+	// -- compacted history retrieval (issue #398) ----------------------------
+	/** 响应被压缩卡片折叠的历史消息查询（issue #398）。 */
+	| {
+			type: "compacted_messages_result";
+			compactionMessageId: string;
+			conversationId: string;
+			messages: UiMessage[];
+			error?: string;
+	  };

@@ -116,6 +116,7 @@ describe("syncPluginCatalog", () => {
 				customCatalogPath: custom,
 				pluginsDir,
 				installer,
+				workspaceRoot: dir,
 				afterWrite: async (pluginsChanged) => {
 					afterWrites.push(pluginsChanged);
 				},
@@ -135,7 +136,7 @@ describe("syncPluginCatalog", () => {
 		const bad = join(dir, "bad.json");
 		writeFileSync(bad, "{ not json");
 		const { installer } = fakeInstaller();
-		const deps = { customCatalogPath: custom, pluginsDir, installer, afterWrite: async () => {} };
+		const deps = { customCatalogPath: custom, pluginsDir, installer, workspaceRoot: dir, afterWrite: async () => {} };
 		const r1 = await syncPluginCatalog(bad, {}, deps);
 		expect(r1.ok).toBe(false);
 		expect(r1.error).toBeTruthy();
@@ -144,6 +145,46 @@ describe("syncPluginCatalog", () => {
 		const r3 = await syncPluginCatalog("relative/path.json", {}, deps);
 		expect(r3.ok).toBe(false);
 		expect(readFileSync(custom, "utf8")).toBe(before);
+	});
+
+	it("本地来源的「读不到」与「坏 JSON」错误统一（不构成文件探测 oracle）", async () => {
+		const { installer } = fakeInstaller();
+		const deps = { customCatalogPath: custom, pluginsDir, installer, workspaceRoot: dir, afterWrite: async () => {} };
+		const r1 = await syncPluginCatalog(join(dir, "missing.json"), {}, deps);
+		writeFileSync(join(dir, "bad.json"), "{ not json");
+		const r2 = await syncPluginCatalog(join(dir, "bad.json"), {}, deps);
+		const r3 = await syncPluginCatalog(join(dir, "..", "outside.json"), {}, deps); // 越出工作区
+		expect(r1.ok).toBe(false);
+		expect(r2.ok).toBe(false);
+		expect(r3.ok).toBe(false);
+		expect(r1.error).toBe(r2.error);
+		expect(r1.error).toBe(r3.error);
+	});
+
+	it("工作区之外的本地路径一律拒绝（未传 workspaceRoot 同样拒绝）", async () => {
+		const outside = join(tmpdir(), `outside-${Date.now()}.json`);
+		writeFileSync(outside, JSON.stringify({ entries: [ENTRY] }));
+		try {
+			const { installer } = fakeInstaller();
+			const deps = { customCatalogPath: custom, pluginsDir, installer, workspaceRoot: dir, afterWrite: async () => {} };
+			const r1 = await syncPluginCatalog(outside, {}, deps);
+			expect(r1.ok).toBe(false);
+			// 未接入 workspaceRoot（无头/调用方没配）：本地路径 fail-closed
+			const r2 = await syncPluginCatalog(
+				outside,
+				{},
+				{
+					customCatalogPath: custom,
+					pluginsDir,
+					installer,
+					afterWrite: async () => {},
+				},
+			);
+			expect(r2.ok).toBe(false);
+			expect(existsSync(custom)).toBe(false);
+		} finally {
+			rmSync(outside, { force: true });
+		}
 	});
 
 	it("install:true：未装的走 install、已装的走 update，失败逐条记录（不中断整批）", async () => {
@@ -163,9 +204,12 @@ describe("syncPluginCatalog", () => {
 				customCatalogPath: custom,
 				pluginsDir,
 				installer,
+				workspaceRoot: dir,
 				afterWrite: async (pluginsChanged) => {
 					afterWrites.push(pluginsChanged);
 				},
+				// 安装确认门放行（本条测的是安装批处理本身，门的行为在下面两条单测）
+				confirmInstall: async () => true,
 			},
 		);
 		expect(res.ok).toBe(true);
@@ -180,5 +224,71 @@ describe("syncPluginCatalog", () => {
 		// 写盘只刷新目录；安装完成才重载插件
 		expect(afterWrites).toEqual([false, true]);
 		expect(existsSync(custom)).toBe(true);
+	});
+
+	it("install:true 无确认设施（无头）→ 只写目录不安装（fail-closed）", async () => {
+		const src = join(dir, "remote.json");
+		writeFileSync(src, JSON.stringify([ENTRY]));
+		const { installer, calls } = fakeInstaller();
+		let afterWrites = 0;
+		const res = await syncPluginCatalog(
+			src,
+			{ install: true },
+			{
+				customCatalogPath: custom,
+				pluginsDir,
+				installer,
+				workspaceRoot: dir,
+				afterWrite: async () => {
+					afterWrites += 1;
+				},
+			},
+		);
+		expect(res.ok).toBe(true);
+		expect(res.installRefused).toBe(true);
+		expect(res.installed).toEqual([]);
+		expect(calls).toHaveLength(0);
+		expect(afterWrites).toBe(1); // 写盘后一次；安装后的重载没有发生
+		expect(JSON.parse(readFileSync(custom, "utf8"))).toMatchObject({ entries: [{ id: "third-party" }] });
+	});
+
+	it("install:true 用户拒绝 → 只写目录不安装；同意 → 正常安装", async () => {
+		const src = join(dir, "remote.json");
+		writeFileSync(src, JSON.stringify([ENTRY]));
+		// 拒绝
+		const refused = fakeInstaller();
+		const r1 = await syncPluginCatalog(
+			src,
+			{ install: true },
+			{
+				customCatalogPath: custom,
+				pluginsDir,
+				installer: refused.installer,
+				workspaceRoot: dir,
+				afterWrite: async () => {},
+				confirmInstall: async () => false,
+			},
+		);
+		expect(r1.installRefused).toBe(true);
+		expect(refused.calls).toHaveLength(0);
+		// 同意
+		const accepted = fakeInstaller();
+		const r2 = await syncPluginCatalog(
+			src,
+			{ install: true },
+			{
+				customCatalogPath: custom,
+				pluginsDir,
+				installer: accepted.installer,
+				workspaceRoot: dir,
+				afterWrite: async () => {},
+				confirmInstall: async (items) => {
+					expect(items).toEqual([{ id: "third-party", source: "someone/repo" }]);
+					return true;
+				},
+			},
+		);
+		expect(r2.installRefused).toBeUndefined();
+		expect(accepted.calls.map((c) => c.action)).toEqual(["install"]);
 	});
 });

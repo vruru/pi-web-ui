@@ -71,7 +71,11 @@ writeFileSync(
 				},
 			],
 			rightpanel: [{ id: "rp", label: "RP-TAB", labelEn: "RP-TAB", hint: "右栏 tab 的悬浮提示", kind: "view" }],
-			arrange: [{ id: "host:cost", hide: true }],
+			// 第二条指向一个不存在的目标：用来验证 P0-1 的「布局诊断」（不再静默忽略）。
+			arrange: [
+				{ id: "host:cost", hide: true },
+				{ id: "host:does-not-exist", hide: true },
+			],
 		},
 	}),
 );
@@ -265,6 +269,18 @@ async function main() {
 
 	// ---- 4. 布局页取消勾选宿主条目 → 界面消失；勾回来 → 回来 ---------------
 	check("界面布局页可打开", await openLayoutPage(page));
+	// P0-1：插件把 arrange 指向不存在的条目 → 布局页顶部出现「布局诊断」横幅，
+	// 说清是哪个插件的哪个目标没生效（不再静默丢弃）。
+	const diag = page.locator(".set-ui-diag").first();
+	check("布局诊断横幅出现（arrange 目标不存在不再静默）", (await diag.count()) > 0);
+	if ((await diag.count()) > 0) {
+		const diagText = (await diag.textContent()) ?? "";
+		check(
+			"诊断里点名了插件与目标 id",
+			diagText.includes("layouttest") && diagText.includes("host:does-not-exist"),
+			diagText.trim().slice(0, 120),
+		);
+	}
 	const cwdRow = layoutRow(page, /底栏|Bottom bar/, /工作目录|Working directory/);
 	check("布局页列出了底栏的「工作目录」条目", await until(async () => (await cwdRow.count()) > 0, 30, 250));
 	check("初始状态底栏有工作目录按钮", (await page.locator(".statusbar .status-cwd").count()) === 1);

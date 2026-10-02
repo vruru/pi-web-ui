@@ -35,6 +35,28 @@ type FocusSink = () => void;
 let draftSink: DraftSink | null = null;
 let attachmentSink: AttachmentSink | null = null;
 let focusSink: FocusSink | null = null;
+let insertSink: ((text: string) => void) | null = null;
+let removeMentionSink: ((mention: string) => void) | null = null;
+
+export function registerInsertSink(fn: ((text: string) => void) | null): void {
+	insertSink = fn;
+}
+
+export function registerRemoveMentionSink(fn: ((mention: string) => void) | null): void {
+	removeMentionSink = fn;
+}
+
+export function insertTextAtCursor(text: string): boolean {
+	if (!insertSink) return false;
+	insertSink(text);
+	return true;
+}
+
+export function removeMentionFromComposer(mention: string): boolean {
+	if (!removeMentionSink) return false;
+	removeMentionSink(mention);
+	return true;
+}
 
 /** ChatInput 注册 / 注销（传 null）文本那一半。可重复调用，后注册的覆盖先前的。 */
 export function registerDraftSink(fn: DraftSink | null): void {
@@ -68,6 +90,8 @@ export function resetComposerSinks(): void {
 	draftSink = null;
 	attachmentSink = null;
 	focusSink = null;
+	insertSink = null;
+	removeMentionSink = null;
 }
 
 /**

@@ -517,39 +517,31 @@ describe("host.ui —— 能力门控", () => {
 	});
 
 	it("apiVersion 2 且未声明 permissions → 默认拒绝（v2 严格语义，宿主已升 v2）", async () => {
+		// P1-6：v2 无 permissions = 结构级错误，直接拒绝激活（不再是"激活成功但 ui 静默忽略"）。
 		const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-		const h = await activate("ui-v2", { apiVersion: 2, ui: { topbar: [{ id: "m", label: "M" }] } });
-		// 宿主 PLUGIN_API_VERSION 已为 2：版本门不再拦，落到严格模式——未声明任何能力 => 默认拒绝。
-		h.ui.register([{ slot: "topbar.primary", id: "x", label: "X" }]);
-		expect(h.ui.list()).toEqual({ items: [], arrange: [] });
-		expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('缺少能力声明 "ui"'));
-		// manifest 里声明的 ui 贡献也整份不发布（permissions 未声明 = 什么都没授权）
+		const h = await load("ui-v2", { apiVersion: 2, ui: { topbar: [{ id: "m", label: "M" }] } });
+		expect(h, "插件 ui-v2 应被拒绝激活").toBeUndefined();
+		expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("manifest"));
 		const info = (await mgr.list()).find((x) => x.id === "ui-v2");
-		expect(info?.error).toBeUndefined();
+		expect(info?.error).toMatch(/manifest/);
 		expect(info?.ui).toBeUndefined();
+		expect(info?.diagnostics?.join("\n")).toMatch(/permissions/);
 	});
 
-	it("只声明别的能力（fs）→ host.ui 全部受控调用被拒，list 恒为空", async () => {
+	it("只声明别的能力（fs）却写 ui → manifest 校验失败即拒（P1-6）", async () => {
+		// P1-6 之前：激活成功但 ui 整份静默忽略 + 运行时调用逐次 denied。
+		// P1-6 之后：结构级错误，直接拒绝激活（不再带病启动，诊断随清单下发）。
 		const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-		const h = await activate("ui-fsonly", {
+		const h = await load("ui-fsonly", {
 			permissions: ["fs"],
-			ui: { topbar: [{ id: "m", label: "M" }] }, // manifest 声明了也没用：整份忽略
+			ui: { topbar: [{ id: "m", label: "M" }] },
 		});
-		h.ui.register([{ slot: "topbar.primary", id: "x", label: "X" }]);
-		h.ui.update("x", { label: "Y" });
-		h.ui.remove("x");
-		h.ui.arrange([{ id: "host:files", hide: true }]);
-		const denial = (): number => errSpy.mock.calls.filter((c) => String(c[0]).includes('缺少能力声明 "ui"')).length;
-		expect(denial()).toBe(4); // 四次受控调用各记一次（门控不节流，节流只对旧模式的 warn）
-		expect(h.ui.list()).toEqual({ items: [], arrange: [] });
-
-		// register 仍返回函数：插件不会因为拿不到注销函数在清理时崩
-		expect(h.ui.register([])).toBeTypeOf("function");
-		expect(denial()).toBe(5);
-
-		// manifest 的 ui 整份被忽略（permissions 里没有 ui 族）
+		expect(h, "插件 ui-fsonly 应被拒绝激活").toBeUndefined();
+		expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("manifest"));
 		const info = (await mgr.list()).find((x) => x.id === "ui-fsonly");
+		expect(info?.error).toMatch(/manifest/);
 		expect(info?.ui).toBeUndefined();
+		expect(info?.diagnostics?.join("\n")).toMatch(/ui/);
 	});
 
 	it('permissions: ["ui:read"] 这类带子命名空间的声明也算 ui 族', async () => {

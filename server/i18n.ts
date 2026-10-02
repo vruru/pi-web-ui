@@ -17,9 +17,9 @@
  *    Keys must be globally unique (module prefix guarantees it).
  *  - `getServerBlock(lang, key, zhLines, enLines)` — multi-line blocks
  *    (guidance arrays, prompt sections); tables store one `\n`-joined string.
- *  - `bilingual(en, zh)` — tool DEFINITIONS stay static en+zh (baked into the
- *    session at creation; the model works fine with English definitions
- *    under any UI language). No keys needed.
+ *  - `bilingual(en, zh)` — now used only for user-facing relay strings (error
+ *    messages etc.). Tool DEFINITIONS (description/promptSnippet/promptGuidelines)
+ *    are concise English-only. No keys needed.
  *  - Template DATA (subagent_templates content, user overrides) stays zh/en
  *    fields — it is user-editable config, not code copy.
  *

@@ -19,6 +19,8 @@ const port = Number(process.env.PI_HERDR_TEST_PORT || 8991);
 let childRequests = 0,
 	spawned = false,
 	delivery = false;
+/** Tool names offered to the model (parent web session and child Pi). */
+const toolNames = new Set();
 const mock = createServer(async (req, res) => {
 	let text = "";
 	for await (const c of req) text += c;
@@ -27,6 +29,7 @@ const mock = createServer(async (req, res) => {
 		return;
 	}
 	const body = JSON.parse(text);
+	for (const tool of body.tools ?? []) toolNames.add(tool.function?.name);
 	const msgs = body.messages || [];
 	const last = msgs.filter((m) => m.role === "user").at(-1);
 	const child = JSON.stringify(last).includes("HERDR_CHILD_PROBE");
@@ -191,6 +194,10 @@ try {
 	}
 	assert(childRequests >= 1, "Child Pi reached local provider");
 	assert(delivery, "Child result delivered to parent");
+	// The extension keeps the plain `subagent` name (the spawn above went through it);
+	// the first-party background subagents stay available next to it under their coexist name.
+	assert(toolNames.has("subagent"), "Herdr subagent tool offered");
+	assert(toolNames.has("webui_subagent"), "first-party subagent tool offered under its coexist name");
 	console.log("PASS: Herdr spawn, inherited model, child execution, result delivery");
 } finally {
 	ws?.close();

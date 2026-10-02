@@ -394,8 +394,13 @@ export function TemplateProvider({
 			setResetConfirm(false);
 		} else {
 			setResetConfirm(true);
-			setTimeout(() => setResetConfirm(false), 5000);
 		}
+	}, [resetConfirm]);
+	// 审查 #5：5s 复位走 effect（可在卸载/再次点击时清理，不再裸 setTimeout 悬挂）。
+	useEffect(() => {
+		if (!resetConfirm) return;
+		const id = setTimeout(() => setResetConfirm(false), 5000);
+		return () => clearTimeout(id);
 	}, [resetConfirm]);
 
 	// 选择器里：点卡片 = 直接填入输入框；点 ✏️ = 进编辑弹窗；点「新建」= 新建。

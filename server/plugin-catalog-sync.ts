@@ -16,10 +16,11 @@
  *      不因为一条坏条目就停掉整批；
  *   3. 回执是结构化的（ok/error/entries/installed），不靠 DOM 事件或控制台文字。
  */
-import { readFileSync, existsSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { pick, type ServerLang } from "./i18n.js";
 import { normalizeSyncPayload, writeCustomCatalog } from "./plugin-catalog.js";
+import { workspacePath } from "./files-service.js";
 import type { PluginInstaller } from "./plugin-installer.js";
 import type { UiPluginCatalogEntry } from "./protocol.js";
 
@@ -43,6 +44,13 @@ export interface CatalogSyncDeps {
 	fetchTimeoutMs?: number;
 	/** 文档大小上限（默认 1MB）——避免一个巨型 JSON 顶爆内存。 */
 	maxBytes?: number;
+	/** 工作区根（本地文件来源只允许工作区内的路径；缺省 = 一律拒绝本地路径）。
+	 *  任意绝对路径可读 = 一个「文件存在/可读性」探测 oracle，必须收口。 */
+	workspaceRoot?: string;
+	/** 安装确认门（P0）：install:true 在真正动安装器之前必须拿到用户确认
+	 *  （列出将安装的插件 id/source）。拒绝 / 超时 / 未接入（无头 DSH）一律
+	 *  fail-closed —— 只写目录不安装。 */
+	confirmInstall?: (items: Array<{ id: string; source: string }>) => Promise<boolean>;
 }
 
 export interface CatalogSyncResult {
@@ -52,12 +60,28 @@ export interface CatalogSyncResult {
 	entries?: UiPluginCatalogEntry[];
 	/** install:true 时逐条安装结果。 */
 	installed?: { id: string; ok: boolean; error?: string }[];
+	/** install:true 但用户拒绝 / 超时 / 无确认设施：目录已写，未安装任何插件
+	 *  （调用方据此发 notice 告知）。 */
+	installRefused?: boolean;
 }
 
 /**
- * 读同步文档：`http(s)://` 走网络，其余当本地文件路径（须为绝对路径）。
- * 只读文本，JSON 解析交给调用方（解析失败也走同一条「不写盘」的路径）。
+ * 读同步文档：`http(s)://` 走网络，其余当本地文件路径 —— **只允许工作区内的路径**
+ * （复用 files-service 的 workspacePath 校验；任意绝对路径可读会成为「文件存在 /
+ * 可读性」探测 oracle）。只读文本；本地来源的读失败与过大统一进 `localDocFailed`
+ * 这一条错误（调用方把解析失败也并进来），不区分「读不到 / 解析失败」两种失败。
  */
+function localDocFailed(l: ServerLang): { error: string } {
+	return {
+		error: pick(
+			l,
+			"目录文档无效或不可读（仅支持 http(s) URL 或工作区内的 JSON 文件）",
+			"Invalid or unreadable catalog document (http(s) URL or an in-workspace JSON file only)",
+			"plugincatalog.sync.doc.invalid",
+		),
+	};
+}
+
 async function readDocument(
 	source: string,
 	deps: CatalogSyncDeps,
@@ -106,40 +130,18 @@ async function readDocument(
 			};
 		return { text };
 	}
-	const p = source.trim();
-	if (!isAbsolute(p))
-		return {
-			error: pick(
-				l,
-				"来源需为 http(s) URL 或本地文件的绝对路径",
-				"Source must be an http(s) URL or an absolute local file path",
-				"plugincatalog.sync.source.invalid",
-			),
-		};
+	// 本地来源：必须在工作区内（workspacePath 对相对/绝对路径统一做越界判定）。
+	// 越界 / 读不到 / 过大统一返回同一条错误，不给调用方区分的余地。
+	const wp = deps.workspaceRoot ? workspacePath(deps.workspaceRoot, source.trim()) : null;
+	if (!wp) return localDocFailed(l);
+	let text: string;
 	try {
-		const text = readFileSync(p, "utf8");
-		if (text.length > maxBytes)
-			return {
-				error: pick(
-					l,
-					`目录文档过大（> ${Math.round(maxBytes / 1024)} KB）`,
-					`Catalog document too large (> ${Math.round(maxBytes / 1024)} KB)`,
-					"plugincatalog.sync.too.large",
-					{ kb: String(Math.round(maxBytes / 1024)) },
-				),
-			};
-		return { text };
-	} catch (err) {
-		return {
-			error: pick(
-				l,
-				`读取目录文件失败：${(err as Error)?.message ?? err}`,
-				`Failed to read the catalog file: ${(err as Error)?.message ?? err}`,
-				"plugincatalog.sync.read.failed",
-				{ reason: String((err as Error)?.message ?? err) },
-			),
-		};
+		text = readFileSync(wp.abs, "utf8");
+	} catch {
+		return localDocFailed(l);
 	}
+	if (text.length > maxBytes) return localDocFailed(l);
+	return { text };
 }
 
 /**
@@ -161,10 +163,14 @@ export async function syncPluginCatalog(
 		};
 	const doc = await readDocument(src, deps, lang);
 	if ("error" in doc) return { ok: false, error: doc.error };
+	const isLocalSource = !/^https?:\/\//i.test(src);
 	let raw: unknown;
 	try {
 		raw = JSON.parse(doc.text);
 	} catch (err) {
+		// 本地来源不区分「读得到但解析失败 / 读不到 / 越界」——组合起来就是文件探测
+		// oracle；http(s) 来源与本地文件无关，保留解析细节方便排障。
+		if (isLocalSource) return { ok: false, error: localDocFailed(lang()).error };
 		return {
 			ok: false,
 			error: pick(
@@ -184,6 +190,12 @@ export async function syncPluginCatalog(
 
 	let installed: { id: string; ok: boolean; error?: string }[] | undefined;
 	if (opts.install === true && payload.entries.length) {
+		// 安装确认门（P0）：安装/更新插件是高风险动作，必须先经用户确认。第三方页面
+		// 脚本可以直发 plugin_catalog_sync，没有这道门就能静默装任意插件。拒绝 /
+		// 超时 / 无确认设施（无头 DSH）一律只保留目录更新，不安装。
+		const items = payload.entries.map((e) => ({ id: e.id, source: e.source }));
+		const confirmed = deps.confirmInstall ? await deps.confirmInstall(items) : false;
+		if (!confirmed) return { ok: true, installRefused: true, installed: [] };
 		installed = [];
 		for (const e of payload.entries) {
 			const action = existsSync(join(deps.pluginsDir, e.id)) ? "update" : "install";

@@ -39,6 +39,7 @@ const COLUMN_SELECTORS = {
 	"重试条幅 .retry-notice": ".retry-notice",
 	"折叠行 .msg-collapsed": ".msg-collapsed",
 	"目标条 .goalbar": ".goalbar",
+	"任务执行看板 .plan-board": ".plan-board",
 	"斜杠菜单 .slash-menu": ".slash-menu",
 	"问卷面板 .dialog-inline": ".dialog-inline",
 };
@@ -111,6 +112,9 @@ for (const vp of VIEWPORTS) {
 		);
 		add("slash-menu", '<div class="slash-menu-item">/help</div>', document.querySelector(".inputbar"));
 		add("dialog-inline", "<div>question</div>", document.querySelector(".main"));
+		// 任务执行看板（PlanBoard.tsx）：.main 的直系子元素、输入框上方 —— 宽度必须
+		// 跟对话列一致（曾写死 margin: 0 16px，宽屏聊天列/窄屏下都比输入框宽一截）。
+		add("plan-board", '<div class="plan-board-row">board</div>', document.querySelector(".main"));
 		const wrap = document.querySelector(".messages-wrap");
 		add("qn-rail", '<button class="qn-bar"><span class="qn-bar-text">1. q</span></button>', wrap);
 		const out = {

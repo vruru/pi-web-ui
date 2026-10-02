@@ -188,18 +188,24 @@ export function looksLikeText(buf: Buffer): boolean {
 	return control / Math.max(text.length, 1) < 0.02;
 }
 
-/** Decode bytes: strict UTF-8 first, falling back to GBK (Windows legacy
- *  Chinese files), then latin1 as a last resort — so previews and inline
- *  attachments never show mojibake for GBK/GB2312 encoded files. */
+/** Decode bytes: strict UTF-8 first (retrying with up to 3 truncated tail
+ *  bytes removed for excerpt/preview buffers cut mid-character), falling back
+ *  to GBK (Windows legacy Chinese files), then latin1 as a last resort — so
+ *  previews and inline attachments never show mojibake for GBK/GB2312 files
+ *  nor for truncated UTF-8 files (issue #392). */
 export function decodeText(buf: Buffer): string {
-	try {
-		return new TextDecoder("utf-8", { fatal: true }).decode(buf);
-	} catch {
+	for (let cut = 0; cut < 4; cut++) {
+		const slice = cut === 0 ? buf : buf.subarray(0, Math.max(0, buf.length - cut));
 		try {
-			return new TextDecoder("gbk").decode(buf);
+			return new TextDecoder("utf-8", { fatal: true }).decode(slice);
 		} catch {
-			return buf.toString("latin1");
+			// Tail byte might be cut mid-character; try trimming up to 3 bytes.
 		}
+	}
+	try {
+		return new TextDecoder("gbk").decode(buf);
+	} catch {
+		return buf.toString("latin1");
 	}
 }
 

@@ -156,15 +156,15 @@ export const ToolCallBlock = memo(function ToolCallBlock({
 	// 2. 其次取 view.status?.durationMs（流式阶段 tool_status 事件带回的实时耗时）
 	// 3. 用 ref 缓存曾经捕获到的 durationMs，确保 status 被 prune 或状态切到 done 后耗时不丢失
 	const durationMsRef = useRef<number | undefined>(undefined);
-	if (view.status?.durationMs !== undefined) {
-		durationMsRef.current = view.status.durationMs;
-	}
+	const statusDuration = view.status?.durationMs;
 	const resultDuration = (view.result as unknown as { durationMs?: number } | undefined)?.durationMs;
-	if (typeof resultDuration === "number") {
-		durationMsRef.current = resultDuration;
-	}
-	const durationMs =
-		typeof resultDuration === "number" ? resultDuration : (view.status?.durationMs ?? durationMsRef.current);
+	// 审查 #7：ref 缓存改在 effect 里写入 —— 渲染期写 ref 在并发渲染下时序不可靠，
+	// 提交后再写保证与真实提交内容一致。
+	useEffect(() => {
+		if (statusDuration !== undefined) durationMsRef.current = statusDuration;
+		if (typeof resultDuration === "number") durationMsRef.current = resultDuration;
+	}, [statusDuration, resultDuration]);
+	const durationMs = typeof resultDuration === "number" ? resultDuration : (statusDuration ?? durationMsRef.current);
 
 	const statusClass = isError ? "err" : done ? "ok" : running || waitingModel ? "run" : "idle";
 	let statusLabel = isError
@@ -339,10 +339,13 @@ export const ToolCallBlock = memo(function ToolCallBlock({
 						<span>{t("delegateOpenSubagent")}</span>
 					</button>
 				)}
+				{/* 卡头右端**只有复制键**：消息级按钮一律落在消息底部的 .msg-actions 行
+				    （纯工具调用的消息没有正文，不渲染那一行）。 */}
 				<button
 					type="button"
-					className="chead-copy toolcall-copy"
+					className={`chead-copy toolcall-copy${copied ? " copied" : ""}`}
 					title={t("copyArgs")}
+					aria-label={t("copyArgs")}
 					onClick={(e) => {
 						e.stopPropagation();
 						copyArgs();
@@ -373,6 +376,18 @@ export const ToolCallBlock = memo(function ToolCallBlock({
 			{zoomed &&
 				createPortal(
 					<div className="img-lightbox" role="dialog" aria-label={t("toolImageZoom")} onClick={() => setZoomed(null)}>
+						<button
+							type="button"
+							className="img-lightbox-close"
+							title={t("close")}
+							aria-label={t("close")}
+							onClick={(e) => {
+								e.stopPropagation();
+								setZoomed(null);
+							}}
+						>
+							<FiX />
+						</button>
 						<img src={zoomed} alt="tool result preview" />
 					</div>,
 					document.body,

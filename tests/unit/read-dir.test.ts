@@ -6,7 +6,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve as nodeResolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { makeReadDirTool, prepareReadArguments, resolvePathForDirCheck } from "../../server/read-tool.js";
+import {
+	makeReadDirTool,
+	prepareReadArguments,
+	resolvePathForDirCheck,
+	withReadDirSupport,
+} from "../../server/read-tool.js";
 
 let root = "";
 
@@ -136,5 +141,73 @@ describe("read 覆盖：非目录照旧", () => {
 		const tool = makeReadDirTool(root, { getLang: () => "zh" });
 		const text = await readText(tool as never, { path: "." });
 		expect(text).toContain("[目录：.]");
+	});
+});
+
+describe("withReadDirSupport：叠在扩展 read 之上（内置/扩展基底共用的目录能力）", () => {
+	/** 假扩展 read：schema 里有内置没有的 `windows` 参数，执行时记录收到的参数并返回扩展标记。 */
+	function extensionRead(seen: Record<string, unknown>[]): never {
+		return {
+			name: "read",
+			label: "Read",
+			description: "EXT-DESC anchor protocol",
+			promptSnippet: "ext read",
+			promptGuidelines: ["ext guideline"],
+			parameters: {
+				type: "object",
+				properties: { path: { type: "string" }, windows: { type: "array", items: { type: "object" } } },
+				required: ["path"],
+			},
+			async execute(_id: string, params: unknown) {
+				seen.push(params as Record<string, unknown>);
+				return { content: [{ type: "text", text: `EXT:${String((params as { path?: string }).path)}` }] };
+			},
+		} as never;
+	}
+
+	const asBase = (extra: Record<string, unknown> = {}): never =>
+		({ ...(extensionRead([]) as unknown as Record<string, unknown>), ...extra }) as never;
+
+	it("基底定义原样保留：schema（扩展独有参数）、描述、prompt 指引、render 槽位", () => {
+		const renderCall = (): string => "rc";
+		const tool = withReadDirSupport(asBase({ renderCall }), root);
+		expect(Object.keys((tool.parameters as { properties: Record<string, unknown> }).properties)).toEqual([
+			"path",
+			"windows",
+		]);
+		expect(tool.description.startsWith("EXT-DESC anchor protocol")).toBe(true);
+		expect(tool.description).toContain("directory path");
+		expect(tool.promptGuidelines).toEqual(["ext guideline", expect.stringContaining("directory")]);
+		expect(tool.promptSnippet).toBe("ext read");
+		expect((tool as { renderCall?: unknown }).renderCall).toBe(renderCall);
+	});
+
+	it("prepareArguments 继承基底（扩展自己的参数归一仍生效）", () => {
+		const prepareArguments = (raw: unknown): unknown => ({ ...(raw as object), path: "normalized" });
+		const tool = withReadDirSupport(asBase({ prepareArguments }), root);
+		expect(tool.prepareArguments?.({ file_path: "x" } as never)).toEqual({ file_path: "x", path: "normalized" });
+	});
+
+	it("非目录 → 原样转发基底（我们不改写扩展的参数）", async () => {
+		const seen: Record<string, unknown>[] = [];
+		const tool = withReadDirSupport(extensionRead(seen), root);
+		expect(await readText(tool as never, { path: "a.txt", windows: [{ offset: 1, limit: 2 }] })).toBe("EXT:a.txt");
+		expect(seen).toEqual([{ path: "a.txt", windows: [{ offset: 1, limit: 2 }] }]);
+	});
+
+	it("目录 → 仍然列条目（pi-web-ui 的能力没丢），且不惊动基底", async () => {
+		const seen: Record<string, unknown>[] = [];
+		const tool = withReadDirSupport(extensionRead(seen), root);
+		const text = await readText(tool as never, { path: "." });
+		expect(text).toContain("[Directory: .]");
+		expect(text).toContain("nested/");
+		expect(seen).toEqual([]);
+	});
+
+	it("目录开关关掉 → 交回基底（扩展自己决定目录怎么办）", async () => {
+		const seen: Record<string, unknown>[] = [];
+		const tool = withReadDirSupport(extensionRead(seen), root, { dirEnabled: () => false });
+		expect(await readText(tool as never, { path: "." })).toBe("EXT:.");
+		expect(seen).toHaveLength(1);
 	});
 });

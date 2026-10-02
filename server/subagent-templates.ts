@@ -76,6 +76,55 @@ export function pickTemplatePrompt(t: { systemPrompt: string; systemPromptEn?: s
 const NAME_MAX = 60;
 
 /**
+ * 模板体积上限（保存期拒绝，不静默截断）：模板会整体进入设置面板快照并被
+ * subagent_templates 工具列给 AI，systemPrompt 还会拼进子代理上下文，无上限
+ * 的单条模板能把快照推送与子代理首响都拖爆。对齐常见上下文预算的保守值。
+ */
+export const TEMPLATE_LIMITS = {
+	/** 模板系统提示词上限（systemPrompt / systemPromptEn 各自计）。 */
+	systemPrompt: 32_768,
+	/** 模板简介上限（description / descriptionEn 各自计）。 */
+	description: 2_000,
+	/** 技能/扩展白名单各自最多条目数。 */
+	whitelistEntries: 64,
+	/** 白名单单条字符上限。 */
+	whitelistEntryLength: 200,
+} as const;
+
+/**
+ * 保存期体积校验：超限返回明确错误文本（让设置面板能原样提示），null = 通过。
+ * 只拦新保存，不拦读盘老数据（向后兼容，与 replace 空提示词的拦截口径一致）；
+ * 拒绝而非截断——静默截断会让用户以为保存的是完整内容。
+ */
+export function validateTemplateLimits(t: SubagentTemplate): string | null {
+	if (t.systemPrompt.length > TEMPLATE_LIMITS.systemPrompt) {
+		return `模板 "${t.name}" 的系统提示词超长（${t.systemPrompt.length} > ${TEMPLATE_LIMITS.systemPrompt} 字符），请精简后再保存`;
+	}
+	if ((t.systemPromptEn ?? "").length > TEMPLATE_LIMITS.systemPrompt) {
+		return `模板 "${t.name}" 的英文系统提示词超长（${(t.systemPromptEn ?? "").length} > ${TEMPLATE_LIMITS.systemPrompt} 字符），请精简后再保存`;
+	}
+	if (t.description.length > TEMPLATE_LIMITS.description) {
+		return `模板 "${t.name}" 的简介超长（${t.description.length} > ${TEMPLATE_LIMITS.description} 字符），请精简后再保存`;
+	}
+	if ((t.descriptionEn ?? "").length > TEMPLATE_LIMITS.description) {
+		return `模板 "${t.name}" 的英文简介超长（${(t.descriptionEn ?? "").length} > ${TEMPLATE_LIMITS.description} 字符），请精简后再保存`;
+	}
+	for (const [label, list] of [
+		["技能白名单", t.enabledSkills],
+		["扩展白名单", t.enabledExtensions],
+	] as const) {
+		if (list.length > TEMPLATE_LIMITS.whitelistEntries) {
+			return `模板 "${t.name}" 的${label}条目过多（${list.length} > ${TEMPLATE_LIMITS.whitelistEntries} 条）`;
+		}
+		const over = list.find((entry) => entry.length > TEMPLATE_LIMITS.whitelistEntryLength);
+		if (over) {
+			return `模板 "${t.name}" 的${label}有超长条目（${over.length} > ${TEMPLATE_LIMITS.whitelistEntryLength} 字符）`;
+		}
+	}
+	return null;
+}
+
+/**
  * 内置默认模板（第一次运行时种子进列表；用户改动后以 <dataDir> 文件为准）。
  * 文案改编自 pi-subagents 社区项目（tintinweb / nicobailon）的角色提示词,
  * 剔除了本项目没有的专有工具引用（contact_supervisor / web_search / workflow…）。
@@ -693,6 +742,9 @@ export class SubagentTemplatesStore {
 		if (t.promptMode === "replace" && !t.systemPrompt.trim() && !(t.systemPromptEn ?? "").trim()) {
 			return `模板 "${t.name}" 用了 replace 模式但系统提示词为空：replace 会整体替换子代理 persona，空提示词等于模板没生效。请填写提示词（中文或英文至少一个），只想限定技能/扩展白名单请用 append 模式`;
 		}
+		// 体积上限同样只在保存期拦：超限明确报错，绝不静默截断。
+		const limitError = validateTemplateLimits(t);
+		if (limitError) return limitError;
 		const list = this.load();
 		const i = list.findIndex((x) => x.name === t.name);
 		if (i >= 0) list[i] = t;

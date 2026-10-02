@@ -18,8 +18,8 @@ import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import WebSocket from "ws";
 
-const PORT = 8918;
-const MOCK_PORT = 8919;
+const PORT = Number(process.argv[2] || 8918);
+const MOCK_PORT = PORT + 1;
 const base = mkdtempSync(join(tmpdir(), "pi-web-running-list-"));
 const workdir = join(base, "work");
 const dataDir = join(base, "data");

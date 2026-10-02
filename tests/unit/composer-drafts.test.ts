@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -98,5 +98,21 @@ describe("ComposerDraftsStore", () => {
 		expect(s2.get("ok")).toEqual({ text: "v", ts: expect.any(Number) });
 		expect(s2.get("junk" as string)).toBeUndefined();
 		expect(s2.get("old")).toBeUndefined();
+	});
+
+	it("解析失败的坏文件改名留存（.corrupt-<ts>），不被空表覆盖", () => {
+		const dir = mkdtempSync(join(tmpdir(), "drafts-"));
+		const file = join(dir, "composer-drafts.json");
+		writeFileSync(file, "{not-valid-json");
+		const store = new ComposerDraftsStore(file);
+		// 以空表继续：读不到任何草稿，但不抛错
+		expect(store.get("any")).toBeUndefined();
+		// 坏文件已改名留存，原路径无文件
+		const leftovers = readdirSync(dir).filter((f) => f.startsWith("composer-drafts.json.corrupt-"));
+		expect(leftovers.length).toBe(1);
+		expect(existsSync(file)).toBe(false);
+		// 后续 save 落盘的是新数据（空表 + 新条目），留存副本不受影响
+		store.save("new", "fresh", Date.now());
+		expect(store.get("new")?.text).toBe("fresh");
 	});
 });

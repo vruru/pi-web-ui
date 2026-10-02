@@ -8,7 +8,8 @@
  * protocol.ts 零改动——和浏览器访问远端 server 是同一条路。
  *
  * 运行前先 `npm run build`（需要 dist/server + web/dist）。
- * 开发联调：PI_WEB_DESKTOP_URL=http://localhost:5173 可让窗口指到 vite。
+ * 开发联调：PI_WEB_DESKTOP_URL=http://localhost:5173 可让窗口指到 vite
+ * （仅开发模式生效，打包版忽略该 override —— 见 startServerSidecar）。
  */
 import { app, BrowserWindow, ipcMain, shell } from "electron";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -99,7 +100,13 @@ console.log("[desktop] main started, waiting for app ready…");
 
 async function startServerSidecar(): Promise<string> {
 	const override = process.env.PI_WEB_DESKTOP_URL;
-	if (override) return override; // 指向 vite(:5173) 联调，前提是另起 dev:server
+	if (override) {
+		// 仅开发模式允许 override（指向 vite(:5173) 联调，前提是另起 dev:server）。
+		// 打包版一律忽略：这是唯一能让应用窗口指向任意 URL 的入口（appOrigin、
+		// will-navigate 守卫都从返回值推导），打包后放行等于把窗口交给环境变量。
+		if (!app.isPackaged) return override;
+		console.warn(`[desktop] 打包版忽略 PI_WEB_DESKTOP_URL=${override}（仅开发模式允许）`);
+	}
 	const entry = resolveServerEntry();
 	resolveWebDir();
 	console.log(`[desktop] server entry: ${entry}`);
@@ -109,9 +116,10 @@ async function startServerSidecar(): Promise<string> {
 	console.log(`[desktop] spawning server on 127.0.0.1:${port} (data: ${dataDir})`);
 	// ELECTRON_RUN_AS_NODE=1：让 Electron 二进制退化成纯 Node 跑 server，
 	// 无需额外捆一个 node，也不用改 server/index.ts。
-	// --import：可选的「优先用全局 pi SDK」钩子（issue #260，默认关；见 server/resolve-global-sdk.ts）。
-	// dist 可能是旧构建（没这个文件）—— 只有存在才注入，别让桌面版起不来。
-	// 桌面版通常没有祖先 node_modules，所以它实际上总是回落自带那份。
+	// --import：「机器上有更新的 pi 副本就跟随它」钩子（issue #260；#321 起默认启用，
+	// 见 server/resolve-global-sdk.ts）。dist 可能是旧构建（没这个文件）—— 只有存在才
+	// 注入，别让桌面版起不来。桌面版通常没有祖先 node_modules，所以一般回落自带那份；
+	// 用户机器上恰好有全局 pi 时桌面版也会跟随（与浏览器/服务模式一致）。
 	const sdkHook = join(dirname(entry), "resolve-global-sdk.js");
 	serverProc = spawn(
 		process.execPath,

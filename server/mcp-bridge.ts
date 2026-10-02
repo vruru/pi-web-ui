@@ -18,7 +18,6 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PluginAgentTool } from "./plugins.js";
-import { bilingual } from "./i18n.js";
 
 /** JSON-RPC 2.0 over stdio：每行一条 JSON。 */
 export interface McpServerSpec {
@@ -51,6 +50,12 @@ interface McpContentBlock {
 type McpToolResultBlock = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 
 const PROTOCOL_VERSION = "2025-03-26"; // 广泛支持的工具版本
+
+/** 单行（一条 JSON-RPC 消息）的长度上限（1MB）：失控服务器一行永不换行会顶爆内存。 */
+const MCP_MAX_LINE_CHARS = 1024 * 1024;
+/** 未换行数据的总缓冲上限（4MB）：服务器只吐垃圾不吐换行时按协议错误杀进程。
+ *  上限按 JS 字符串长度计（UTF-16 码元 ≤ UTF-8 字节），内存放大有界。 */
+const MCP_MAX_BUFFER_CHARS = 4 * 1024 * 1024;
 
 let rpcSeq = 0;
 
@@ -293,11 +298,29 @@ export class McpClient {
 
 	private onData(chunk: string): void {
 		this.buffer += chunk;
+		// 总缓冲上限：服务器一直输出却不换行（或极慢地换行）时，缓冲会无限涨，
+		// 宿主内存被一个失控子进程吃光。超限按协议错误处理：杀进程 + 拒绝在途请求。
+		if (this.buffer.length > MCP_MAX_BUFFER_CHARS) {
+			this.killForProtocolError(
+				new Error(
+					`[mcp:${this.name}] stdout 缓冲超过 ${Math.round(MCP_MAX_BUFFER_CHARS / 1024 / 1024)}MB 上限，按协议错误关闭`,
+				),
+			);
+			return;
+		}
 		let nl: number;
 		while ((nl = this.buffer.indexOf("\n")) >= 0) {
 			const line = this.buffer.slice(0, nl).trim();
 			this.buffer = this.buffer.slice(nl + 1);
 			if (!line) continue;
+			if (line.length > MCP_MAX_LINE_CHARS) {
+				this.killForProtocolError(
+					new Error(
+						`[mcp:${this.name}] 单行超过 ${Math.round(MCP_MAX_LINE_CHARS / 1024 / 1024)}MB 上限，按协议错误关闭`,
+					),
+				);
+				return;
+			}
 			let msg: RpcIncoming;
 			try {
 				msg = JSON.parse(line) as RpcIncoming;
@@ -306,6 +329,24 @@ export class McpClient {
 				continue;
 			}
 			this.handleMessage(msg);
+		}
+	}
+
+	/** 协议错误（stdout 缓冲超限）：杀掉子进程、拒绝全部在途请求、清空缓冲。
+	 *  与进程自然退出共用自愈语义 —— 下一次工具调用会重新拉起并重新握手
+	 *  （失控服务器重启后再次超限就再次杀，不会永久占用宿主内存）。 */
+	private killForProtocolError(err: Error): void {
+		this.log(err.message);
+		this.buffer = "";
+		const child = this.child;
+		this.child = null;
+		this.rejectAll(err);
+		if (child) {
+			try {
+				child.kill();
+			} catch {
+				/* 已退出 */
+			}
 		}
 	}
 
@@ -411,17 +452,25 @@ function adaptMcpTool(serverName: string, mcpTool: McpToolDefinition, client: Mc
 	return {
 		name,
 		label: `${serverName} · ${mcpTool.name}`,
-		description:
-			mcpTool.description ??
-			bilingual(
-				`Tool ${mcpTool.name} provided by MCP server "${serverName}"`,
-				`从 MCP 服务器「${serverName}」提供的工具 ${mcpTool.name}`,
-			),
+		description: mcpTool.description ?? `Tool ${mcpTool.name} provided by MCP server "${serverName}"`,
+		// 无 snippet 的工具不会进系统提示词的「Available tools」清单（SDK 只列有
+		// snippet 的工具），MCP 工具会变成 schema-only：模型读清单以为自己没有
+		// 这个能力（#403）。这里从 description 提取首句做极简 snippet。
+		promptSnippet: firstSentenceSnippet(mcpTool.description) ?? `MCP tool ${mcpTool.name} (server: ${serverName})`,
 		parameters: mcpTool.inputSchema ?? {},
 		execute: async (_toolCallId: string, params: Record<string, unknown>, _signal?: AbortSignal) => {
 			return client.call(mcpTool.name, params ?? {});
 		},
 	};
+}
+
+/** 从 MCP 工具 description 提取首句做 promptSnippet（≤100 字符）；空描述返回 undefined。 */
+function firstSentenceSnippet(description: string | undefined): string | undefined {
+	const text = (description ?? "").replace(/\s+/g, " ").trim();
+	if (!text) return undefined;
+	const cut = text.search(/[.。!?！?]/);
+	const head = cut > 0 ? text.slice(0, cut + 1) : text;
+	return head.length > 100 ? `${head.slice(0, 99)}…` : head;
 }
 
 /** 工具名必须是 [A-Za-z0-9_-]+（与插件工具同规则），MCP 可能含冒号/斜杠 — 归一化。 */
@@ -449,6 +498,8 @@ export interface McpReloadSummary {
 export class McpBridge {
 	private clients: McpClient[] = [];
 	private tools: PluginAgentTool[] = [];
+	/** reload 串行化链：重入的 reload 排在前一个之后，杜绝交叠留下的孤儿进程。 */
+	private reloadChain: Promise<unknown> = Promise.resolve();
 
 	constructor(
 		private dataDir: string,
@@ -483,6 +534,12 @@ export class McpBridge {
 
 	/**
 	 * 按磁盘上的最新配置**整体换入**服务器集合（`mcp.json` 热加载用），可重复调用。
+	 *
+	 * 并发互斥：watch + 轮询 + 手动 apply 可能同时触发 reload，两个 reload 交叠跑
+	 * 会各自 startOne/close —— 同一服务器起两个子进程、或把别人刚换入的实例当
+	 * stale 关掉（孤儿/误杀）。这里用一条 promise 链把重入排成队，每个 reload
+	 * 看到的是前一个完成后的最新状态；热加载的防抖窗口之外再兜一道。
+	 *
 	 * 三步的顺序都有讲究：
 	 *  1. 规格没变的服务器**沿用原实例** —— 改一个服务器不该连带重启其它服务器（子进程、
 	 *     浏览器会话、在途调用全都不动）；
@@ -491,6 +548,18 @@ export class McpBridge {
 	 *  3. 最后才 close 掉被移除/被替换的旧实例，并按新集合重建工具表。
 	 */
 	async reload(): Promise<McpReloadSummary> {
+		const run = this.reloadChain.then(
+			() => this.reloadOnce(),
+			() => this.reloadOnce(), // 前一个失败也放行下一个（失败不堵队列）
+		);
+		this.reloadChain = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		return run;
+	}
+
+	private async reloadOnce(): Promise<McpReloadSummary> {
 		const cfg = optsOverrideOrRead(this.opts.specOverride, this.dataDir);
 		const next = new Map<string, McpClient>();
 		let kept = 0;

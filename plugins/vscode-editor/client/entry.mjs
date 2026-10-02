@@ -41050,7 +41050,7 @@ var client_default = {
 			<label>私钥路径（可选，支持 ~ 展开如 ~/.ssh/id_rsa；填写则优先使用，不必粘贴私钥全文）</label><input name="h-keypath" placeholder="~/.ssh/id_rsa" />
 			<label>私钥口令 passphrase（可选，带口令的私钥用）</label><input name="h-pp" type="password" autocomplete="off" />
 			<label>SSH agent socket（可选，如 $SSH_AUTH_SOCK；与密码/私钥二选一）</label><input name="h-agent" placeholder="$SSH_AUTH_SOCK" />
-			<div class="hint">凭据只保存在本机插件目录（ssh-hosts.json），不会上传。密码 / 私钥 / 私钥路径 / agent 四选一即可；已有 ~/.ssh/config 的可直接导入。</div>
+			<div class="hint">凭据只保存在本机插件目录（ssh-hosts.json），不会上传。密码 / 私钥 / 私钥路径 / agent 四选一即可。<br>已有 ~/.ssh/config 的无需导入——SSH 面板「⚙ ssh config」自动加载（与 VSCode Remote-SSH 同源，支持 Include / ProxyJump / ProxyCommand），点别名直连。</div>
 			<div class="sshcfg-import vsc-hidden"></div>
 			<div class="btns"><button class="cancel">取消</button><button class="import-cfg" title="从 ~/.ssh/config 批量导入主机">从 ssh config 导入</button><button class="primary save-host">保存</button></div>
 		</div>
@@ -41188,7 +41188,7 @@ var client_default = {
       }
       toast("创建副本失败：重名次数过多");
     }
-    let S3 = { depsReady: true, depsInstalling: false, hosts: [], conns: [] };
+    let S3 = { depsReady: true, depsInstalling: false, hosts: [], conns: [], configHosts: [], configPath: "~/.ssh/config" };
     const conns = /* @__PURE__ */ new Map();
     const connecting = /* @__PURE__ */ new Set();
     const expanded = /* @__PURE__ */ new Set(["local:"]);
@@ -41352,7 +41352,7 @@ var client_default = {
         d.textContent = "依赖安装中…";
         hostsEl.appendChild(d);
       }
-      if (!S3.hosts.length) {
+      if (!S3.hosts.length && !(S3.configHosts ?? []).length) {
         const d = document.createElement("div");
         d.className = "vsc-deps";
         const btn = document.createElement("button");
@@ -41360,6 +41360,24 @@ var client_default = {
         btn.addEventListener("click", () => openHostModal(null));
         d.appendChild(btn);
         hostsEl.appendChild(d);
+      }
+      if ((S3.configHosts ?? []).length) {
+        const sec = document.createElement("div");
+        sec.className = "vsc-sect";
+        sec.innerHTML = `<b>⚙ ssh config（自动加载）</b>`;
+        const edit = document.createElement("button");
+        edit.textContent = "✎";
+        edit.title = `编辑 ${S3.configPath ?? "~/.ssh/config"}（与 VSCode 写法完全一样）`;
+        edit.addEventListener("click", () => void openSshConfigEditor());
+        sec.appendChild(edit);
+        hostsEl.appendChild(sec);
+        for (const c of S3.configHosts) renderConfigRow(c);
+      }
+      if ((S3.configHosts ?? []).length && S3.hosts.length) {
+        const sec = document.createElement("div");
+        sec.className = "vsc-sect";
+        sec.innerHTML = `<b>🏠 手动主机</b>`;
+        hostsEl.appendChild(sec);
       }
       for (const h2 of S3.hosts) renderHostRow(h2);
       hostsEl.scrollTop = st2;
@@ -41387,6 +41405,32 @@ var client_default = {
         sshTreeEl.scrollTop = st2;
         applySelHighlight();
       });
+    }
+    function renderConfigRow(c) {
+      const row = document.createElement("div");
+      row.className = "vsc-row vsc-hrow";
+      row.dataset.cfg = c.alias;
+      const busy = connecting.has(`cfg:${c.alias}`);
+      const live = [...conns.keys()].find((id2) => (conns.get(id2)?.label ?? "").startsWith(`${c.alias}（`));
+      const dotCls = busy ? "busy" : live ? "on" : "";
+      const via = c.proxyJump ? ` ⇢ ${esc(c.proxyJump)}` : c.proxyCommand ? " ⇢ ⬢" : "";
+      row.innerHTML = `<span class="dot ${dotCls}"></span><span class="nm" title="${esc(c.username)}@${esc(c.host)}:${c.port}${c.privateKeyPath ? ` · ${esc(c.privateKeyPath)}` : ""}">${esc(c.alias)}<span style="opacity:.5"> ${esc(c.username)}@${esc(c.host)}${via}</span></span><span class="ops">` + (live ? '<button data-hop="term" title="新建终端">🖥</button>' : '<button data-hop="conn" title="连接">⇄</button>') + `</span>`;
+      row.addEventListener("click", async (ev) => {
+        const btn = ev.target.closest("button[data-hop]");
+        if (btn?.dataset.hop === "term" && live) {
+          showTermPanel();
+          void newTerm(live);
+          return;
+        }
+        if (btn) ev.stopPropagation();
+        if (live) {
+          showTermPanel();
+          void newTerm(live);
+          return;
+        }
+        await connectConfig(c.alias);
+      });
+      hostsEl.appendChild(row);
     }
     function renderHostRow(h2) {
       const connId = connOfHost(h2.id);
@@ -42266,6 +42310,52 @@ var client_default = {
       });
       panel.appendChild(btn);
     });
+    async function connectConfig(alias) {
+      const key = `cfg:${alias}`;
+      if (connecting.has(key)) return;
+      for (const [id2, c] of conns) {
+        if ((c.label ?? "").startsWith(`${alias}（`)) return id2;
+      }
+      connecting.add(key);
+      renderHosts();
+      const r = await request({ action: "config_connect", alias });
+      connecting.delete(key);
+      if (!r.ok) {
+        toast(`连接失败：${r.error}`);
+        renderHosts();
+        return null;
+      }
+      let cwd = "/";
+      const pwd = await request({ action: "exec", connId: r.connId, cmd: "pwd" });
+      if (pwd.ok && pwd.exitCode === 0) {
+        const home = pwd.output.trim().split(/\r?\n/).pop()?.trim();
+        if (home?.startsWith("/")) cwd = home;
+      }
+      conns.set(r.connId, { label: r.label, cwd });
+      lastConnId = r.connId;
+      selNode = { scope: r.connId, path: cwd, type: "dir" };
+      renderHosts();
+      await renderTree();
+      return r.connId;
+    }
+    async function openSshConfigEditor() {
+      const r = await request({ action: "sshconfig_get" });
+      if (!r.ok) {
+        toast(`读取失败：${r.error}`);
+        return;
+      }
+      const text = prompt(`编辑 ${S3.configPath ?? "~/.ssh/config"}（与 VSCode 写法完全一样）：
+Host 别名
+  HostName 主机
+  User 用户
+  Port 端口
+  IdentityFile 私钥路径
+  ProxyJump 跳板`, r.text ?? "");
+      if (text === null) return;
+      const r2 = await request({ action: "sshconfig_save", text });
+      if (!r2.ok) toast(`保存失败：${r2.error}`);
+      else toast("ssh config 已保存（旧版已备份 .bak），列表已刷新");
+    }
     async function connectHost(h2) {
       if (connecting.has(h2.id) || connOfHost(h2.id)) return;
       connecting.add(h2.id);
@@ -42693,6 +42783,9 @@ var client_default = {
         if (t2) void runSearch(t2.connId, t2.dir);
       } else if (btn.dataset.act === "r-refresh") {
         void refreshAll();
+        void request({ action: "state" }).then((r) => {
+          if (r.ok && r.state) applyState(r.state);
+        });
       }
     });
     function pickLocalDir() {

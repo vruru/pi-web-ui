@@ -1,7 +1,7 @@
-import { useEffect } from "react";
 import { createPortal } from "react-dom";
 import { FiInfo, FiX } from "react-icons/fi";
 import { useT } from "../i18n";
+import { useEscapeKey } from "../shortcut-stack";
 import { closeToolInfo, useToolInfoState, type ToolInfoView } from "../tool-info-state";
 import { schemaRows, type SchemaRow } from "../tool-schema";
 import { CopyButton } from "./copy-button";
@@ -20,15 +20,11 @@ export function ToolInfoDialog() {
 	const t = useT();
 	const info = useToolInfoState();
 
-	// Esc 关闭（与其它弹窗一致；开着时才挂监听）。
-	useEffect(() => {
-		if (!info) return;
-		const onKey = (e: KeyboardEvent) => {
-			if (e.key === "Escape") closeToolInfo();
-		};
-		document.addEventListener("keydown", onKey);
-		return () => document.removeEventListener("keydown", onKey);
-	}, [info]);
+	// 审查 #12：Esc 改走 shortcut-stack 分层栈（与 Modal 同一调度）；
+	// 关闭状态下不启用，避免吞掉下层弹窗的 Esc。
+	useEscapeKey(() => {
+		closeToolInfo();
+	}, Boolean(info));
 
 	if (!info) return null;
 

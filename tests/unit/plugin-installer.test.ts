@@ -8,7 +8,7 @@ import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PluginInstaller, buildPluginJobArgs } from "../../server/plugin-installer.js";
+import { PluginInstaller, buildPluginJobArgs, confirmPluginInstall } from "../../server/plugin-installer.js";
 import type { ServerMessage } from "../../server/protocol.js";
 
 let root: string;
@@ -187,5 +187,80 @@ describe("环境隔离", () => {
 		const installer = new PluginInstaller({ dataDir, pkgRoot, managed: false });
 		await installer.run({ jobId: "env", action: "install", id: "webmail", source: "o/r" });
 		expect(readFileSync(probe, "utf8")).toBe(dataDir);
+	});
+});
+
+describe("confirmPluginInstall", () => {
+	it("已有授权时直接放行，不触发弹窗", async () => {
+		let asked = false;
+		const ok = await confirmPluginInstall([{ id: "foo", source: "o/r" }], {
+			permGrants: {
+				has: (id, fam, s) => id === "plugin-installer" && fam === "net" && s?.host === "github.com",
+				grant: () => {},
+			},
+			permissionRequester: async () => {
+				asked = true;
+				return { ok: true };
+			},
+		});
+		expect(ok).toBe(true);
+		expect(asked).toBe(false);
+	});
+
+	it("用户拒绝或超时：返回 false 且不写入授权表", async () => {
+		let granted = false;
+		const ok = await confirmPluginInstall([{ id: "foo", source: "o/r" }], {
+			permGrants: {
+				has: () => false,
+				grant: () => {
+					granted = true;
+				},
+			},
+			permissionRequester: async () => ({ ok: false, remember: false }),
+		});
+		expect(ok).toBe(false);
+		expect(granted).toBe(false);
+	});
+
+	it("用户允许一次：返回 true 但不持久化", async () => {
+		let granted = false;
+		const ok = await confirmPluginInstall([{ id: "foo", source: "o/r" }], {
+			permGrants: {
+				has: () => false,
+				grant: () => {
+					granted = true;
+				},
+			},
+			permissionRequester: async () => ({ ok: true, remember: false }),
+		});
+		expect(ok).toBe(true);
+		expect(granted).toBe(false);
+	});
+
+	it("用户选择「记住并允许」：写入 permGrants 并触发 onGrantsChanged 通知", async () => {
+		let grantedData: { pluginId: string; family: string; opts?: unknown } | null = null;
+		let notified = false;
+		const ok = await confirmPluginInstall([{ id: "foo", source: "o/r" }], {
+			permGrants: {
+				has: () => false,
+				grant: (pluginId, family, opts) => {
+					grantedData = { pluginId, family, opts };
+				},
+			},
+			permissionRequester: async () => ({ ok: true, remember: true }),
+			onGrantsChanged: () => {
+				notified = true;
+			},
+		});
+		expect(ok).toBe(true);
+		expect(notified).toBe(true);
+		expect(grantedData).toMatchObject({
+			pluginId: "plugin-installer",
+			family: "net",
+			opts: {
+				hosts: ["github.com"],
+				remember: true,
+			},
+		});
 	});
 });

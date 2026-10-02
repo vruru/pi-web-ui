@@ -85,8 +85,14 @@ export function shouldTrackBackgroundServer(
 
 export class BgServerTracker {
 	private readonly servers = new Map<number, { pid: number; since: number; name?: string; command?: string }>();
-	/** bash 工具开始执行前拍的监听端口快照（tool_execution_start 时设置）。 */
-	private listenBefore: Map<number, number> | null = null;
+	/**
+	 * bash 工具开始执行前拍的监听端口快照（tool_execution_start 时设置）。
+	 * 槽位存「in-flight Promise」而非已解析的 Map：并发 bash 同时开跑时不互相
+	 * 覆盖（??= 保住最早的一份——更早的基线只会多算新增，落库有去重兜底），
+	 * 也修掉 fire-and-forget 时序竞态（bash 先于快照返回结束 → trackAfterBash
+	 * 读到 null 直接漏记，延迟解析的旧快照还会污染下一轮）。
+	 */
+	private listenBefore: Promise<Map<number, number>> | null = null;
 	private refreshTimer: ReturnType<typeof setInterval> | null = null;
 
 	constructor(
@@ -112,20 +118,21 @@ export class BgServerTracker {
 		}
 	}
 
-	/** tool_execution_start(bash)：先记下「前」快照。 */
+	/** tool_execution_start(bash)：先记下「前」快照（快照在途时保留最早的一份）。 */
 	snapshotBefore(): void {
-		void snapshotListeningPorts().then((m) => {
-			this.listenBefore = m;
-		});
+		this.listenBefore ??= snapshotListeningPorts();
 	}
 
 	/** After a bash tool run, wait briefly for background servers to bind,
 	 *  then diff the listening-port snapshot against the pre-run one and
 	 *  remember anything new — those are servers the agent left running. */
 	async trackAfterBash(): Promise<void> {
-		const before = this.listenBefore;
+		// 读后清槽：await in-flight 快照（消除 fire-and-forget 的时序竞态），
+		// 并发 bash 共用这份最早的基线，各自结束都能对得上。
+		const beforePromise = this.listenBefore;
 		this.listenBefore = null;
-		if (!before) return;
+		if (!beforePromise) return;
+		const before = await beforePromise;
 		await new Promise((r) => setTimeout(r, BG_BIND_WAIT_MS));
 		const after = await snapshotListeningPorts();
 		const fresh: Array<{ port: number; pid: number }> = [];
@@ -229,6 +236,22 @@ export class BgServerTracker {
 		this.push();
 	}
 
+	/** 杀前复核端口→pid 归属（与 refresh() 同一判定：端口与 pid 都对得上才算我们的）。
+	 *  缓存的 pid 可能已过期——原进程退出后端口被无关进程复用时，按缓存 pid 直接
+	 *  killPidTree 会误伤无辜进程树。不符的条目剔除并推送，绝不对其开杀。 */
+	private async verifyBeforeKill(): Promise<void> {
+		const now = await snapshotListeningPorts();
+		let changed = false;
+		// eslint-disable-next-line unicorn/no-useless-spread -- snapshot: handlers may unsubscribe mid-emit
+		for (const [port, v] of [...this.servers]) {
+			if (now.get(port) !== v.pid) {
+				this.servers.delete(port);
+				changed = true;
+			}
+		}
+		if (changed) this.push();
+	}
+
 	/** Kill ONE background server (by port); returns whether anything was killed. */
 	async killOne(port: number): Promise<boolean> {
 		const entry = this.servers.get(port);
@@ -238,6 +261,18 @@ export class BgServerTracker {
 				level: "info",
 				text: `端口 ${port} 不在后台任务列表中`,
 				textEn: `Port ${port} is not in the background task list`,
+			});
+			this.opts.flushSnapshot();
+			return false;
+		}
+		await this.verifyBeforeKill();
+		const verified = this.servers.get(port);
+		if (!verified || verified.pid !== entry.pid) {
+			this.opts.emit({
+				type: "notice",
+				level: "warning",
+				text: `端口 ${port} 已不在原进程（原 pid ${entry.pid}）监听，已跳过并刷新列表`,
+				textEn: `Port ${port} is no longer held by the original process (pid ${entry.pid}); skipped and list refreshed`,
 			});
 			this.opts.flushSnapshot();
 			return false;
@@ -257,6 +292,8 @@ export class BgServerTracker {
 
 	/** Kill every background server the agent started; returns the freed ports. */
 	async killAll(): Promise<string[]> {
+		if (this.servers.size === 0) return [];
+		await this.verifyBeforeKill();
 		if (this.servers.size === 0) return [];
 		const killed: string[] = [];
 		// eslint-disable-next-line unicorn/no-useless-spread -- snapshot: handlers may unsubscribe mid-emit

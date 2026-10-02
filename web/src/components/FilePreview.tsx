@@ -9,7 +9,6 @@ import {
 	FiLink,
 	FiMaximize,
 	FiMinimize,
-	FiPlus,
 	FiSave,
 	FiX,
 	FiZoomIn,
@@ -39,8 +38,8 @@ interface FilePreviewProps {
 	content: FileContent | null;
 	/** Add the selected line range as a "lines" attachment to the chat input. */
 	onAddLines: (path: string, name: string, start: number, end: number) => void;
-	/** Attach the whole file (inline content / path reference) like the row buttons. */
-	onAttach: (path: string, name: string, mode: "inline" | "reference") => void;
+	/** Attach the whole file as a path reference like the row buttons. */
+	onAttach: (path: string, name: string, mode: "reference") => void;
 	onClose: () => void;
 	/** 文件预览工具条（file.preview.toolbar 槽位：纯插件新增位，无条目时不渲染）。 */
 	uiFilePreviewToolbar?: UiSlotEntry[];
@@ -89,6 +88,22 @@ export function FilePreview({
 	const anchorRef = useRef(0);
 	const draggingRef = useRef(false);
 	const addedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+	// 保存回执（审查 #1）：write_file 发出后进入 saving 态，服务端保存成功会
+	// 立即对该路径重读并推回 file_content（见 server/files-service.ts writeFile），
+	// content prop 更新即确认；5s 未确认按「结果未知」处理。
+	const [saving, setSaving] = useState(false);
+	const [saveUnknown, setSaveUnknown] = useState(false);
+	// effect 里只看 ref（saving 不进 deps，避免旧 content 触发假确认）。
+	const savingRef = useRef(false);
+	const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+	// 卸载时清掉未触发的定时器（审查 #5）：added 提示与保存超时都不该再回调 setState。
+	useEffect(
+		() => () => {
+			if (addedTimer.current) clearTimeout(addedTimer.current);
+			if (saveTimer.current) clearTimeout(saveTimer.current);
+		},
+		[],
+	);
 
 	// Request content on open / file change (mount included).
 	useEffect(() => {
@@ -101,6 +116,11 @@ export function FilePreview({
 		setHtmlPreview(true);
 		setAllowJs(false);
 		editViewRef.current = false;
+		// 换文件：放弃上一个文件未确认的保存等待（回包会被 path 校验丢弃）。
+		savingRef.current = false;
+		setSaving(false);
+		setSaveUnknown(false);
+		if (saveTimer.current) clearTimeout(saveTimer.current);
 		appSend({ type: "read_file", path: file.path });
 	}, [file.path]);
 
@@ -111,6 +131,21 @@ export function FilePreview({
 			setLoaded(content);
 			if (!editing) setDraft(content.text);
 			setLoading(false);
+			// 保存确认（审查 #1）：该路径的重读回包到达 → 按已确认内容退出编辑态。
+			// saving 走 ref：它不在 deps 里，同一次 content 变化不会因 saving 翻转重跑。
+			if (savingRef.current) {
+				savingRef.current = false;
+				if (saveTimer.current) clearTimeout(saveTimer.current);
+				setSaving(false);
+				setSaveUnknown(false);
+				setEditing(false);
+				setDraft(content.text);
+				if (editViewRef.current) {
+					if (isMarkdownFile(file.name)) setMarkdownPreview(true);
+					if (isHtmlFile(file.name)) setHtmlPreview(true);
+				}
+				setSel(null);
+			}
 		}
 	}, [content, editing, file.path]);
 
@@ -188,9 +223,16 @@ export function FilePreview({
 		addedTimer.current = setTimeout(() => setAdded(false), 1400);
 	};
 
-	const canEdit = loaded !== null && loaded.kind === "text" && !loaded.binary && !loaded.truncated;
+	const canEdit =
+		loaded !== null && loaded.kind === "text" && !loaded.binary && !loaded.truncated && !isOfficeFile(file.name);
 
 	const cancelEditing = () => {
+		// 取消编辑同时放弃未确认的保存等待（若服务端实际写成功，回包到达时
+		// savingRef 已退出，只会静默刷新正文）。
+		savingRef.current = false;
+		if (saveTimer.current) clearTimeout(saveTimer.current);
+		setSaving(false);
+		setSaveUnknown(false);
 		setDraft(loaded?.text ?? "");
 		setEditing(false);
 		if (editViewRef.current) {
@@ -219,12 +261,18 @@ export function FilePreview({
 	const saveEditing = () => {
 		if (!editing || !loaded || !canEdit) return;
 		if (!appSend({ type: "write_file", path: file.path, text: draft })) return;
-		setEditing(false);
-		if (editViewRef.current) {
-			if (isMarkdownFile(file.name)) setMarkdownPreview(true);
-			if (isHtmlFile(file.name)) setHtmlPreview(true);
-		}
-		setSel(null);
+		// 审查 #1：发出即进入 saving（不再「发出即关编辑态」）。编辑器保持打开，
+		// 等该路径重读回包确认（见 content effect）；5s 未确认提示结果未知。
+		savingRef.current = true;
+		setSaveUnknown(false);
+		setSaving(true);
+		if (saveTimer.current) clearTimeout(saveTimer.current);
+		saveTimer.current = setTimeout(() => {
+			// 超时未确认：退出 saving，留在编辑态让用户重试或取消（输入不丢）。
+			savingRef.current = false;
+			setSaving(false);
+			setSaveUnknown(true);
+		}, 5000);
 	};
 
 	const handleClose = () => {
@@ -244,7 +292,7 @@ export function FilePreview({
 	// Preview category from the server ("text" while loading). Media kinds are
 	// streamed over the /api/file HTTP endpoint; "none" is never previewable.
 	const kind = loaded?.kind ?? "text";
-	const isMarkdown = isMarkdownFile(file.name);
+	const isMarkdown = isMarkdownFile(file.name) || isOfficeFile(file.name);
 	const isHtml = isHtmlFile(file.name);
 	const showMarkdown = isMarkdown && markdownPreview && !editing && kind === "text" && !isBinary;
 	const showHtml = isHtml && htmlPreview && !editing && kind === "text" && !isBinary;
@@ -324,17 +372,6 @@ export function FilePreview({
 					</button>
 				</span>
 			) : null,
-		"host:fp-inline":
-			kind !== "video" && kind !== "none" ? (
-				<button
-					type="button"
-					className="fp-attach inline"
-					data-tip={t("attachInlineTip")}
-					onClick={() => onAttach(file.path, file.name, "inline")}
-				>
-					<FiPlus />
-				</button>
-			) : null,
 		"host:fp-ref": (
 			<button
 				type="button"
@@ -355,13 +392,9 @@ export function FilePreview({
 				{fullscreen ? <FiMinimize /> : <FiMaximize />}
 			</button>
 		),
-		"host:fp-close": (
-			<button type="button" className="fp-close" title={t("close")} onClick={handleClose}>
-				<FiX />
-			</button>
-		),
+		"host:fp-close": null,
 	};
-	/** 头栏顺序：接线时（App 传全量）宿主+插件按槽位顺序交错；未接线回落旧硬编码顺序。 */
+	/** 头栏顺序：接线时（App 传全量）宿主+插件按槽位顺序交错；未接线回落旧硬编码顺序。关闭按钮统一固定在头栏最右侧，不占工具条流动位。 */
 	const fpEntries: UiSlotEntry[] =
 		uiFilePreviewToolbar === undefined
 			? [
@@ -370,12 +403,10 @@ export function FilePreview({
 					"host:fp-edit",
 					"host:fp-wrap",
 					"host:fp-zoom",
-					"host:fp-inline",
 					"host:fp-ref",
 					"host:fp-full",
-					"host:fp-close",
 				].map((id) => ({ id, source: "host" }) as UiSlotEntry)
-			: uiFilePreviewToolbar.filter((e) => !e.hidden);
+			: uiFilePreviewToolbar.filter((e) => !e.hidden && e.id !== "host:fp-close");
 	// /api/file resolves against the requesting client's workspace (the opened
 	// project), not the server's startup cwd — pass clientId so they can differ.
 	const mediaUrl = (p: string) =>
@@ -417,9 +448,16 @@ export function FilePreview({
 						{/* 宿主 chrome + 插件条目按槽位顺序交错（显隐/顺序走布局页，类型条件见 fpHostNodes）。 */}
 						{renderMergedToolbar(fpEntries, fpHostNodes, onUiAction)}
 					</span>
+					<button type="button" className="fp-close" title={t("close")} aria-label={t("close")} onClick={handleClose}>
+						<FiX />
+					</button>
 				</div>
 
-				{truncated && kind === "text" && !isBinary && <div className="fp-notice">{t("previewTruncated")}</div>}
+				{truncated && kind === "text" && !isBinary && (
+					<div className="fp-notice">
+						{isOfficeFile(file.name) ? t("previewLinesTruncated", { n: lines.length }) : t("previewTruncated")}
+					</div>
+				)}
 
 				{loading && !loaded && <div className="fp-empty">{t("loading")}</div>}
 
@@ -470,7 +508,7 @@ export function FilePreview({
 				)}
 
 				{!loading && showMarkdown && loaded && (
-					<div className="fp-markdown msg-text">
+					<div className={isOfficeFile(file.name) ? "fp-markdown msg-text fp-office" : "fp-markdown msg-text"}>
 						<div className="fp-markdown-zoom">
 							<Markdown text={loaded.text} />
 						</div>
@@ -488,14 +526,21 @@ export function FilePreview({
 				)}
 
 				{!loading && editing && kind === "text" && !isBinary && loaded && (
-					<textarea
-						className={`fp-editor ${wrap ? "" : "no-wrap"}`}
-						value={draft}
-						onChange={(e) => setDraft(e.target.value)}
-						wrap={wrap ? "soft" : "off"}
-						spellCheck={false}
-						autoFocus
-					/>
+					<>
+						<textarea
+							className={`fp-editor ${wrap ? "" : "no-wrap"}`}
+							value={draft}
+							onChange={(e) => setDraft(e.target.value)}
+							wrap={wrap ? "soft" : "off"}
+							spellCheck={false}
+							autoFocus
+						/>
+						{saveUnknown && (
+							<div className="fp-notice" role="alert">
+								{t("saveResultUnknown")}
+							</div>
+						)}
+					</>
 				)}
 
 				{!loading &&
@@ -554,7 +599,7 @@ export function FilePreview({
 								<button
 									type="button"
 									className="btn primary"
-									disabled={draft === (loaded?.text ?? "")}
+									disabled={saving || draft === (loaded?.text ?? "")}
 									onClick={saveEditing}
 								>
 									<FiSave /> {t("saveFile")}
@@ -599,6 +644,12 @@ export function FilePreview({
 function isMarkdownFile(name: string): boolean {
 	const lower = name.toLowerCase();
 	return lower.endsWith(".md") || lower.endsWith(".markdown");
+}
+
+/** Office 文档：服务端已转成 Markdown 文本下发，这里按 Markdown 渲染即可随处可看。 */
+function isOfficeFile(name: string): boolean {
+	const lower = name.toLowerCase();
+	return lower.endsWith(".docx") || lower.endsWith(".xlsx") || lower.endsWith(".xlsm");
 }
 
 function isHtmlFile(name: string): boolean {

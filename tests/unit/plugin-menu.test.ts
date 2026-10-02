@@ -24,6 +24,7 @@ const chatStub = {
 	activeConversationId: "",
 	terminals: [],
 	bgServers: [],
+	schedulerTasks: [],
 	tabs: undefined,
 	update: null,
 	updatesAll: [],

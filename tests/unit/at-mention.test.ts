@@ -3,7 +3,16 @@
  * 锁住三条不变量：邮箱不误弹 / CJK 无空格可触发 / 空格关闭。
  */
 import { describe, expect, it } from "vitest";
-import { mapFileHits, mapPageHits, matchAtToken, normalizeAtHits } from "../../web/src/at-mention.js";
+import {
+	mapFileHits,
+	mapPageHits,
+	mapSkillHits,
+	matchAtToken,
+	mergeAtHits,
+	normalizeAtHits,
+	type AtHit,
+	type SkillCommandLike,
+} from "../../web/src/at-mention.js";
 
 describe("matchAtToken", () => {
 	it("行首 @ + 空 query 也触发（列出全部）", () => {
@@ -78,7 +87,7 @@ describe("matchAtToken", () => {
 				{ path: "", name: "x", type: "file" },
 			]);
 			expect(out).toHaveLength(2);
-			expect(out[0]).toMatchObject({ providerId: "host:files", title: "a.ts", text: "a.ts" });
+			expect(out[0]).toMatchObject({ providerId: "host:files", title: "a.ts", text: "@a.ts" });
 			expect(out[0]?.attachments?.[0]).toMatchObject({ path: "src/a.ts", mode: "reference" });
 			expect(out[0]?.attachments?.[0]).not.toHaveProperty("isDir");
 			expect(out[1]?.attachments?.[0]).toMatchObject({ isDir: true });
@@ -105,6 +114,144 @@ describe("matchAtToken", () => {
 			expect(mapPageHits("浏览器操作", pages, "页面")).toHaveLength(1);
 			expect(mapPageHits("浏览器操作", pages, "pag")).toHaveLength(0);
 			expect(mapPageHits("浏览器操作", pages, "CLOSED")).toHaveLength(0);
+		});
+	});
+
+	describe("mapSkillHits", () => {
+		const commands: SkillCommandLike[] = [
+			{
+				name: "skill:wrapup",
+				source: "skill",
+				description: "收尾当前会话",
+				descriptionEn: "Wrap up the current session",
+			},
+			{ name: "skill:analyze", source: "skill", description: "深度代码分析", descriptionEn: "Deep repo analysis" },
+			{ name: "exit", source: "extension", description: "Exit pi" },
+			{ name: "skill:review", source: "skill" },
+			{ name: "bare-skill", source: "skill", description: "No prefix skill" },
+			{ name: "skill:code-helper", source: "skill", description: "A skill that helps with code" },
+			{ name: "skill:helper-with-long-desc", source: "skill", description: "Contains word code in description" },
+		];
+
+		it("提取 bareName，生成正确的 @skill:<name> 文本，排除非 skill 命令", () => {
+			const out = mapSkillHits("Skills", commands, "");
+			expect(out).toHaveLength(6);
+			expect(out[0]).toMatchObject({
+				providerId: "host:skills",
+				providerLabel: "Skills",
+				title: "wrapup",
+				hint: "收尾当前会话",
+				text: "@skill:wrapup",
+			});
+			expect(out[1]?.title).toBe("analyze");
+			expect(out[1]?.text).toBe("@skill:analyze");
+			expect(out[2]?.title).toBe("review");
+			expect(out[2]?.hint).toBe("Skill review");
+			expect(out[3]?.title).toBe("bare-skill");
+			expect(out[3]?.text).toBe("@skill:bare-skill");
+		});
+
+		it("支持以 skill: 为前缀的 query（含空 cleanQ），正确去除前缀匹配", () => {
+			const outPrefix = mapSkillHits("Skills", commands, "skill:ana");
+			expect(outPrefix).toHaveLength(1);
+			expect(outPrefix[0]?.title).toBe("analyze");
+
+			const outBarePrefix = mapSkillHits("Skills", commands, "skill:");
+			expect(outBarePrefix).toHaveLength(6);
+		});
+
+		it("相关性排序：名称匹配优先于描述匹配，防止描述泛匹配挤占名称命中", () => {
+			const out = mapSkillHits("Skills", commands, "code");
+			expect(out.length).toBeGreaterThanOrEqual(2);
+			// "code-helper" 包含 "code" 在名称中，必须排在仅描述包含 "code" 的 "helper-with-long-desc" 之前
+			expect(out[0]?.title).toBe("code-helper");
+			expect(out[1]?.title).toBe("helper-with-long-desc");
+		});
+
+		it("按 bareName 或中英文 description 过滤，短查询仅匹配名称", () => {
+			const byName = mapSkillHits("Skills", commands, "wrap");
+			expect(byName).toHaveLength(1);
+			expect(byName[0]?.title).toBe("wrapup");
+
+			// 3 字符以上支持 description / descriptionEn 检索
+			const byDescEn = mapSkillHits("Skills", commands, "repo");
+			expect(byDescEn).toHaveLength(1);
+			expect(byDescEn[0]?.title).toBe("analyze");
+
+			// 自定义 resolver 优先
+			const byResolver = mapSkillHits("Skills", commands, "session", 15, (c) => c.descriptionEn ?? "");
+			expect(byResolver).toHaveLength(1);
+			expect(byResolver[0]?.hint).toBe("Wrap up the current session");
+
+			// 2 字符短查询不匹配 description（防泛匹配挤占）
+			const shortDesc = mapSkillHits("Skills", commands, "se");
+			expect(shortDesc).toHaveLength(0);
+		});
+
+		it("超出 limit 时正确截断，limit <= 0 返回空数组", () => {
+			const out = mapSkillHits("Skills", commands, "", 2);
+			expect(out).toHaveLength(2);
+
+			const outZero = mapSkillHits("Skills", commands, "", 0);
+			expect(outZero).toEqual([]);
+		});
+	});
+
+	describe("mergeAtHits", () => {
+		const pageHit: AtHit = { providerId: "host:pages", providerLabel: "Pages", title: "page · GitHub" };
+		const skillHit: AtHit = {
+			providerId: "host:skills",
+			providerLabel: "Skills",
+			title: "wrapup",
+			text: "@skill:wrapup",
+		};
+		const fileHit: AtHit = { providerId: "host:files", providerLabel: "Files", title: "readme.md" };
+		const pluginHit: AtHit = { providerId: "p1", providerLabel: "Plugin", title: "item" };
+
+		it("Rule 1: ALL_PAGES_TRIGGERS 命中时 pages 置顶", () => {
+			const merged = mergeAtHits(
+				{ pages: [pageHit], skills: [skillHit], files: [fileHit], plugins: [pluginHit] },
+				"page",
+			);
+			expect(merged.map((m) => m.providerId)).toEqual(["host:pages", "host:skills", "host:files", "p1"]);
+		});
+
+		it("Rule 2: query 以 skill: 开头时 skills 置顶", () => {
+			const merged = mergeAtHits(
+				{ pages: [pageHit], skills: [skillHit], files: [fileHit], plugins: [pluginHit] },
+				"skill:wr",
+			);
+			expect(merged.map((m) => m.providerId)).toEqual(["host:skills", "host:pages", "host:files", "p1"]);
+		});
+
+		it("Rule 3: 默认顺序 pages -> skills -> files -> plugins，缺省 totalCap 为 30，支持空 bucket", () => {
+			const merged = mergeAtHits(
+				{ pages: [pageHit], skills: [skillHit], files: [fileHit], plugins: [pluginHit] },
+				"test",
+			);
+			expect(merged).toHaveLength(4);
+			expect(merged.map((m) => m.providerId)).toEqual(["host:pages", "host:skills", "host:files", "p1"]);
+
+			// 验证缺省 totalCap 为 30：35 条项目默认截断为 30 条
+			const thirtyFiveSkills: AtHit[] = Array.from({ length: 35 }, (_, idx) => ({
+				providerId: "host:skills",
+				providerLabel: "Skills",
+				title: `skill-${idx}`,
+			}));
+			const defaultCapped = mergeAtHits({ skills: thirtyFiveSkills }, "query");
+			expect(defaultCapped).toHaveLength(30);
+
+			// 显式 totalCap 截断
+			const capped = mergeAtHits(
+				{ pages: [pageHit], skills: [skillHit], files: [fileHit], plugins: [pluginHit] },
+				"test",
+				2,
+			);
+			expect(capped).toHaveLength(2);
+
+			// 空 buckets 测试
+			const empty = mergeAtHits({}, "test");
+			expect(empty).toHaveLength(0);
 		});
 	});
 

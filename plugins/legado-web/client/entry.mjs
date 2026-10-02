@@ -49,6 +49,11 @@ export default {
 		const frame = document.createElement("iframe");
 		frame.title = "Legado Web";
 		frame.setAttribute("allow", "clipboard-write");
+		// sandbox 加固：禁顶页导航 / 自动下载 / 指针锁定等。**必须保留 allow-same-origin**：
+		// 内嵌阅读应用与宿主同源，靠同源 fetch 访问 /plugins-api/* 与 postMessage 握手
+		//（parent 侧校验 ev.origin === 本源），去掉它 iframe 变 opaque origin，数据层全断；
+		// 而「sandbox 全禁」会连脚本一起禁掉、整个应用不可用——两者都破坏功能，见插件 README「书源安全」。
+		frame.setAttribute("sandbox", "allow-scripts allow-forms allow-popups allow-same-origin");
 		frame.style.cssText = "display:block;height:100%;width:100%;border:0;background:transparent";
 		frame.src = appUrl();
 		container.append(frame);

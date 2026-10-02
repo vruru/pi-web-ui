@@ -166,7 +166,7 @@ try {
 	if (workspaces.length !== 1) fail("启动市场清单同步不应重新激活插件");
 	else console.log("✓ 启动市场清单同步保留插件实例（无重复初始化广播）");
 
-	const catalogPath = join(dataDir, "manual-catalog.json");
+	const catalogPath = join(dirA, "manual-catalog.json");
 	writeFileSync(catalogPath, JSON.stringify([{ id: "manual-fixture", source: "owner/repo/plugins/manual-fixture" }]));
 	sock.send(JSON.stringify({ type: "plugin_catalog_sync", requestId: "metadata-only", source: catalogPath }));
 	const synced = await waitMessage(

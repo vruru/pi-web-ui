@@ -26,6 +26,7 @@ function makeHost(over: Partial<SettingsHost> & { emitted?: unknown[] } = {}): S
 				terminalToolsEnabled: false,
 				terminalBash: false,
 				terminalBashIdleMs: 15_000,
+				terminalBashMaxForegroundMs: 60_000,
 				editSoftEnabled: false,
 				questionnaireEnabled: true,
 				goalModeEnabled: true,
@@ -81,6 +82,67 @@ beforeEach(() => {
 
 afterEach(() => {
 	errSpy.mockRestore();
+});
+
+describe("目标模式总开关 on→off", () => {
+	it("只在 on→off 跃迁时调一次 onGoalModeDisabled", async () => {
+		const cb = vi.fn();
+		const store = { saved: 0 };
+		const host = makeHost({
+			onGoalModeDisabled: cb,
+			stateStore: {
+				getSettings: () => ({
+					promptMode: "append",
+					customSystemPrompt: "",
+					promptTemplate: "",
+					promptOverrides: {},
+					disabledSkills: [],
+					disabledExtensions: [],
+					disabledAgentTools: [],
+					disabledPluginTools: [],
+					terminalToolsEnabled: false,
+					terminalBash: false,
+					terminalBashIdleMs: 15_000,
+					terminalBashMaxForegroundMs: 60_000,
+					editSoftEnabled: false,
+					questionnaireEnabled: true,
+					goalModeEnabled: true,
+					thinkingWrap: false,
+					toolsWrap: true,
+					skillsFullText: [],
+					visionBridgeEnabled: true,
+					visionBridgeModel: null,
+					visionBridgePromptMode: "append",
+					visionBridgePrompt: "",
+					subagentDefaultModel: null,
+					retryMaxAttempts: 6,
+					softCapTokens: 0,
+					softCapByModel: {},
+					quickPhrases: [],
+					quickPhrasesEnabled: true,
+					reviewPrompt: "",
+					reviewDisabledSkills: [],
+					disabledPlugins: [],
+					uiLayout: {},
+				}),
+				getPresets: () => [],
+				getQuickPhrasesSeeded: () => false,
+				saveSettings: () => {
+					store.saved++;
+				},
+			} as unknown as ClientStateStore,
+		});
+		const svc = new SettingsService(host, templates);
+		await svc.set({ goalModeEnabled: false });
+		expect(cb).toHaveBeenCalledTimes(1);
+		// off→off 不重复触发
+		await svc.set({ goalModeEnabled: false });
+		expect(cb).toHaveBeenCalledTimes(1);
+		// off→on 不触发
+		await svc.set({ goalModeEnabled: true });
+		expect(cb).toHaveBeenCalledTimes(1);
+		expect(store.saved).toBe(3);
+	});
 });
 
 describe("SettingsService.applyRuntime", () => {

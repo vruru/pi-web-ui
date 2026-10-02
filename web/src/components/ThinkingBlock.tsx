@@ -82,9 +82,11 @@ export function ThinkingBlock({ thinking, streaming, wrap = true, forceOpen = fa
 						t("thinkingPreview", { preview })
 					)}
 				</span>
+				{/* 卡头右端**只有复制键**：消息级按钮一律落在消息底部的 .msg-actions
+				    行（思考卡没有正文，不渲染那一行）。 */}
 				<button
 					type="button"
-					className="chead-copy toolcall-copy thinking-copy"
+					className={`chead-copy toolcall-copy thinking-copy${copied ? " copied" : ""}`}
 					title={copied ? t("copied") : t("copyMessage")}
 					aria-label={t("copyMessage")}
 					onClick={(e) => {

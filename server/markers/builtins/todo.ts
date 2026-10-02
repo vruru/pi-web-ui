@@ -63,7 +63,6 @@ export function describeTodos(state: TodoState, includeDeleted = false, lang: Se
 }
 
 const TODO_GUIDANCE_ZH: string[] = [
-	"# 内联标记工具（状态类操作请写在回答正文，不要调用工具）",
 	"- 标记语法：[[todo:new:<主题>]] 新建；[[todo:set:<id>,completed|in_progress|pending]] 状态；[[todo:remove:<id>]] 删除；[[todo:dep:<id>,blocks=<依赖id,逗号分隔>]] 设依赖。",
 	"- 状态变化全部用上面的 [[todo:...]] 内联标记表达，不会中断回答，无需等待返回。",
 	"- 想查看/list 当前任务列表时，才用 `todo_list` 工具（读操作走工具）。",
@@ -71,7 +70,6 @@ const TODO_GUIDANCE_ZH: string[] = [
 ];
 
 const TODO_GUIDANCE_EN: string[] = [
-	"# Inline marker tools (express state changes inline in your reply text — never call a tool for them)",
 	"- Marker syntax: [[todo:new:<subject>]] to create; [[todo:set:<id>,completed|in_progress|pending]] for status; [[todo:remove:<id>]] to delete; [[todo:dep:<id>,blocks=<dep ids, comma-separated>]] to set dependencies.",
 	"- Express all status changes with the [[todo:...]] inline markers above; they never interrupt your reply and need no waiting for a result.",
 	"- Only use the `todo_list` tool (the read path goes through the tool) when you want to list the current tasks.",

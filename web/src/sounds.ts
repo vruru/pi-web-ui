@@ -17,11 +17,13 @@ export interface SoundSettings {
 	start: boolean;
 	/** An error notice was raised. */
 	error: boolean;
+	/** A tool approval request appeared (tool-approval gate). */
+	approval: boolean;
 	/** Master volume 0–100. */
 	volume: number;
 }
 
-export type SoundKind = "question" | "done" | "start" | "error";
+export type SoundKind = "question" | "done" | "start" | "error" | "approval";
 
 const STORAGE_KEY = "pi-web-sounds";
 
@@ -31,6 +33,7 @@ export const DEFAULT_SOUND_SETTINGS: SoundSettings = {
 	done: true,
 	start: false,
 	error: true,
+	approval: true,
 	volume: 100,
 };
 
@@ -43,7 +46,7 @@ export function loadSoundSettings(): SoundSettings {
 		const merged: SoundSettings = { ...DEFAULT_SOUND_SETTINGS, ...parsed };
 		// Sanitize stored values so a corrupted or out-of-range entry can't
 		// break the slider or the volume math.
-		for (const k of ["enabled", "question", "done", "start", "error"] as const) {
+		for (const k of ["enabled", "question", "done", "start", "error", "approval"] as const) {
 			if (typeof merged[k] !== "boolean") merged[k] = DEFAULT_SOUND_SETTINGS[k];
 		}
 		if (typeof merged.volume !== "number" || !Number.isFinite(merged.volume)) {
@@ -116,12 +119,19 @@ const ERROR: Note[] = [
 	{ type: "square", freq: 220, start: 0, dur: 0.16, peak: 0.18 },
 	{ type: "square", freq: 174.61, start: 0.18, dur: 0.26, peak: 0.18 },
 ];
+/** Three-note doorbell — the agent is waiting for a tool approval. */
+const APPROVAL: Note[] = [
+	{ type: "sine", freq: 659.25, start: 0, dur: 0.11, peak: 0.45 },
+	{ type: "sine", freq: 659.25, start: 0.14, dur: 0.11, peak: 0.45 },
+	{ type: "sine", freq: 880, start: 0.28, dur: 0.26, peak: 0.5 },
+];
 
 const PATTERNS: Record<SoundKind, Note[]> = {
 	question: QUESTION,
 	done: DONE,
 	start: START,
 	error: ERROR,
+	approval: APPROVAL,
 };
 
 function tone(c: AudioContext, note: Note, volume: number): void {

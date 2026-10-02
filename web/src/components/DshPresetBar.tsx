@@ -1,7 +1,7 @@
 import { memo, useEffect, useState } from "react";
-import { FiCpu, FiLock, FiPlus } from "react-icons/fi";
+import { FiLock, FiPlus, FiSliders } from "react-icons/fi";
 import type { UiAgentPreset } from "../types";
-import { useT } from "../i18n";
+import { useI18n, useT, type Translate } from "../i18n";
 import { appSend } from "../app-globals";
 import { focusComposer } from "../composer-bridge";
 import { Dropdown, DropdownItem } from "./Dropdown";
@@ -28,6 +28,53 @@ interface Props {
 /** 已知内置预设的展示顺序（名录 order 优先，此表兜底；自建按名称排最后）。 */
 const KNOWN_ORDER = ["standard", "ptc", "minimal", "cordis"];
 
+/** pi 引擎内置五档的 i18n 键（与权限档 permLabelKey 同一口径）。 */
+export type PresetLabelKey = "preset.standard" | "preset.minimal" | "preset.code" | "preset.reader" | "preset.ask";
+export type PresetDescKey =
+	"preset.standardDesc" | "preset.minimalDesc" | "preset.codeDesc" | "preset.readerDesc" | "preset.askDesc";
+
+const BUILTIN_LABEL: Record<string, PresetLabelKey> = {
+	standard: "preset.standard",
+	minimal: "preset.minimal",
+	code: "preset.code",
+	reader: "preset.reader",
+	ask: "preset.ask",
+};
+
+const BUILTIN_DESC: Record<string, PresetDescKey> = {
+	standard: "preset.standardDesc",
+	minimal: "preset.minimalDesc",
+	code: "preset.codeDesc",
+	reader: "preset.readerDesc",
+	ask: "preset.askDesc",
+};
+
+/** 内置预设的文案键；null = 非内置（DSH 运行时/自建预设，走服务端文案）。 */
+export function presetLabelKey(id: string): PresetLabelKey | null {
+	return BUILTIN_LABEL[id] ?? null;
+}
+
+export function presetDescKey(id: string): PresetDescKey | null {
+	return BUILTIN_DESC[id] ?? null;
+}
+
+/**
+ * 预设文案随界面语言落定：内置五档走 i18n 键（与权限档同口径），
+ * 其它预设（DSH 运行时下发、自建）用服务端文案，非中文界面取 nameEn ?? name
+ * （与 ui-slots.ts 的 pluginLabel 同一回落约定）。
+ * 修的正是「英文界面仍见全功能/极简模式」：服务端只下发中文 name。
+ */
+export function presetText(p: UiAgentPreset, locale: string, t: Translate): { name: string; description?: string } {
+	const zh = locale === "zh";
+	const labelKey = presetLabelKey(p.id);
+	const descKey = presetDescKey(p.id);
+	if (labelKey && descKey) return { name: t(labelKey), description: t(descKey) };
+	return {
+		name: zh ? (p.name ?? p.id) : (p.nameEn ?? p.name ?? p.id),
+		description: zh ? p.description : (p.descriptionEn ?? p.description),
+	};
+}
+
 export function sortAgentPresets(list: UiAgentPreset[]): UiAgentPreset[] {
 	return [...list].sort((a, b) => {
 		const ao = Number.isSafeInteger(a.order) ? a.order! : KNOWN_ORDER.indexOf(a.id);
@@ -48,6 +95,7 @@ export const DshPresetBar = memo(function DshPresetBar({
 	compact = false,
 }: Props) {
 	const t = useT();
+	const { locale } = useI18n();
 	const [open, setOpen] = useState(false);
 	const [selected, setSelected] = useState(preset?.id ?? defaultPreset);
 	// 会话/预设变化时同步下拉框（用户操作中不打断：只在 id 变化时跟）。
@@ -61,6 +109,9 @@ export const DshPresetBar = memo(function DshPresetBar({
 	const ordered = sortAgentPresets(presets);
 	const current = ordered.find((p) => p.id === preset?.id);
 	const sel = ordered.find((p) => p.id === selected) ?? current;
+	// 展示文案：内置五档走 i18n，其余预设用服务端文案（非中文界面取 nameEn）。
+	const textOf = (p: UiAgentPreset) => presetText(p, locale, t);
+	const currentText = current ? textOf(current) : undefined;
 
 	const pick = (id: string) => {
 		setSelected(id);
@@ -69,14 +120,14 @@ export const DshPresetBar = memo(function DshPresetBar({
 	};
 
 	if (compact) {
-		const title = current?.description ?? current?.id ?? t("dshPreset");
+		const title = currentText?.description ?? current?.id ?? t("dshPreset");
 		return (
 			<Dropdown
 				trigger={
 					<>
-						<FiCpu />
+						<FiSliders />
 						<span className="chip-sub" title={locked ? `${title}（${t("dshPresetLocked")}）` : title}>
-							{current?.name ?? current?.id ?? preset?.name ?? t("dshPreset")}
+							{currentText?.name ?? current?.id ?? preset?.name ?? t("dshPreset")}
 							{locked && <FiLock style={{ marginLeft: 3 }} />}
 						</span>
 					</>
@@ -86,23 +137,26 @@ export const DshPresetBar = memo(function DshPresetBar({
 				direction="up"
 				align="left"
 			>
-				{ordered.map((p) => (
-					<DropdownItem
-						key={p.id}
-						active={p.id === preset?.id}
-						disabled={!!p.broken}
-						title={p.broken ?? p.description ?? p.id}
-						onClick={() => pick(p.id)}
-					>
-						<span className="dd-preset-name">
-							{p.name ?? p.id}
-							{p.trust === "user" && <span className="dd-preset-tag">{t("dshPresetUser")}</span>}
-							{p.id === defaultPreset && <span className="dd-preset-tag">{t("dshPresetDefaultTag")}</span>}
-							{p.broken && <span className="dd-preset-tag warn">{t("dshPresetBroken")}</span>}
-						</span>
-						{p.description && !p.broken && <span className="dd-preset-desc">{p.description}</span>}
-					</DropdownItem>
-				))}
+				{ordered.map((p) => {
+					const text = textOf(p);
+					return (
+						<DropdownItem
+							key={p.id}
+							active={p.id === preset?.id}
+							disabled={!!p.broken}
+							title={p.broken ?? text.description ?? p.id}
+							onClick={() => pick(p.id)}
+						>
+							<span className="dd-preset-name">
+								{text.name}
+								{p.trust === "user" && <span className="dd-preset-tag">{t("dshPresetUser")}</span>}
+								{p.id === defaultPreset && <span className="dd-preset-tag">{t("dshPresetDefaultTag")}</span>}
+								{p.broken && <span className="dd-preset-tag warn">{t("dshPresetBroken")}</span>}
+							</span>
+							{text.description && !p.broken && <span className="dd-preset-desc">{text.description}</span>}
+						</DropdownItem>
+					);
+				})}
 			</Dropdown>
 		);
 	}
@@ -110,13 +164,13 @@ export const DshPresetBar = memo(function DshPresetBar({
 	return (
 		<div className="dsh-presetbar" data-testid="dsh-presetbar">
 			<span className="dsh-preset-label">
-				<FiCpu />
+				<FiSliders />
 				{t("dshPreset")}
 			</span>
 			<Dropdown
 				trigger={
-					<span title={current?.description ?? current?.id ?? ""}>
-						{current?.name ?? current?.id ?? preset?.name ?? "…"}
+					<span title={currentText?.description ?? current?.id ?? ""}>
+						{currentText?.name ?? current?.id ?? preset?.name ?? "…"}
 						{locked && (
 							<span className="dsh-preset-lock" title={t("dshPresetBlankOnly")}>
 								<FiLock /> {t("dshPresetLocked")}
@@ -127,23 +181,26 @@ export const DshPresetBar = memo(function DshPresetBar({
 				open={open && !locked}
 				onOpenChange={setOpen}
 			>
-				{ordered.map((p) => (
-					<DropdownItem
-						key={p.id}
-						active={p.id === preset?.id}
-						disabled={!!p.broken}
-						title={p.broken ?? p.description ?? p.id}
-						onClick={() => pick(p.id)}
-					>
-						<span className="dd-preset-name">
-							{p.name ?? p.id}
-							{p.trust === "user" && <span className="dd-preset-tag">{t("dshPresetUser")}</span>}
-							{p.id === defaultPreset && <span className="dd-preset-tag">{t("dshPresetDefaultTag")}</span>}
-							{p.broken && <span className="dd-preset-tag warn">{t("dshPresetBroken")}</span>}
-						</span>
-						{p.description && !p.broken && <span className="dd-preset-desc">{p.description}</span>}
-					</DropdownItem>
-				))}
+				{ordered.map((p) => {
+					const text = textOf(p);
+					return (
+						<DropdownItem
+							key={p.id}
+							active={p.id === preset?.id}
+							disabled={!!p.broken}
+							title={p.broken ?? text.description ?? p.id}
+							onClick={() => pick(p.id)}
+						>
+							<span className="dd-preset-name">
+								{text.name}
+								{p.trust === "user" && <span className="dd-preset-tag">{t("dshPresetUser")}</span>}
+								{p.id === defaultPreset && <span className="dd-preset-tag">{t("dshPresetDefaultTag")}</span>}
+								{p.broken && <span className="dd-preset-tag warn">{t("dshPresetBroken")}</span>}
+							</span>
+							{text.description && !p.broken && <span className="dd-preset-desc">{text.description}</span>}
+						</DropdownItem>
+					);
+				})}
 			</Dropdown>
 			{!locked && (
 				<span className="dsh-preset-hint" title={t("dshPresetBlankOnly")}>

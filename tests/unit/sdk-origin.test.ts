@@ -4,10 +4,10 @@
  * 以及「被遮蔽的副本更新时给出提示」。
  */
 import { describe, expect, it, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { compareVersions, sdkCopies, sdkOriginNote } from "../../server/sdk-origin.js";
+import { compareVersions, isBundledInUse, sdkCopies, sdkOriginNote } from "../../server/sdk-origin.js";
 
 const PKG = "@earendil-works/pi-coding-agent";
 const roots: string[] = [];
@@ -124,5 +124,64 @@ describe("sdkOriginNote：只在「被遮蔽的副本更新」时提示", () => 
 			),
 		).toBeNull();
 		expect(sdkOriginNote([{ path: "a", version: "0.86.1" }], "0.86.1")).toBeNull();
+	});
+});
+
+describe("isBundledInUse (issue #321)", () => {
+	it("running == copies[0] → 自带在用；跟随祖先副本 → 不是；copies 为空 → 按自带算", () => {
+		expect(
+			isBundledInUse(
+				[
+					{ path: "a", version: "0.87.1" },
+					{ path: "b", version: "0.86.1" },
+				],
+				"0.87.1",
+			),
+		).toBe(true);
+		expect(
+			isBundledInUse(
+				[
+					{ path: "a", version: "0.86.1" },
+					{ path: "b", version: "0.95.0" },
+				],
+				"0.95.0",
+			),
+		).toBe(false);
+		expect(isBundledInUse([], "0.87.1")).toBe(true);
+	});
+});
+
+describe("isBundledInUse：同版本时按实际加载路径判断（显式 PI_WEB_SDK=global）", () => {
+	const copies = [
+		{
+			path: "/prefix/lib/node_modules/pi-web-ui/node_modules/@earendil-works/pi-coding-agent/package.json",
+			version: "1.0.0",
+		},
+		{ path: "/global/lib/node_modules/@earendil-works/pi-coding-agent/package.json", version: "1.0.0" },
+	];
+	it("加载的是祖先那份 → 不是自带；加载的是嵌套那份 → 自带", () => {
+		expect(
+			isBundledInUse(copies, "1.0.0", "/global/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js"),
+		).toBe(false);
+		expect(
+			isBundledInUse(
+				copies,
+				"1.0.0",
+				"file:///prefix/lib/node_modules/pi-web-ui/node_modules/@earendil-works/pi-coding-agent/dist/index.js",
+			),
+		).toBe(true);
+	});
+	it("不给入口时沿用版本号判据", () => {
+		expect(isBundledInUse(copies, "1.0.0")).toBe(true);
+	});
+});
+
+describe("bundled SDK release pin", () => {
+	it("declares exactly the SDK version tested by the repository lock", () => {
+		const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
+		const lock = JSON.parse(readFileSync(new URL("../../package-lock.json", import.meta.url), "utf8"));
+		const version = lock.packages["node_modules/@earendil-works/pi-coding-agent"].version;
+		expect(pkg.dependencies["@earendil-works/pi-coding-agent"]).toBe(version);
+		expect(lock.packages[""].dependencies["@earendil-works/pi-coding-agent"]).toBe(version);
 	});
 });

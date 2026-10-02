@@ -11,7 +11,7 @@
  * 经 ModelAdminHost 与 ClientSession 解耦（同 settings/goal/slash 服务模式）。
  * UI 文案直接中文（服务端 notice 约定）。apiKey/headers 绝不下发浏览器。
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type {
@@ -97,6 +97,14 @@ export function graduateOverlayModels(
 	return graduated;
 }
 
+/** 原子写 JSON（tmp + rename）：进程崩溃不留半截文件——裸 writeFileSync 中途被
+ *  杀会把整份配置截断，下次读盘即空表。tmp 名带 pid，避免同机多进程互踩。 */
+function atomicWriteJson(path: string, data: unknown): void {
+	const tmp = `${path}.${process.pid}.tmp`;
+	writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n");
+	renameSync(tmp, path);
+}
+
 /** Strip // and /* *\/ comments without touching string literals (URLs contain //). */
 function stripJsonComments(src: string): string {
 	let out = "";
@@ -141,7 +149,7 @@ function stripJsonComments(src: string): string {
 /** Merge a UI-submitted provider config into the existing models.json entry.
  *
  * 表单（`UiProviderConfig`）只承载 UI 认识的字段：provider 级 name/api/baseUrl/
- * apiKey/authHeader，模型级 id/name/reasoning/input/contextWindow/maxTokens。
+ * hasApiKey/authHeader，模型级 id/name/reasoning/input/contextWindow/maxTokens。
  * models.json 里还可能有 UI 不认识的字段——provider 级 headers（浏览器拿不到，
  * 见 listModelsConfig）、模型级 api/baseUrl/cost/compat/thinkingLevelMap（手写或
  * 脚本写入，pi-ai 靠它们决定请求地址与推理格式）。按表单整体重建条目会把这些字段
@@ -150,6 +158,10 @@ function stripJsonComments(src: string): string {
  *
  * 所以这里以已有条目为底、表单字段覆盖：表单没提到的字段原样保留，表单清空的可选
  * 字段才真正删除；`models` 仍是「表单即全集」——表单里删掉的 id 会被移除。
+ *
+ * apiKey 例外：浏览器不再持有明文（只见 hasApiKey），**缺字段 = 保留旧值**；显式
+ * 空串才清除（协议级"空=清除"语义保留，但 Web 表单留空时整字段不传）。这样
+ * refresh_provider_models 等不带 apiKey 的内部保存路径也绝不会把密钥抹掉。
  */
 export function mergeProviderConfigEntry(
 	prevEntry: Record<string, unknown> | undefined,
@@ -188,7 +200,11 @@ export function mergeProviderConfigEntry(
 	apply("name", config.name?.trim() || undefined);
 	apply("api", config.api?.trim() || undefined);
 	apply("baseUrl", config.baseUrl?.trim() || undefined);
-	apply("apiKey", config.apiKey?.trim() || undefined);
+	if (config.apiKey === undefined) {
+		// 表单没带 apiKey（留空/内部路径）→ 保留旧值，绝不清除。
+	} else {
+		apply("apiKey", config.apiKey.trim() || undefined);
+	}
 	apply("authHeader", config.authHeader ? true : undefined);
 	mergedEntry.models = mergedModels;
 	return mergedEntry;
@@ -375,32 +391,57 @@ export class ModelAdminService {
 
 	/** Read + parse provider-keys.json. */
 	private readProviderKeys(): Record<string, ProviderKeysData> {
+		let raw: string;
 		try {
-			const parsed = JSON.parse(readFileSync(this.providerKeysPath(), "utf8")) as Record<
+			raw = readFileSync(this.providerKeysPath(), "utf8");
+		} catch {
+			return {}; // 文件不存在 = 首次引导
+		}
+		let parsed: Record<string, { activeKeyName?: string | null; keys?: { name: string; apiKey: string }[] }>;
+		try {
+			parsed = JSON.parse(raw) as Record<
 				string,
 				{ activeKeyName?: string | null; keys?: { name: string; apiKey: string }[] }
 			>;
-			const out: Record<string, ProviderKeysData> = {};
-			for (const [pid, entry] of Object.entries(parsed)) {
-				const keys = Array.isArray(entry?.keys) ? entry.keys.filter((k) => k?.name && k?.apiKey) : [];
-				if (!pid || keys.length === 0) continue;
-				const activeKeyName =
-					entry.activeKeyName === null
-						? null
-						: entry.activeKeyName && keys.some((k) => k.name === entry.activeKeyName)
-							? entry.activeKeyName
-							: keys[0].name;
-				out[pid] = { activeKeyName, keys };
-			}
-			return out;
-		} catch {
+		} catch (err) {
+			// 坏文件改名留存：里面可能有全部备用密钥，绝不能被后续种子/空表整份覆盖。
+			this.quarantineCorruptFile(this.providerKeysPath(), err);
 			return {};
 		}
+		const out: Record<string, ProviderKeysData> = {};
+		for (const [pid, entry] of Object.entries(parsed)) {
+			const keys = Array.isArray(entry?.keys) ? entry.keys.filter((k) => k?.name && k?.apiKey) : [];
+			if (!pid || keys.length === 0) continue;
+			const activeKeyName =
+				entry.activeKeyName === null
+					? null
+					: entry.activeKeyName && keys.some((k) => k.name === entry.activeKeyName)
+						? entry.activeKeyName
+						: keys[0].name;
+			out[pid] = { activeKeyName, keys };
+		}
+		return out;
 	}
 
 	private writeProviderKeys(data: Record<string, ProviderKeysData>): void {
 		mkdirSync(this.host.agentDir, { recursive: true });
-		writeFileSync(this.providerKeysPath(), JSON.stringify(data, null, 2) + "\n");
+		// 原子写（tmp+rename）：崩溃不留半截 JSON；0o600 限权防本机其他用户读密钥
+		//（Windows 忽略 mode 无害，POSIX 生效）。
+		const path = this.providerKeysPath();
+		const tmp = `${path}.${process.pid}.tmp`;
+		writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
+		renameSync(tmp, path);
+	}
+
+	/** 解析失败的配置文件改名留存为 <name>.corrupt-<timestamp>。改名失败（占用/
+	 *  跨盘等）也不抛——留存是尽力而为，绝不能阻塞主流程。 */
+	private quarantineCorruptFile(path: string, err: unknown): void {
+		try {
+			renameSync(path, `${path}.corrupt-${Date.now()}`);
+			console.warn(`[model-admin] 配置文件解析失败，已改名留存：${path}（${(err as Error).message}）`);
+		} catch {
+			console.warn(`[model-admin] 配置文件解析失败且无法留存：${path}（${(err as Error).message}）`);
+		}
 	}
 
 	/** Default name "密钥 N" for a provider's Nth key. */
@@ -473,11 +514,16 @@ export class ModelAdminService {
 	}
 
 	/** Push the masked provider-keys map to the client. Seeds the store from any
-	 *  auth.json credentials so legacy single-key setups show up immediately. */
+	 *  auth.json credentials so legacy single-key setups show up immediately.
+	 *  只在文件不存在（首次引导）时才落盘种子；文件存在（含空表）绝不整份写回
+	 *  ——写回的来源永远是读盘结果，避免任何竞态把用户密钥覆盖掉。 */
 	listProviderKeys(): void {
+		const path = this.providerKeysPath();
 		const data = this.readProviderKeys();
-		for (const pid of this.builtinProviderIds()) this.seedProviderKeysFromAuth(pid, data);
-		this.writeProviderKeys(data);
+		if (!existsSync(path)) {
+			for (const pid of this.builtinProviderIds()) this.seedProviderKeysFromAuth(pid, data);
+			this.writeProviderKeys(data);
+		}
 		this.host.emit({ type: "provider_keys", ...this.providerKeysInfo(data) });
 		this.host.flushSnapshot();
 	}
@@ -508,7 +554,7 @@ export class ModelAdminService {
 			// no file yet / unparsable — start fresh
 		}
 		data[pid] = { type: "api_key", key: apiKey };
-		writeFileSync(authPath, JSON.stringify(data, null, 2) + "\n");
+		atomicWriteJson(authPath, data);
 		const mr = this.host.modelRuntime();
 		await mr.setRuntimeApiKey(pid, apiKey);
 		await mr.refresh({ allowNetwork: true, providers: [pid] });
@@ -729,7 +775,7 @@ export class ModelAdminService {
 					// no file yet — nothing to clean
 				}
 				delete auth[pid];
-				writeFileSync(authPath, JSON.stringify(auth, null, 2) + "\n");
+				atomicWriteJson(authPath, auth);
 				const mr = this.host.modelRuntime();
 				await mr.removeRuntimeApiKey(pid);
 				await mr.refresh({ providers: [pid] });
@@ -817,7 +863,7 @@ export class ModelAdminService {
 				return;
 			}
 			delete data[pid];
-			writeFileSync(authPath, JSON.stringify(data, null, 2) + "\n");
+			atomicWriteJson(authPath, data);
 			// Clear every stored key so the provider returns to unconfigured.
 			delete keyData[pid];
 			this.writeProviderKeys(keyData);
@@ -1169,7 +1215,8 @@ export class ModelAdminService {
 				name: p.name as string | undefined,
 				api: p.api as string | undefined,
 				baseUrl: p.baseUrl as string | undefined,
-				apiKey: p.apiKey as string | undefined,
+				// apiKey 明文绝不下发浏览器，只报有无；表单留空 = 保持不变。
+				hasApiKey: typeof p.apiKey === "string" && p.apiKey.trim() !== "",
 				authHeader: p.authHeader as boolean | undefined,
 				// headers are intentionally NOT sent to the browser — they may
 				// contain Authorization / API-key values; kept server-side only.
@@ -1280,6 +1327,16 @@ export class ModelAdminService {
 	 *  because the baseUrl is often a LAN/loopback host the browser can't reach
 	 *  cross-origin) and return the advertised models. reqId is echoed back
 	 *  in fetch_models_result so the UI can match concurrent requests. */
+	/** 编辑表单的探测（fetch_models / test_model_connection）没带明文 apiKey 时，
+	 *  按 providerId 回落到 models.json 里已保存的密钥——编辑存量服务商时表单
+	 *  一律留空（明文不再回传浏览器），没有这个回落「测试连接」就会 401。 */
+	private savedProviderApiKey(providerId: string | undefined): string | undefined {
+		const pid = providerId?.trim();
+		if (!pid) return undefined;
+		const saved = this.readModelsConfig().providers[pid] as { apiKey?: unknown } | undefined;
+		return typeof saved?.apiKey === "string" && saved.apiKey.trim() ? saved.apiKey : undefined;
+	}
+
 	async fetchModelsList(
 		reqId: number,
 		baseUrl: string,
@@ -1288,13 +1345,44 @@ export class ModelAdminService {
 		api?: string,
 		/** 探测抛错文案语言（默认英文）；调用方可传 () => getLang() 实现跟随。 */
 		lang?: () => ServerLang,
+		providerId?: string,
 	): Promise<void> {
 		const emitError = (error: string) => this.host.emit({ type: "fetch_models_result", reqId, ok: false, error });
 		try {
-			const models = await ModelAdminService.probeModelsEndpoint(baseUrl, apiKey, authHeader, api, undefined, lang);
+			const key = apiKey?.trim() || this.savedProviderApiKey(providerId);
+			const models = await ModelAdminService.probeModelsEndpoint(baseUrl, key, authHeader, api, undefined, lang);
 			this.host.emit({ type: "fetch_models_result", reqId, ok: true, models });
 		} catch (err) {
 			emitError((err as Error).message);
+		}
+	}
+
+	/**
+	 * Lightweight connectivity and auth probe for a provider endpoint.
+	 * Measures latency in ms and returns ok/error.
+	 */
+	async testConnection(
+		reqId: number,
+		baseUrl: string,
+		apiKey?: string,
+		authHeader?: boolean,
+		api?: string,
+		lang?: () => ServerLang,
+		providerId?: string,
+	): Promise<void> {
+		const start = Date.now();
+		try {
+			const key = apiKey?.trim() || this.savedProviderApiKey(providerId);
+			await ModelAdminService.probeModelsEndpoint(baseUrl, key, authHeader, api, undefined, lang);
+			const latencyMs = Date.now() - start;
+			this.host.emit({ type: "test_model_connection_result", reqId, ok: true, latencyMs });
+		} catch (err) {
+			this.host.emit({
+				type: "test_model_connection_result",
+				reqId,
+				ok: false,
+				error: (err as Error).message,
+			});
 		}
 	}
 
@@ -1615,7 +1703,7 @@ export class ModelAdminService {
 		const graduated = graduateOverlayModels(providers, official);
 		if (graduated.length === 0) return graduated;
 		try {
-			writeFileSync(this.modelsConfigPath(), JSON.stringify({ providers }, null, 2) + "\n");
+			atomicWriteJson(this.modelsConfigPath(), { providers });
 		} catch {
 			return [];
 		}
@@ -1657,7 +1745,7 @@ export class ModelAdminService {
 		pid: string,
 	): Promise<void> {
 		mkdirSync(this.host.agentDir, { recursive: true });
-		writeFileSync(this.modelsConfigPath(), JSON.stringify({ providers }, null, 2) + "\n");
+		atomicWriteJson(this.modelsConfigPath(), { providers });
 
 		// Allow a models.json entry to reuse the provider credential already
 		// stored in auth.json. Seed the shared runtime too, because older pi-ai
@@ -1824,7 +1912,7 @@ export class ModelAdminService {
 				return;
 			}
 			delete providers[providerId];
-			writeFileSync(this.modelsConfigPath(), JSON.stringify({ providers }, null, 2) + "\n");
+			atomicWriteJson(this.modelsConfigPath(), { providers });
 			await this.host.modelRuntime().refresh();
 			this.host.invalidatePiConfig();
 			await this.listModelsConfig();

@@ -13,6 +13,7 @@
  * Runs against the compiled server on a dedicated port (8943).
  */
 import { portUp, freePort } from "./lib/port-utils.mjs";
+import { waitAttachSettled } from "./lib/attach-settle.mjs";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { mkdtempSync } from "node:fs";
@@ -67,9 +68,11 @@ try {
 	const stream = [];
 	const lastRevOf = (m) => (m.type === "snapshot" ? m.state.rev : m.rev);
 	let sawReady = false;
+	let sawSchedulerTasks = false;
 	ws.on("message", (data) => {
 		const msg = JSON.parse(data.toString());
 		if (msg.type === "ready") sawReady = true;
+		if (msg.type === "scheduler_tasks") sawSchedulerTasks = true;
 		if (msg.type === "snapshot" || msg.type === "snapshot_delta") stream.push(msg);
 	});
 
@@ -80,6 +83,13 @@ try {
 	ws.send(JSON.stringify({ type: "hello", clientId: "snapdelta-test" }));
 	for (let i = 0; i < 100 && !sawReady; i++) await sleep(50);
 	check("ready received with protocolVersion=2", sawReady);
+
+	// attach 余波排空见 tests/lib/attach-settle.mjs：ready 只代表传输通，插件链 +
+	// 首快照 + rev2 空 delta + 面板推送还在后头；以 scheduler_tasks 为标记等排空，
+	// 否则 get_state / prompt 断言会跟余波交错（CI 曾稳定复现 baseRev 3 vs rev 1）。
+	const settled = await waitAttachSettled({ sawReady: () => sawReady, sawMarker: () => sawSchedulerTasks });
+	check("attach burst settled (scheduler_tasks arrived)", settled);
+	stream.length = 0;
 
 	const fullCount = () => stream.filter((m) => m.type === "snapshot").length;
 

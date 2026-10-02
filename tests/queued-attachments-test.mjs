@@ -1,8 +1,8 @@
 // Real SDK queue delivery with a local multimodal provider; no paid tokens.
 import { createServer } from "node:http";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, isAbsolute } from "node:path";
 import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import assert from "node:assert/strict";
@@ -193,8 +193,21 @@ try {
 			.flatMap((r) => r.messages)
 			.find((m) => m.role === "user" && JSON.stringify(m.content).includes(marker));
 		assert(delivered, marker + " delivered");
-		assert(JSON.stringify(delivered.content).includes("QUEUED_FILE_SENTINEL"), marker + " file content");
-		assert(JSON.stringify(delivered.content).includes("UPLOADED_FILE_SENTINEL"), marker + " uploaded file content");
+		// 0.97：文件附件一律以路径引用送达（内容不再内联，模型用 read 按需读取）。
+		// 引用必须与文字在同一条排队用户消息里，且按引用路径确实读得到文件内容。
+		const body = delivered.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
+		const referenced = [...body.matchAll(/<file path="([^"]+)"/g)].map((m) =>
+			readFileSync(isAbsolute(m[1]) ? m[1] : join(project, m[1]), "utf8"),
+		);
+		assert(body.includes('<file path="fixture.txt"'), marker + " workspace file reference in the same message");
+		assert(
+			referenced.some((text) => text.includes("QUEUED_FILE_SENTINEL")),
+			marker + " file content",
+		);
+		assert(
+			referenced.some((text) => text.includes("UPLOADED_FILE_SENTINEL")),
+			marker + " uploaded file content",
+		);
 		assert(
 			delivered.content.some((c) => c.type === "image_url" && c.image_url.url.includes(png)),
 			marker + " actual image bytes",

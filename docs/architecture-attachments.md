@@ -1,20 +1,36 @@
 # 附件、图片与文件处理
 
-> 覆盖附件三种模式、图片问答、视觉桥、文件上传/下载/预览协议。
+> 覆盖附件模式、图片问答、视觉桥、文件上传/下载/预览协议。
 
-## 附件三种模式
+## 附件模式（一律只给路径）
 
-`ClientMessage.prompt.attachments[].mode` 决定附件如何发送给模型：
+`ClientMessage.prompt.attachments[].mode` 决定附件如何发送给模型。**文件内容永远不注入 prompt**
+（小文件也一样）：服务端只发路径引用，模型用自己的 read 工具按需读（自带截断/分页）。
 
-| mode        | 含义     | 服务端处理                                                                                            |
-| ----------- | -------- | ----------------------------------------------------------------------------------------------------- |
-| `inline`    | 内联全文 | ≤ `PI_WEB_INLINE_FILE_MAX`（默认 12KB）内联，超出自动降级为 reference                                 |
-| `reference` | 仅路径   | 发 `<file path="..." size="..."/>`，模型按需用 read 工具读                                            |
-| `lines`     | 选中行   | 发 `<file path="..." lines="2-3">```选中行```</file>`，只读该范围（读取上限 2MB，超限降级 reference） |
+| mode        | 含义   | 服务端处理                                                                                     |
+| ----------- | ------ | ---------------------------------------------------------------------------------------------- |
+| `reference` | 仅路径 | 发 `<file path="..." size="..."/>`（上传文件是 uploads 目录下的绝对路径）                      |
+| `lines`     | 行范围 | 发 `<file path="..." lines="2-3" size="..."/>`，告诉模型用户选的是哪几行（不读文件、不带内容） |
+| `inline`    | 遗留   | **旧版「全文注入」的遗留值**（旧客户端/旧草稿会发）：服务端按 `reference` 处理，不再注入内容   |
+
+图片（`imageData`、指向图片的工作区路径）仍作为 image 内容发送（见下）；目录、网页引用、对话引用各有自己的卡片形态。
 
 附件作为独立 custom message（`sendCustomMessage` + `deliverAs: "nextTurn"` asides）发送，渲染成可折叠卡片。客户端 `stripFileWrapper` 的正则要兼容 `lines="..."` 属性。
 
 **消息序列化缓存按 `role:timestamp` 为 key——同一 prompt 的多个 aside 同毫秒创建会碰撞，必须靠内容指纹（`contentFingerprint`）区分，否则只有第一个渲染（已修，勿回退）。**
+
+### 待发附件的生命周期（跟会话走，不跟页面走）
+
+输入框里那排待发附件 chips（📎/🔗/💬/🖼/🌐）只活在 `App.tsx` 的 `attachments` state 里
+（不进服务端、不持久化），**发送成功即清空**。它与正文草稿（按 `sessionId` 存、切回旧会话会恢复）
+是同一个「本会话待发送内容」的两半，所以**会话身份一变就一起清空**：
+
+- 判据是 `UiState.sessionId`（pi/DSH 双引擎都有；`conversationId` 重启即变，不能当会话身份），
+  纯函数在 `web/src/composer-draft.ts` 的 `advanceComposerSession`（单测：`tests/unit/composer-draft.test.ts`）。
+- 触发场景：新建对话、切换对话、手动过户、切项目（切 cwd）——新对话因此是干净开始。
+- 瞬时态（断线重连、快照里 `sessionId` 短暂为空）不动水位也不清，避免误清用户的待发附件。
+- 不做按会话保存：切走再切回来时正文草稿会恢复、附件不会（若要「切回旧对话连引用一起回来」，
+  得把 chips 也按 sessionId 存，属于设计升级）。
 
 ## 图片问答（无工作区路径）
 
@@ -45,12 +61,12 @@
 
 ## 文件对话（无工作区路径）
 
-拖入输入框 / 📎 上传的任意文件带 `attachments[].fileData`（base64）发送——服务端写入全局目录 `~/.pi-web/uploads/<clientId>/`（**不放项目内**，`MAX_UPLOAD_BYTES` 20MB 上限），小文本（≤ `PI_WEB_INLINE_FILE_MAX` 且嗅探为文本）直接内联，其余以**绝对路径** reference 附加（read 工具支持绝对路径）。前端分流（`isRasterImage`）：**只有栅格图片**（png/jpeg/gif/webp/bmp/avif…）走 imageData 管线；**SVG 等矢量格式排除**——createImageBitmap 解码 SVG 会失败，SVG 作为普通文件附加让模型读源码更有用，其余文件走 fileData。
+拖入输入框 / 📎 上传的任意文件带 `attachments[].fileData`（base64）发送——服务端写入全局目录 `~/.pi-web/uploads/<clientId>/`（**不放项目内**，`MAX_UPLOAD_BYTES` 20MB 上限），一律以**绝对路径** reference 附加（read 工具支持绝对路径），不再内联小文本。前端分流（`isRasterImage`）：**只有栅格图片**（png/jpeg/gif/webp/bmp/avif…）走 imageData 管线；**SVG 等矢量格式排除**——createImageBitmap 解码 SVG 会失败，SVG 作为普通文件附加让模型读源码更有用，其余文件走 fileData。
 
 ## 文件预览协议
 
 - 客户端发 `{ type: "read_file", path }` → 服务端回 `{ type: "file_content", path, name, text, truncated, binary, lines, size }`。
-- 只读文件前 **512KB**（`MAX_PREVIEW_BYTES`）；**内容嗅探决定文本还是二进制**：无 NUL、控制字符占比 < 2% 即按文本预览（`looksLikeText`）——未知/无扩展名文件（jsonl、.log.1 等）也能打开；**文本解码带 GBK 回退**（`decodeText`：严格 UTF-8 失败 → GBK → latin1，预览/内联附件/行附件都用它），Windows 老中文文件不再乱码；二进制返回 `binary: true`，`text` 为前 4KB 的**十六进制视图**（`hexDump`，前端 `.fp-hex` 渲染，可下载完整文件）。路径经 `resolve + relative` 校验，`..` 越界直接拒。
+- 只读文件前 **512KB**（`MAX_PREVIEW_BYTES`）；**内容嗅探决定文本还是二进制**：无 NUL、控制字符占比 < 2% 即按文本预览（`looksLikeText`）——未知/无扩展名文件（jsonl、.log.1 等）也能打开；**文本解码带 GBK 回退**（`decodeText`：严格 UTF-8 失败 → GBK → latin1，预览/行附件都用它），Windows 老中文文件不再乱码；二进制返回 `binary: true`，`text` 为前 4KB 的**十六进制视图**（`hexDump`，前端 `.fp-hex` 渲染，可下载完整文件）。路径经 `resolve + relative` 校验，`..` 越界直接拒。
 - **媒体预览走 HTTP**：image/video 经 `/api/file?clientId=…&path=…` 流式返回（`sendFile` 支持 Range），路径按**该客户端的会话 cwd**（打开的项目）解析，而非服务启动目录——两者可能不一致；`clientId` 缺失或会话不存在时回退到服务启动 `CWD`。路径校验统一走 `workspacePath()`（agent-service 导出）。
 - **HTML 渲染走目录映射的 HTTP**：`/api/preview/<工作区相对路径>`（机器浏览的绝对路径加 `__abs__/` 前缀，各段 URI 编码），iframe 文档 URL 自带文件所在目录，页面里的相对引用（`<link href="../web/src/styles.css">`、`./app.js`、图片…）按浏览器正常语义解析加载，无需改写 HTML；HTML 文档带沙箱 CSP（`sandbox`，`?allowJs=1` 时 `sandbox allow-scripts`，永不加 `allow-same-origin`），其余子资源按真实 content-type 直送；`..` 越界由 `workspacePath()` 拒绝（路由层归一化兜底则落进 SPA 404，不会泄露文件）。
 - 行号语义：**尾随换行不产生空行**（`countLines` 已修正），前后端 split 逻辑必须一致。

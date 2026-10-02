@@ -12,7 +12,7 @@
  * 纯函数 + 零副作用，便于单测（见 tests/unit/sdk-origin.test.ts）。
  */
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const PKG = "@earendil-works/pi-coding-agent";
@@ -59,12 +59,38 @@ export function compareVersions(a: string, b: string): number {
 }
 
 /**
- * 启动横幅要打印的一行（不含前缀），以及是否需要提示「你升的不是服务在用的那份」。
+ * 本进程实际加载的是否为**随包自带**的那份（未被钩子重定向到祖先链副本）。
+ * 判据：自带副本是解析顺序上的第一份，且钩子只在祖先副本**严格更新**时才重定向
+ * （同版本继续用自带），所以 running == copies[0] ⟺ 自带在用。copies 为空
+ * （如部分桌面/容器布局）时按自带算 —— 那本来就是唯一能加载的份。
+ * UI 用它决定是否亮「安装全局引擎并切换」入口（issue #321）。
+ */
+export function isBundledInUse(copies: SdkCopy[], effectiveVersion: string, loadedEntry?: string): boolean {
+	if (copies.length === 0) return true;
+	// 显式 PI_WEB_SDK=global 会在同版本时也重定向到祖先副本：此时版本号分不出两份，
+	// 调用方给出实际解析到的入口（import.meta.resolve），按路径归属判断。
+	if (loadedEntry) {
+		const entry = loadedEntry.startsWith("file:") ? fileURLToPath(loadedEntry) : loadedEntry;
+		return entry.startsWith(dirname(copies[0]!.path) + sep);
+	}
+	return effectiveVersion === copies[0]!.version;
+}
+
+/**
+ * 启动横幅要打印的一行（不含前缀），以及是否需要提示「本进程在用的不是最新的那份」。
  * `effective` 为空时（没找到副本）返回空串，调用方照旧只打印版本号。
+ *
+ * #321 起默认会自动跟随更新的那份（resolve-global-sdk），所以这条提示出现即意味着：
+ * 进程启动时没跟上（升级发生在启动后 / 旧构建没注入钩子），或用户显式
+ * PI_WEB_SDK=bundled 钉死了自带副本 —— 文案把两种出路都写明。
  */
 export function sdkOriginNote(copies: SdkCopy[], effectiveVersion: string): string | null {
 	const shadowed = copies.slice(1);
 	const newer = shadowed.filter((c) => compareVersions(c.version, effectiveVersion) > 0);
 	if (newer.length === 0) return null;
-	return `a newer pi SDK is installed elsewhere (${newer.map((c) => `v${c.version}`).join(", ")}) but pi-web-ui runs its own bundled copy (v${effectiveVersion}).`;
+	return (
+		`a newer pi SDK is installed on this machine (${newer.map((c) => `v${c.version}`).join(", ")}) ` +
+		`but this process runs v${effectiveVersion} — restart to follow it (default), ` +
+		`or set PI_WEB_SDK=bundled to pin the bundled copy.`
+	);
 }

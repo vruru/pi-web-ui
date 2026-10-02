@@ -358,3 +358,13 @@ export function renderPromptTemplate(
 export function renderDefaultPrompt(texts: Record<string, string>): string {
 	return renderPromptTemplate(DEFAULT_PROMPT_TEMPLATE, texts, undefined);
 }
+
+const CJK_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/gu;
+
+/** 粗略 token 估算（设置面板预览用，非精确分词，无 tokenizer 依赖）：
+ *  CJK 字符（汉字/假名/谚文）≈ 1 token/字，其余字符 ≈ 1 token / 4 字符。 */
+export function estimatePromptTokens(text: string): number {
+	if (!text) return 0;
+	const cjk = text.match(CJK_RE)?.length ?? 0;
+	return Math.ceil(cjk + (text.length - cjk) / 4);
+}

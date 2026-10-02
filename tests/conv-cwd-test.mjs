@@ -23,7 +23,7 @@ const isolated = isolatedTestEnv("conv-cwd-test");
 process.once("exit", isolated.cleanup);
 const REPO_ROOT = fileURLToPath(new globalThis.URL("../", import.meta.url));
 
-const PORT = 19016;
+const PORT = Number(process.argv[2] || 19016);
 if (await portUp(PORT)) throw new Error(`Port ${PORT} is already occupied`);
 const PROJ = REPO_ROOT;
 const A = mkdtempSync(join(tmpdir(), "pi-proj-a-"));

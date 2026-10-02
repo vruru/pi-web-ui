@@ -1,9 +1,11 @@
 /**
- * Goal / review — protocol smoke test.
+ * Goal — protocol smoke test.
  *
- * Verifies the full wire path for set_goal / goal_status / clear_goal WITHOUT
- * triggering a real review (a review needs an actual LLM call, so it's skipped
- * here — this test only proves the status machine + socket round-trip).
+ * Verifies the full wire path for set_goal / goal_status / clear_goal on the
+ * goal-mode-2.0 path (the server spawns an executor conversation and drives the
+ * loop; the reviewer IS this conversation). No LLM call is required for the
+ * status machine + socket round-trip — the executor run may fail without
+ * credentials, which the test tolerates.
  *
  * Runs against the compiled server on a dedicated port (8901).
  */
@@ -111,11 +113,12 @@ async function run() {
 	await sleep(300);
 	const c = await connect();
 
-	// 1) Set a locked goal with a reviewer model and maxRounds.
+	// 1) Set a locked goal (wizard-model memory slot + maxRounds + executor model).
 	c.send({
 		type: "set_goal",
 		goal: "把首页标题改为 Goal Buddy",
 		reviewModel: "openai/gpt-4o-mini",
+		execModel: "openai/gpt-4o-mini",
 		maxRounds: 2,
 		locked: true,
 	});
@@ -125,11 +128,21 @@ async function run() {
 	);
 	check("set_goal sets status", g1.status.goal === "把首页标题改为 Goal Buddy", JSON.stringify(g1.status));
 	check(
-		"locked + reviewModel + maxRounds carried",
-		g1.status.locked === true && g1.status.reviewModel === "openai/gpt-4o-mini" && g1.status.maxRounds === 2,
+		"locked + execModel + maxRounds carried",
+		g1.status.locked === true && g1.status.execModel === "openai/gpt-4o-mini" && g1.status.maxRounds === 2,
 		JSON.stringify(g1.status),
 	);
 	check("verdict resets to pending", g1.status.verdict === "pending");
+	check(
+		"phase 字段存在（目标模式 2.0：idle/executing/reviewing/blocked）",
+		["idle", "executing", "reviewing", "blocked"].includes(g1.status.phase),
+		g1.status.phase,
+	);
+	check(
+		"reviewMode 已从协议移除（只剩委托一条路径）",
+		g1.status.reviewMode === undefined,
+		String(g1.status.reviewMode),
+	);
 
 	// 2) Clear it.
 	c.send({ type: "clear_goal" });

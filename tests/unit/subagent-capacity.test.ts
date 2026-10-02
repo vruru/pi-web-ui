@@ -37,6 +37,7 @@ function fixture() {
 	Object.assign(client, {
 		convs: new Map([[main.id, main]]),
 		pendingSubagentStarts: 0,
+		turnEndWaiters: new Map(),
 		activeId: main.id,
 		agentDir: "/tmp",
 		settingsSvc: { current: {} },

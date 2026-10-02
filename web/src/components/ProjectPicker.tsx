@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FiFolder } from "react-icons/fi";
+import { FiFolder, FiX } from "react-icons/fi";
 import { useT } from "../i18n";
 import { appSend } from "../app-globals";
 
@@ -242,6 +242,9 @@ export function ProjectPicker({
 						}}
 					>
 						＋ {t("addWorkspaceRoot")}
+					</button>
+					<button type="button" className="cwd-close" title={t("close")} aria-label={t("close")} onClick={onClose}>
+						<FiX />
 					</button>
 				</div>
 				<div className="cwd-picker-row">

@@ -1,0 +1,9 @@
+{
+	"name": "desktop-use-plugin",
+	"private": true,
+	"type": "module",
+	"description": "pi-web-ui 桌面控制插件（运行时输入依赖由插件服务端自动安装，见 index.mjs ensureDeps）",
+	"dependencies": {
+		"@nut-tree-fork/nut-js": "^4.2.6"
+	}
+}

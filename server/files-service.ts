@@ -5,12 +5,13 @@
  * 全部为无状态 fs 操作 + 两个自持的 watcher（当前列出目录、git dir），
  * 经 FilesHost 回调与 ClientSession 解耦。
  */
-import { Dirent, mkdirSync, readFileSync, statSync, writeFileSync, watch } from "node:fs";
+import { Dirent, existsSync, mkdirSync, readFileSync, statSync, writeFileSync, watch } from "node:fs";
 import { homedir } from "node:os";
-import { resolve, relative, sep } from "node:path";
+import { resolve, relative, sep, isAbsolute } from "node:path";
 import type { ServerMessage, FileEntry, FileSearchResult } from "./protocol.js";
 import { pick, type ServerLang } from "./i18n.js";
 import { previewKind, looksLikeText, decodeText, hexDump, countLines } from "./text-sniff.js";
+import { extractOfficeText, isOfficeFile, OFFICE_MAX_FILE_BYTES } from "./office-parse.js";
 import { gitDirOf, isNotRepoError, scmStatus, scmHistory, scmFileDiff, scmCommitDetail } from "./scm.js";
 
 export const IS_WIN32 = process.platform === "win32";
@@ -48,10 +49,14 @@ export function desktopDirWire(homeWire: string): string {
 
 /** wire 路径统一用 "/"。绝对 = posix "/..."；win32 还有 "C:/..." / 裸 "C:"。
  *  机器浏览（越过工作区根换盘符）发送这些路径；工作区相对树不会产生它们（Windows
- *  文件名不能含 ":"，相对路径经 relative() 归一化后也不以 "/" 开头）。 */
+ *  文件名不能含 ":"，相对路径经 relative() 归一化后也不以 "/" 开头）。
+ *  win32 还必须把盘符相对路径（"D:x"，冒号后无分隔符 —— resolve 会落到该盘的
+ *  当前目录）与 UNC（"\\host\share"；"//host/share" 已被上面的 "/" 前缀覆盖）
+ *  判为绝对：这些形态若被当工作区相对路径处理，会在跨盘/UNC 下绕过 ".." 检查
+ *  逃出工作区。posix 上 "C:x" 是合法文件名，故盘符检查必须限定在 win32。 */
 export function isAbsoluteWirePath(p: string): boolean {
-	if (p === MACHINE_ROOT || p.startsWith("/")) return true;
-	return IS_WIN32 && /^[A-Za-z]:([\\/]|$)/.test(p);
+	if (p === MACHINE_ROOT || p.startsWith("/") || p.startsWith("\\\\")) return true;
+	return IS_WIN32 && /^[A-Za-z]:/.test(p);
 }
 
 /** 去掉结尾 "/"（保留 posix 根 "/" 本身），归一成规范的 wire 形式。前端面包屑
@@ -134,7 +139,11 @@ function ignoredEntries(): Set<string> {
 export function workspacePath(root: string, raw: string): { abs: string; rel: string } | null {
 	const abs = resolve(root, raw);
 	const rawRel = relative(root, abs);
-	if (rawRel.startsWith("..") || rawRel.includes(`${sep}..`)) return null;
+	// 只查 ".." 拦不住 Windows 的跨盘/UNC：relative("C:/a","D:/x") 与
+	// relative("C:/a","//h/s") 返回绝对路径（"D:\x"、"\\h\s\"），不以 ".." 开头；
+	// 盘符相对路径（"D:x"）经 resolve 落到该盘当前目录后也归此形 —— 必须同时
+	// 拒绝 isAbsolute 的结果，否则 "D:x" 这类输入可逃出工作区根。
+	if (rawRel.startsWith("..") || rawRel.includes(`${sep}..`) || isAbsolute(rawRel)) return null;
 	// Normalize to forward slashes: the wire protocol and the frontend always
 	// use "/", but relative() returns "\\" on Windows.
 	return { abs, rel: rawRel.split(sep).join("/") };
@@ -783,6 +792,30 @@ export class FilesService {
 				return;
 			}
 			const name = relPath.split(/[\\/]/).pop() ?? relPath;
+			// Office 文档（docx/xlsx/xlsm）：转 Markdown 文本下发，前端按 Markdown
+			// 渲染表格/段落——文件树、附件、预览弹窗随处可看。失败回落到底下旧分支。
+			if (isOfficeFile(name) && stat.size <= OFFICE_MAX_FILE_BYTES) {
+				try {
+					const data = await fs.readFile(abs);
+					const office = extractOfficeText(name, data);
+					if (office) {
+						this.host.emit({
+							type: "file_content",
+							path: rel,
+							name,
+							text: office.text,
+							truncated: office.truncated || data.length < stat.size,
+							binary: false,
+							kind: "text",
+							lines: countLines(Buffer.from(office.text)),
+							size: stat.size,
+						});
+						return;
+					}
+				} catch {
+					/* 解析失败（加密/损坏/非预期结构）→ 回落旧的二进制嗅探分支 */
+				}
+			}
 			const kind = previewKind(name);
 			// Media previews stream over the /api/file HTTP endpoint, so only
 			// metadata is sent here — the raw bytes never touch the socket.
@@ -935,10 +968,14 @@ export class FilesService {
 			} else {
 				wp = { abs: root, rel: "" };
 			}
-			// Basename only — strips any path separators / ".." the name carries;
-			// reject empty results and Windows-illegal characters outright.
-			const base = name.split(/[\\/]/).pop() ?? "";
-			const safe = (base.replace(/[/:*?"<>|\x00-\x1f]/g, "_").trim() || "file").slice(0, 200);
+			// 与 createEntry/renameEntry 同口径（this.sanitizeName）：只取 basename，
+			// 空 / "." / ".." / Windows 保留名 / 尾点空格一律拒绝 —— 旧的内联替换
+			// 会放过 "con.txt"、"a.." 这类「建了删不掉」的名字。
+			const safe = this.sanitizeName(name);
+			if (!safe) {
+				emitErr(`文件名不合法：${name}`, `Invalid file name: ${name}`);
+				return;
+			}
 			const abs = resolve(wp.abs, safe);
 			let uploadRel: string;
 			if (absDir) {
@@ -972,7 +1009,14 @@ export class FilesService {
 				return;
 			}
 			mkdirSync(wp.abs, { recursive: true });
-			writeFileSync(abs, buf);
+			if (existsSync(abs)) {
+				emitErr(`已存在：${uploadRel}`, `Already exists: ${uploadRel}`);
+				return;
+			}
+			// wx：与预检之间存在窗口（TOCTOU），并发同名上传走 EEXIST 落到 catch
+			// 报错 —— 两个上传路径语义统一为「目标已存在拒绝」，绝不静默截断覆盖
+			// （/api/file-transfer/upload 一直是 open(dest, "wx") 拒绝）。
+			writeFileSync(abs, buf, { flag: "wx" });
 			this.host.emit({
 				type: "notice",
 				level: "info",
@@ -1296,32 +1340,34 @@ export class FilesService {
 		try {
 			const fsp = await import("node:fs/promises");
 			const { dirname } = await import("node:path");
-			const t = this.resolveOpTarget(path);
+			const trimmed = path.trim();
+			const t = !trimmed ? { abs: resolve(this.host.getCwd()) } : this.resolveOpTarget(trimmed);
 			if (!t) {
 				err("此处不可定位：" + path, "Cannot reveal here: " + path);
 				return;
 			}
-			const st = await fsp.stat(t.abs).catch(() => null);
+			const abs = t.abs;
+			const st = await fsp.stat(abs).catch(() => null);
 			if (!st) {
 				err("文件不存在：" + path, "Not found: " + path);
 				return;
 			}
 			const isDir = st.isDirectory();
-			const segs = path.split("/");
-			const base = segs[segs.length - 1] ?? path;
+			const segs = trimmed.split("/");
+			const base = !trimmed ? t.abs.split(/[\\/]/).pop() || t.abs : (segs[segs.length - 1] ?? trimmed);
 			if (process.platform === "win32") {
 				// /select, 与路径分两个 argv 传（explorer 对此格式稳定支持，路径含空格也无碍）。
 				// 目录传 /n, 强制打开新窗口，防止若该目录已在后台打开时被 Windows 静默复用且因反抢焦点机制不置顶。
 				await this.spawnDetached(
 					"explorer.exe",
-					isDir ? ["/n,", t.abs] : ["/select,", t.abs],
+					isDir ? ["/n,", abs] : ["/select,", abs],
 					"已在资源管理器中显示：" + base,
 					"Revealed in File Explorer: " + base,
 				);
 			} else if (process.platform === "darwin") {
 				await this.spawnDetached(
 					"open",
-					isDir ? [t.abs] : ["-R", t.abs],
+					isDir ? [abs] : ["-R", abs],
 					"已在访达中显示：" + base,
 					"Revealed in Finder: " + base,
 				);
@@ -1329,7 +1375,7 @@ export class FilesService {
 				// Linux 无统一选中语义：打开其父目录（目录则打开自身）。
 				await this.spawnDetached(
 					"xdg-open",
-					[isDir ? t.abs : dirname(t.abs)],
+					[isDir ? abs : dirname(abs)],
 					"已打开所在目录：" + base,
 					"Opened containing folder: " + base,
 				);

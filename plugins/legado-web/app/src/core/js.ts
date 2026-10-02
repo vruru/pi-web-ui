@@ -77,6 +77,7 @@ function stripJsWrapper(code: string): string {
 /** 同步经代理请求（对标 java.ajax/connect 的同步语义；浏览器会有 deprecation 警告但可用）。
  *  服务端（插件的规则引擎）会注入同步 transport（worker + Atomics 桥），走那条路。 */
 function syncProxy(target: string, method = 'GET', headers: Record<string, string> = {}, body?: string): string {
+  checkRuleDeadline() // 时间预算超限后不再发起新的同步 HTTP
   const injected = getSyncTransport()
   if (injected) return injected(target, method, headers, body)
   const xhr = new XMLHttpRequest()
@@ -367,6 +368,24 @@ const JS_PARAMS = [
   'infoMap',
 ] as const
 
+/** 书源 JS 的时间预算：单条规则求值超过该时长按失败处理（原生 JS 无法抢占同步代码，
+ *  这里是协作式预算：沙箱属性访问与同步 HTTP 前检查 + 求值完成后兜底判定；纯 CPU
+ *  死循环由引擎 worker 的任务超时终止兜底，见 engine-bridge.mjs / README「书源安全」）。 */
+const RULE_JS_BUDGET_MS = 3_000
+
+let ruleDeadlineAt = 0
+
+/** 规则 JS 超时错误的统一形态（调用方按规则失败捕获，不崩 worker/页面）。 */
+function ruleTimeoutError(): Error {
+  const e = new Error(`规则 JS 执行超时（>${RULE_JS_BUDGET_MS / 1000}s），已中止本次求值`)
+  e.name = 'RuleJsTimeout'
+  return e
+}
+
+function checkRuleDeadline(): void {
+  if (ruleDeadlineAt && Date.now() > ruleDeadlineAt) throw ruleTimeoutError()
+}
+
 /** 这些名字不进沙箱，仍由函数参数/全局提供（避免 with 遮住参数与内置对象） */
 const SANDBOX_RESERVED = new Set<string>([
   ...JS_PARAMS,
@@ -405,25 +424,55 @@ const SANDBOX_RESERVED = new Set<string>([
   'window',
 ])
 
-/** 按源隔离的 JS 沙箱：隐式全局写进本源作用域，不污染其他源（对标 SharedJsScope） */
+/** 按源隔离的 JS 沙箱：隐式全局写进本源作用域，不污染其他源（对标 SharedJsScope）。
+ *  三个 trap 顺带做时间预算检查——规则循环里对作用域/java 对象的属性访问是高频点，
+ *  慢规则大多在这里踩线终止（协作式，挡不住纯局部变量死循环）。 */
 function makeSandbox(jsScope: Record<string, unknown>): Record<string, unknown> {
   return new Proxy(jsScope, {
     // 只接管“非常规”名字；参数/内置对象/包装器自用变量一律放行，否则会遮住它们
-    has: (_t, k) => typeof k === 'string' && !SANDBOX_RESERVED.has(k) && !k.startsWith('__legado_'),
-    get: (t, k) => (k === Symbol.unscopables ? undefined : (t as Record<string | symbol, unknown>)[k]),
+    has: (_t, k) => {
+      checkRuleDeadline()
+      return typeof k === 'string' && !SANDBOX_RESERVED.has(k) && !k.startsWith('__legado_')
+    },
+    get: (t, k) => {
+      checkRuleDeadline()
+      return k === Symbol.unscopables ? undefined : (t as Record<string | symbol, unknown>)[k]
+    },
     set: (t, k, v) => {
+      checkRuleDeadline()
       ;(t as Record<string | symbol, unknown>)[k] = v
       return true
     },
   })
 }
 
+/** 在时间预算内执行一段规则求值：已有活动预算（嵌套调用）则沿用外层 deadline。 */
+function withRuleBudget<T>(fn: () => T): T {
+  const nested = ruleDeadlineAt !== 0
+  if (!nested) ruleDeadlineAt = Date.now() + RULE_JS_BUDGET_MS
+  try {
+    return fn()
+  } finally {
+    if (!nested) ruleDeadlineAt = 0
+  }
+}
+
 /** 把 <js>xxx</js> / @js:xxx 剥出来执行，返回执行结果。
  *  对标 Rhino：松散模式（隐式全局不报错，承接到按源隔离的 jsScope 里），
- *  返回 completion value（多语句以最后表达式值为准）。 */
+ *  返回 completion value（多语句以最后表达式值为准）。
+ *  外层包时间预算（>3s 抛 RuleJsTimeout，调用方按规则失败捕获）——预算超限后
+ *  不再进入备选尝试（那会把慢代码再跑一遍）。 */
 export function evalJsRule(code: string, ctx: JsContext, scope: Scope): unknown {
   const body = stripJsWrapper(code).trim()
   if (!body) return ctx.result ?? ''
+  return withRuleBudget(() => {
+    const v = evalJsRuleBody(body, ctx, scope)
+    checkRuleDeadline() // 求值完成但已超预算 → 同样按失败处理，不返回慢结果
+    return v
+  })
+}
+
+function evalJsRuleBody(body: string, ctx: JsContext, scope: Scope): unknown {
   const java = makeJava(scope, ctx)
   const cookie = { getCookie: (_t: unknown, _k?: unknown) => readCache('cookie.' + String(_t ?? '')) ?? '' }
   // cache 绑定：与 java.cache 同一实现（规则里两种写法都有）
@@ -490,19 +539,23 @@ export function applyTemplate(
     if (nested) {
       const nv = nested(e, ctx.result)
       if (nv !== undefined) return nv
-    }    try {
-      const java = scope ? makeJava(scope, ctx) : undefined
-      const v = new Function(
-        'key',
-        'page',
-        'baseUrl',
-        'result',
-        'java',
-        'source',
-        'book',
-        `return (${e});`,
-      )(ctx.key ?? '', ctx.page ?? 1, ctx.baseUrl ?? '', augmentInput(ctx.result ?? ''), java, ctx.source ?? null, ctx.book ?? null)
-      return v == null ? '' : String(v)
+    }
+    // 模板表达式也吃时间预算（java.get 等同步 HTTP 在这里发起）；超时按空结果处理
+    try {
+      return withRuleBudget(() => {
+        const java = scope ? makeJava(scope, ctx) : undefined
+        const v = new Function(
+          'key',
+          'page',
+          'baseUrl',
+          'result',
+          'java',
+          'source',
+          'book',
+          `return (${e});`,
+        )(ctx.key ?? '', ctx.page ?? 1, ctx.baseUrl ?? '', augmentInput(ctx.result ?? ''), java, ctx.source ?? null, ctx.book ?? null)
+        return v == null ? '' : String(v)
+      })
     } catch {
       return ''
     }

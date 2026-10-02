@@ -14,14 +14,14 @@
 //     查不到被禁用的技能；
 //   - 与 SDK 同名工具撞名时 customTools 按 name 覆盖（bash 本体是先例）。
 //
-// 双语约定（issue #91）：definition 走 bilingual(en, zh) 内联双语；per-call
+// 文案约定：工具 definition（description/promptSnippet/promptGuidelines）为纯英文；per-call
 // 返回文本按 lang 取 pick(lang, zh, en, key)，缺表回落英文内联。
 // ---------------------------------------------------------------------------
 
 import { statSync, readFileSync } from "node:fs";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { bilingual, pick, type ServerLang } from "./i18n.js";
+import { pick, type ServerLang } from "./i18n.js";
 import { SKILL_TOOL_NAME } from "./tool-manager.js";
 import { decodeText } from "./text-sniff.js";
 
@@ -84,18 +84,11 @@ export function makeSkillTool(host: SkillToolHost, lang?: () => ServerLang): Too
 	return defineTool({
 		name: SKILL_TOOL_NAME,
 		label: "Load a skill",
-		description: bilingual(
+		description:
 			"Load a skill's full text by its exact name (see the <available_skills> catalog in the system prompt). " +
-				"Prefer this over reading the skill file with the read tool — no path guessing needed. " +
-				"Call without a name to list the current catalog.",
-			"按技能精确名加载其全文（名录见系统提示词里的 <available_skills>）。" +
-				"优先用它，不要自己拼路径调 read 工具读技能文件。" +
-				"不给名则返回当前名录。",
-		),
-		promptSnippet: bilingual(
-			"load a skill's full text by name (skill tool, preferred over read)",
-			"按名加载技能全文（skill 工具，优先于 read）",
-		),
+			"Prefer this over reading the skill file with the read tool — no path guessing needed. " +
+			"Call without a name to list the current catalog.",
+		promptSnippet: "load a skill's full text by name (skill tool, preferred over read)",
 		parameters: Type.Object({
 			name: Type.Optional(
 				Type.String({

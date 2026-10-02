@@ -5,16 +5,7 @@
  */
 
 export type PluginPermissionFamily =
-	| "fs"
-	| "fs:read"
-	| "fs:write"
-	| "ui"
-	| "tools"
-	| "http"
-	| "chat"
-	| "net"
-	| "dom"
-	| "dom:anchor";
+	"fs" | "fs:read" | "fs:write" | "ui" | "tools" | "http" | "chat" | "net" | "dom" | "dom:anchor";
 
 export interface WsEntry {
 	name: string;
@@ -35,17 +26,7 @@ export interface UiSelectOption {
 }
 
 export type UiItemKind =
-	| "view"
-	| "action"
-	| "badge"
-	| "menu"
-	| "page"
-	| "organizer"
-	| "divider"
-	| "toggle"
-	| "input"
-	| "progress"
-	| "select";
+	"view" | "action" | "badge" | "menu" | "page" | "organizer" | "divider" | "toggle" | "input" | "progress" | "select";
 
 export interface UiContribution {
 	id: string;
@@ -152,13 +133,7 @@ export interface PluginHostUi {
 /** host.llm.complete：孤立无工具的一次性补全（不建对话、不进历史）。
  *  需要 manifest.permissions 含 "llm"（花用户自己的模型额度）。 */
 export interface PluginHostLlm {
-	complete(req: {
-		prompt: string;
-		system?: string;
-		model?: string;
-		maxChars?: number;
-		timeoutMs?: number;
-	}): Promise<{
+	complete(req: { prompt: string; system?: string; model?: string; maxChars?: number; timeoutMs?: number }): Promise<{
 		ok: boolean;
 		text?: string;
 		model?: string;
@@ -166,6 +141,19 @@ export interface PluginHostLlm {
 		error?: string;
 	}>;
 }
+
+/** 工具拦截守卫看到的 pre 请求（只对 bash/read 生效，全量见 server/plugin-tool-guard.ts）。 */
+export interface ToolGuardPreRequest {
+	toolName: "bash" | "read";
+	params: unknown;
+	conversationId?: string;
+}
+
+/** 工具 pre 决策：allow 放行 / deny 拒绝 / ask 待确认（暂按拒绝执行）。 */
+export type ToolGuardPreDecision =
+	| { decision: "allow" }
+	| { decision: "deny"; reason?: string; reasonEn?: string }
+	| { decision: "ask"; reason?: string; reasonEn?: string };
 
 /** 插件服务端入口拿到的宿主接口（精简：全量见 server/plugins.ts PluginHost）。 */
 export interface PluginHost {
@@ -175,6 +163,12 @@ export interface PluginHost {
 	sendTo(clientId: string, payload: unknown): void;
 	onAttach(handler: (clientId: string) => void): () => void;
 	onToolEvent(handler: (ev: unknown) => void): () => void;
+	/** 注册工具 pre 拦截守卫（只对 bash/read 生效；要 "tools" 能力）。 */
+	onToolPre(
+		handler: (req: ToolGuardPreRequest) => ToolGuardPreDecision | void | Promise<ToolGuardPreDecision | void>,
+	): () => void;
+	/** 注册工具 post 编辑守卫（只对 bash/read 生效；要 "tools" 能力）。 */
+	onToolPost(handler: (req: unknown) => unknown): () => void;
 	onRunEvent(handler: (ev: unknown) => void): () => void;
 	getActiveConversation(): unknown;
 	onConversationChanged(handler: () => void): () => void;
@@ -219,6 +213,11 @@ export interface PluginHost {
 	 *  200 条，单条截断 500 字符，不落盘）；error 级同时走 console.error。
 	 *  用户在设置面板“界面插件”页点某插件的“日志”按需查看（级别过滤 + 清空）。 */
 	log(level?: "debug" | "info" | "warn" | "error", ...args: unknown[]): void;
+	/** 登记一条**自建**的可逆副作用（自建 setInterval / event 监听 / WebSocket…）：
+	 *  返回的注销函数与插件反激活**都会**调 dispose。宿主自己的每个注册面已在内部
+	 *  走同一个 effect 栈，这里只用于「宿主管不到的那些」—— 挂进来就不怕漏注销
+	 *  （热重载后定时器叠加、监听器堆积都是这个漏法的症状）。dispose 请写成幂等的。 */
+	effect(label: string, dispose: () => void): () => void;
 	/** 无头调用：把外部通道文本投给 agent（要 "chat" 能力；宿主未接 chatProvider
 	 *  时 reject（由 chatWait 包成 {ok:false}，插件侧用 chatWait 更省心）。 */
 	chat(req: { text: string; accountId?: string }): Promise<{
@@ -259,12 +258,7 @@ export interface PluginHost {
 		}>;
 	};
 	/** 常驻后台任务（顶栏「后台任务」面板；返回 update/unregister）。 */
-	registerBackgroundTask(task: {
-		id: string;
-		label: string;
-		stop?: () => void;
-		status?: string;
-	}): {
+	registerBackgroundTask(task: { id: string; label: string; stop?: () => void; status?: string }): {
 		update(next: Partial<{ label: string; status: string; stop: () => void }>): void;
 		unregister(): void;
 	};
@@ -340,10 +334,9 @@ export declare function defineView(view: PluginViewModule): PluginViewModule;
 export declare function defineRenderer(
 	renderers: Record<string, (code: string, ctx: PluginViewContext) => HTMLElement | null>,
 ): Pick<PluginViewModule, "renderers">;
-export declare function actionHandler(map: Record<string, (value?: string) => void>): (
-	itemId: string,
-	value?: string,
-) => void;
+export declare function actionHandler(
+	map: Record<string, (value?: string) => void>,
+): (itemId: string, value?: string) => void;
 export declare function onUiAction(action: string, handler: (itemId: string, value?: string) => void): () => void;
 export declare function getSetting<T>(host: PluginHost, key: string, fallback: T): T;
 export declare function selectOptions(list: Array<string | UiSelectOption>): UiSelectOption[];

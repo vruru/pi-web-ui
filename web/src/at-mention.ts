@@ -10,6 +10,7 @@
  * 能触发（`看` 不是 ASCII 单词字符），而 `mail@test` 不触发（`l` 是）。
  * 不依赖 React/DOM，vitest 直接单测。
  */
+import { SKILL_NAMESPACE } from "./slash-filter.js";
 
 /** 光标前的一个 `@` 词元：start = `@` 下标，query = `@` 之后到光标的串。 */
 export interface AtToken {
@@ -95,7 +96,7 @@ export function mapFileHits(providerLabel: string, raw: unknown, limit = 10): At
 			providerLabel,
 			title: o.name,
 			hint: o.path,
-			text: o.name,
+			text: `@${o.name}`,
 			attachments: [
 				{
 					path: o.path,
@@ -144,6 +145,94 @@ export function normalizeAtHits(providerId: string, providerLabel: string, raw: 
 		});
 	}
 	return out;
+}
+
+/** 技能命令精简接口（同 SlashCommandInfo，避免循环依赖）。 */
+export interface SkillCommandLike {
+	name: string;
+	source: "builtin" | "extension" | "prompt" | "skill" | "plugin";
+	description?: string;
+	descriptionEn?: string;
+	argumentHint?: string;
+}
+
+/** 技能命令 → `@` 命中（支持 @skill:name 或 @name 补全）。
+ *  名称匹配优先于描述匹配，防止短查询被描述泛匹配挤占。 */
+export function mapSkillHits(
+	providerLabel: string,
+	slashCommands: readonly SkillCommandLike[],
+	query: string,
+	limit = 15,
+	descResolver?: (cmd: SkillCommandLike) => string,
+): AtHit[] {
+	if (!Array.isArray(slashCommands) || limit <= 0) return [];
+	const q = String(query ?? "").toLowerCase();
+	const isPrefixed = q.startsWith(SKILL_NAMESPACE);
+	const cleanQ = isPrefixed ? q.slice(SKILL_NAMESPACE.length) : q;
+
+	const nameHits: AtHit[] = [];
+	const descHits: AtHit[] = [];
+
+	// 短查询仅匹配技能名；3 字符以上或显式 skill: 前缀时才扩展匹配描述，防单字泛匹配挤占文件/插件
+	const searchDesc = isPrefixed || cleanQ.length >= 3;
+
+	for (const cmd of slashCommands) {
+		if (cmd.source !== "skill") continue;
+		const bareName = cmd.name.startsWith(SKILL_NAMESPACE) ? cmd.name.slice(SKILL_NAMESPACE.length) : cmd.name;
+		const nameLower = bareName.toLowerCase();
+		const resolvedDesc = descResolver ? descResolver(cmd) : (cmd.description ?? "");
+		const descLower = resolvedDesc.toLowerCase();
+		const descEnLower = (cmd.descriptionEn ?? "").toLowerCase();
+
+		const hit: AtHit = {
+			providerId: "host:skills",
+			providerLabel,
+			title: bareName,
+			hint: resolvedDesc || `Skill ${bareName}`,
+			text: `@skill:${bareName}`,
+		};
+
+		if (!cleanQ) {
+			nameHits.push(hit);
+		} else if (nameLower.includes(cleanQ)) {
+			nameHits.push(hit);
+		} else if (searchDesc && (descLower.includes(cleanQ) || descEnLower.includes(cleanQ))) {
+			descHits.push(hit);
+		}
+	}
+
+	return [...nameHits, ...descHits].slice(0, Math.max(0, limit));
+}
+
+/** 4 桶合并与优先级排序：
+ *  1. 若 query 以 skill: 开头：skills 置顶。
+ *  2. 缺省或命中 ALL_PAGES_TRIGGERS：pages 置顶（页面触发词已由 pages 本身处理，默认顺序即保持页面优先）。
+ *  最终按 totalCap 截断。
+ */
+export function mergeAtHits(
+	buckets: {
+		pages?: AtHit[];
+		skills?: AtHit[];
+		files?: AtHit[];
+		plugins?: AtHit[];
+	},
+	query: string,
+	totalCap = 30,
+): AtHit[] {
+	const q = String(query ?? "").toLowerCase();
+	const pages = buckets.pages ?? [];
+	const skills = buckets.skills ?? [];
+	const files = buckets.files ?? [];
+	const plugins = buckets.plugins ?? [];
+
+	let ordered: AtHit[];
+	if (q.startsWith(SKILL_NAMESPACE)) {
+		ordered = [...skills, ...pages, ...files, ...plugins];
+	} else {
+		ordered = [...pages, ...skills, ...files, ...plugins];
+	}
+
+	return ordered.slice(0, Math.max(0, totalCap));
 }
 
 /** `@` 前允许的边界：行首，或下面这些字符之后（空白 + 中英文括号引号）。 */

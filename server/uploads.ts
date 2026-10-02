@@ -27,16 +27,32 @@ export function uploadRetentionDays(): number {
 	return Number.isFinite(v) && v >= 0 ? v : 14;
 }
 
-/** Persist an uploaded buffer; returns the absolute path + sanitized display name. */
+/** clientId 白名单：clientId 来自浏览器自报（ws hello），却直接拼进上传目录
+ *  路径 —— 只允许安全的单段字符（字母数字、:、_、-，1-128 长），否则可
+ *  "../" 遍历写任意目录。不匹配整条拒绝抛错：绝不能静默换 randomUUID，
+ *  上传目录必须与 ws 会话一一对应（编辑重问靠 uploadPath 按同一目录找回）。 */
+export const CLIENT_ID_PATTERN = /^[A-Za-z0-9:_-]{1,128}$/;
+
+/** Persist an uploaded buffer; returns the absolute path + sanitized display name.
+ *  clientId 不匹配白名单、displayName 为空 / "." / ".." 时抛错，调用方负责报错。 */
 export function saveUpload(
 	clientId: string,
 	name: string,
 	buf: Buffer,
 	dataDir = resolveDataDir(),
 ): { abs: string; displayName: string } {
+	if (!CLIENT_ID_PATTERN.test(clientId)) {
+		throw new Error(`Invalid upload clientId: ${JSON.stringify(clientId.slice(0, 129))}`);
+	}
+	// displayName 只取 basename 并拒绝 "." / ".."：防 ".." 与绝对路径拼接穿越
+	// （最终文件名带 <ts>- 前缀兜底，这里从源头收紧）。
+	const base = name.split(/[\\/]/).pop() ?? "";
+	if (!base || base === "." || base === "..") {
+		throw new Error(`Invalid upload name: ${JSON.stringify(name.slice(0, 129))}`);
+	}
+	const displayName = base.replace(/[\\/:*?"<>|\x00-\x1f]/g, "_").slice(0, 80) || "file";
 	const dir = join(uploadsRoot(dataDir), clientId);
 	mkdirSync(dir, { recursive: true });
-	const displayName = name.replace(/[\\/:*?"<>|\x00-\x1f]/g, "_").slice(0, 80) || "file";
 	const abs = join(dir, `${Date.now()}-${displayName}`);
 	writeFileSync(abs, buf);
 	return { abs, displayName };

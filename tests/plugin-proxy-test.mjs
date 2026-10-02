@@ -91,12 +91,15 @@ try {
 		void ping();
 	});
 
-	// WS attach 触发插件激活（代理前缀随之注册）
+	// WS attach 触发插件激活（代理前缀随之注册）。注意：前缀未注册时请求会落进 SPA
+	// catch-all 回 200 的 index.html，所以不能用 `.ok` 判活（issue #295 后 ready 先于
+	// attach 到达，attach 完成前的第一次轮询必是 SPA 200）——必须等到插件真实内容。
 	const sock = await connectWs();
 	let up = false;
 	for (let i = 0; i < 40; i++) {
 		try {
-			if ((await fetch(`${BASE}/liveserver/`)).ok) {
+			const r = await fetch(`${BASE}/liveserver/`);
+			if (r.ok && (await r.text()).includes("__livepreview/events")) {
 				up = true;
 				break;
 			}

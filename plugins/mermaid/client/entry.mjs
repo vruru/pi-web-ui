@@ -6,8 +6,10 @@
  * side and the host falls back to the raw code block if rendering fails.
  */
 
-/** CDN fallback used only when the bundled vendor module is unavailable. */
-const CDN_URL = "https://esm.sh/mermaid@11";
+/** CDN 兜底地址：钉死与 client/vendor bundle 完全相同的精确版本（12.0.0）——
+ *  浮动版本号会让兜底路径拉到行为不同的新版引擎（渲染/主题 API 可能漂移）。
+ *  CDN 仅作降级用途，生产环境应带上 vendor bundle（见 README）。 */
+const CDN_URL = "https://esm.sh/mermaid@12.0.0";
 const THEME_CHANGE_EVENT = "pi-web-ui:theme-change";
 
 let mermaidPromise = null;

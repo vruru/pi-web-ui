@@ -52,8 +52,11 @@ export interface DraftAttachment {
 	 * "conversation" = another conversation quoted by the user: `path` is unused,
 	 * the reference travels in conversationId (running, incl. subagents) or
 	 * sessionPath (history transcript); the AI fetches it via conversation_read.
+	 * "reference"/"lines" = 工作区路径引用（文件内容不进 prompt）。
+	 * "inline" = 旧版「全文注入」的遗留值（服务端按 reference 处理）。
+	 * 粘贴图片/上传文件没有 mode（path 为空）。
 	 */
-	mode: "inline" | "reference" | "lines" | "page" | "conversation";
+	mode?: "inline" | "reference" | "lines" | "page" | "conversation";
 	/** mode "conversation" + 引用运行中对话的 id（如 "c3"）。 */
 	conversationId?: string;
 	/** mode "conversation" + 引用历史会话的转录文件 path。 */
@@ -87,6 +90,27 @@ function attachmentIdentity(a: DraftAttachment): string | null {
 }
 
 /**
+ * 待发附件的「会话闸门」：会话身份一换，输入框里的待发附件就该跟正文草稿一样归零。
+ *
+ * 背景：正文草稿按 sessionId 存（ChatInput 切会话即清空、再恢复该会话的草稿），
+ * 而待发附件只活在 App 的内存里 —— 不跟着会话清，点「新建对话」后就会出现
+ * 「正文（含 @ 引用）已被新会话清掉、输入框上方那排 chips 还挂着上一个对话的文件」
+ * 的错位状态（chips 会随下一条消息一起发出去，等于把上个对话的引用带进新对话）。
+ *
+ * @param prev      上一次记下的会话身份（首次调用传空串）
+ * @param sessionId 快照里的当前会话身份（空串 = 未连接 / 会话未就绪的瞬时态）
+ * @returns key   下一次比较用的身份；clear 本次是否清空待发附件
+ */
+export function advanceComposerSession(prev: string, sessionId: string): { key: string; clear: boolean } {
+	// 瞬时态（断线重连、会话还没就绪）：不动水位也不清 ——
+	// 否则「快照里 sessionId 短暂为空」会被当成切了会话，把用户的待发附件误清。
+	if (!sessionId) return { key: prev, clear: false };
+	// 首次就绪：没有「上一个会话」可比，不清（挂载时本来也没有待发附件）。
+	if (!prev) return { key: sessionId, clear: false };
+	return { key: sessionId, clear: prev !== sessionId };
+}
+
+/**
  * 往待发附件末尾追加（宿主注入用）：已有的**原样保留**，只追加新的，重复项丢弃。
  *
  * @param current  输入框当前待发附件
@@ -106,4 +130,19 @@ export function appendDraftAttachments(current: DraftAttachment[], incoming: Dra
 		out.push(item);
 	}
 	return out;
+}
+
+/**
+ * 当会话切换时，判断是否应将上一个会话尚未发送的打字内容结转到新会话中：
+ * 仅当新会话为完全空白的对话（无任何历史消息）且新会话自身没有任何草稿时，才承接上一会话的输入。
+ */
+export function shouldCarryOverDraft(
+	pendingCarry: string | null | undefined,
+	targetMessageCount: number,
+	hasExistingDraftOnTarget: boolean,
+): boolean {
+	if (!pendingCarry || !pendingCarry.trim()) return false;
+	if (targetMessageCount > 0) return false;
+	if (hasExistingDraftOnTarget) return false;
+	return true;
 }

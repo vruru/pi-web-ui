@@ -3,99 +3,123 @@
  */
 
 function esc(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  }[c]));
+	return String(s ?? "").replace(
+		/[&<>"']/g,
+		(c) =>
+			({
+				"&": "&amp;",
+				"<": "&lt;",
+				">": "&gt;",
+				'"': "&quot;",
+				"'": "&#39;",
+			})[c],
+	);
 }
 
 function timeAgo(dateStr) {
-  if (!dateStr) return "";
-  const date = new Date(dateStr.endsWith("Z") ? dateStr : dateStr + "Z");
-  const now = new Date();
-  const diffSec = Math.floor((now - date) / 1000);
-  if (diffSec < 60) return "刚刚";
-  const diffMin = Math.floor(diffSec / 60);
-  if (diffMin < 60) return `${diffMin} 分钟前`;
-  const diffHour = Math.floor(diffMin / 60);
-  if (diffHour < 24) return `${diffHour} 小时前`;
-  const diffDay = Math.floor(diffHour / 24);
-  if (diffDay < 30) return `${diffDay} 天前`;
-  return date.toLocaleDateString();
+	if (!dateStr) return "";
+	const date = new Date(dateStr.endsWith("Z") ? dateStr : dateStr + "Z");
+	const now = new Date();
+	const diffSec = Math.floor((now - date) / 1000);
+	if (diffSec < 60) return "刚刚";
+	const diffMin = Math.floor(diffSec / 60);
+	if (diffMin < 60) return `${diffMin} 分钟前`;
+	const diffHour = Math.floor(diffMin / 60);
+	if (diffHour < 24) return `${diffHour} 小时前`;
+	const diffDay = Math.floor(diffHour / 24);
+	if (diffDay < 30) return `${diffDay} 天前`;
+	return date.toLocaleDateString();
 }
 
 function getVoterId() {
-  let id = localStorage.getItem("pi_feature_board_voter_id");
-  if (!id) {
-    id = "voter_" + Math.random().toString(36).slice(2, 11) + Date.now().toString(36);
-    localStorage.setItem("pi_feature_board_voter_id", id);
-  }
-  return id;
+	let id = localStorage.getItem("pi_feature_board_voter_id");
+	if (!id) {
+		id = "voter_" + Math.random().toString(36).slice(2, 11) + Date.now().toString(36);
+		localStorage.setItem("pi_feature_board_voter_id", id);
+	}
+	return id;
 }
 
 const STATUS_MAP = {
-  open: { label: "建议中", color: "var(--amber, #f59e0b)", bg: "color-mix(in srgb, var(--amber, #f59e0b) 15%, transparent)" },
-  planned: { label: "已规划", color: "var(--blue, #3b82f6)", bg: "color-mix(in srgb, var(--blue, #3b82f6) 15%, transparent)" },
-  in_progress: { label: "进行中", color: "var(--accent, #7c5cff)", bg: "color-mix(in srgb, var(--accent, #7c5cff) 15%, transparent)" },
-  completed: { label: "已完成", color: "var(--green, #10b981)", bg: "color-mix(in srgb, var(--green, #10b981) 15%, transparent)" },
-  closed: { label: "已关闭", color: "var(--text-dim, #666)", bg: "color-mix(in srgb, var(--text-dim, #666) 15%, transparent)" },
+	open: {
+		label: "建议中",
+		color: "var(--amber, #f59e0b)",
+		bg: "color-mix(in srgb, var(--amber, #f59e0b) 15%, transparent)",
+	},
+	planned: {
+		label: "已规划",
+		color: "var(--blue, #3b82f6)",
+		bg: "color-mix(in srgb, var(--blue, #3b82f6) 15%, transparent)",
+	},
+	in_progress: {
+		label: "进行中",
+		color: "var(--accent, #7c5cff)",
+		bg: "color-mix(in srgb, var(--accent, #7c5cff) 15%, transparent)",
+	},
+	completed: {
+		label: "已完成",
+		color: "var(--green, #10b981)",
+		bg: "color-mix(in srgb, var(--green, #10b981) 15%, transparent)",
+	},
+	closed: {
+		label: "已关闭",
+		color: "var(--text-dim, #666)",
+		bg: "color-mix(in srgb, var(--text-dim, #666) 15%, transparent)",
+	},
 };
 
 // 顶栏「需求墙」按钮接管（模块顶层注册 —— 写在 mount 里太晚，宿主按需加载
 // bundle 后 1.5s 内轮询派发，顶层同步注册才能接住；mount 只负责视图内容）
 (function registerBoardAction() {
-  function whenBridge(fn, tries = 40) {
-    const bridge = globalThis.window?.__piWebUiHost;
-    if (bridge && typeof bridge === "object") {
-      fn(bridge);
-      return;
-    }
-    if (tries <= 0) return;
-    setTimeout(() => whenBridge(fn, tries - 1), 250);
-  }
-  whenBridge((bridge) => {
-    try {
-      bridge.onUiAction?.("feature-board:open", () => {
-        try {
-          bridge.openModal?.("feature-board:board");
-        } catch {
-          /* 弹窗打开失败：静默忽略 */
-        }
-      });
-    } catch {
-      /* 宿主桥未就绪：顶栏按钮点不动，用户刷新即恢复 */
-    }
-  });
+	function whenBridge(fn, tries = 40) {
+		const bridge = globalThis.window?.__piWebUiHost;
+		if (bridge && typeof bridge === "object") {
+			fn(bridge);
+			return;
+		}
+		if (tries <= 0) return;
+		setTimeout(() => whenBridge(fn, tries - 1), 250);
+	}
+	whenBridge((bridge) => {
+		try {
+			bridge.onUiAction?.("feature-board:open", () => {
+				try {
+					bridge.openModal?.("feature-board:board");
+				} catch {
+					/* 弹窗打开失败：静默忽略 */
+				}
+			});
+		} catch {
+			/* 宿主桥未就绪：顶栏按钮点不动，用户刷新即恢复 */
+		}
+	});
 })();
 
 export default {
-  mount(container, ctx) {
-    let state = {
-      items: [],
-      loading: true,
-      error: null,
-      sort: "hot", // 'hot' | 'new'
-      status: "all",
-      showModal: false,
-      submitting: false,
-      votingIds: new Set(),
-    };
+	mount(container, ctx) {
+		let state = {
+			items: [],
+			loading: true,
+			error: null,
+			sort: "hot", // 'hot' | 'new'
+			status: "all",
+			showModal: false,
+			submitting: false,
+			votingIds: new Set(),
+		};
 
-    const voterId = getVoterId();
+		const voterId = getVoterId();
 
-    function getApiUrl() {
-      const custom = localStorage.getItem("pi_feature_board_api_url");
-      if (custom && custom.trim()) return custom.trim().replace(/\/+$/, "");
-      if (ctx?.settings?.apiUrl && ctx.settings.apiUrl.trim()) {
-        return ctx.settings.apiUrl.trim().replace(/\/+$/, "");
-      }
-      return "https://feature-board-api.xing-shuyin.workers.dev"; // 部署的 Worker 地址
-    }
+		function getApiUrl() {
+			const custom = localStorage.getItem("pi_feature_board_api_url");
+			if (custom && custom.trim()) return custom.trim().replace(/\/+$/, "");
+			if (ctx?.settings?.apiUrl && ctx.settings.apiUrl.trim()) {
+				return ctx.settings.apiUrl.trim().replace(/\/+$/, "");
+			}
+			return "https://feature-board-api.xing-shuyin.workers.dev"; // 部署的 Worker 地址
+		}
 
-    container.innerHTML = `
+		container.innerHTML = `
       <div class="fb-wrapper">
         <header class="fb-header">
           <div class="fb-title-group">
@@ -163,9 +187,9 @@ export default {
       </div>
     `;
 
-    // 动态样式插入
-    const styleEl = document.createElement("style");
-    styleEl.textContent = `
+		// 动态样式插入
+		const styleEl = document.createElement("style");
+		styleEl.textContent = `
       .fb-wrapper {
         display: flex;
         flex-direction: column;
@@ -466,188 +490,188 @@ export default {
         margin-top: 8px;
       }
     `;
-    container.appendChild(styleEl);
+		container.appendChild(styleEl);
 
-    // DOM 元素引用
-    const listContainer = container.querySelector("#fb-list-container");
-    const modal = container.querySelector("#fb-modal");
-    const btnNew = container.querySelector("#fb-btn-new");
-    const btnCloseModal = container.querySelector("#fb-modal-close");
-    const btnCancel = container.querySelector("#fb-btn-cancel");
-    const btnRefresh = container.querySelector("#fb-btn-refresh");
-    const form = container.querySelector("#fb-form");
-    const inputTitle = container.querySelector("#fb-input-title");
-    const inputDesc = container.querySelector("#fb-input-desc");
-    const inputAuthor = container.querySelector("#fb-input-author");
+		// DOM 元素引用
+		const listContainer = container.querySelector("#fb-list-container");
+		const modal = container.querySelector("#fb-modal");
+		const btnNew = container.querySelector("#fb-btn-new");
+		const btnCloseModal = container.querySelector("#fb-modal-close");
+		const btnCancel = container.querySelector("#fb-btn-cancel");
+		const btnRefresh = container.querySelector("#fb-btn-refresh");
+		const form = container.querySelector("#fb-form");
+		const inputTitle = container.querySelector("#fb-input-title");
+		const inputDesc = container.querySelector("#fb-input-desc");
+		const inputAuthor = container.querySelector("#fb-input-author");
 
-    // 默认恢复已保存的昵称
-    const savedAuthor = localStorage.getItem("pi_feature_board_author");
-    if (savedAuthor) inputAuthor.value = savedAuthor;
+		// 默认恢复已保存的昵称
+		const savedAuthor = localStorage.getItem("pi_feature_board_author");
+		if (savedAuthor) inputAuthor.value = savedAuthor;
 
-    // 获取并渲染数据
-    async function loadFeatures() {
-      state.loading = true;
-      render();
+		// 获取并渲染数据
+		async function loadFeatures() {
+			state.loading = true;
+			render();
 
-      try {
-        const apiUrl = getApiUrl();
-        const url = new URL(`${apiUrl}/api/features`);
-        url.searchParams.set("sort", state.sort);
-        if (state.status !== "all") {
-          url.searchParams.set("status", state.status);
-        }
+			try {
+				const apiUrl = getApiUrl();
+				const url = new URL(`${apiUrl}/api/features`);
+				url.searchParams.set("sort", state.sort);
+				if (state.status !== "all") {
+					url.searchParams.set("status", state.status);
+				}
 
-        const res = await fetch(url.toString(), {
-          headers: {
-            "X-Voter-Id": voterId,
-          },
-        });
+				const res = await fetch(url.toString(), {
+					headers: {
+						"X-Voter-Id": voterId,
+					},
+				});
 
-        if (!res.ok) {
-          throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-        }
+				if (!res.ok) {
+					throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+				}
 
-        const data = await res.json();
-        state.items = data.data || [];
-        state.error = null;
-      } catch (err) {
-        state.error = `获取需求失败: ${err.message}`;
-      } finally {
-        state.loading = false;
-        render();
-      }
-    }
+				const data = await res.json();
+				state.items = data.data || [];
+				state.error = null;
+			} catch (err) {
+				state.error = `获取需求失败: ${err.message}`;
+			} finally {
+				state.loading = false;
+				render();
+			}
+		}
 
-    // 投票处理 (Toggle)
-    async function handleVote(featureId) {
-      if (state.votingIds.has(featureId)) return;
-      state.votingIds.add(featureId);
-      render();
+		// 投票处理 (Toggle)
+		async function handleVote(featureId) {
+			if (state.votingIds.has(featureId)) return;
+			state.votingIds.add(featureId);
+			render();
 
-      try {
-        const apiUrl = getApiUrl();
-        const res = await fetch(`${apiUrl}/api/features/${featureId}/vote`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Voter-Id": voterId,
-          },
-        });
+			try {
+				const apiUrl = getApiUrl();
+				const res = await fetch(`${apiUrl}/api/features/${featureId}/vote`, {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						"X-Voter-Id": voterId,
+					},
+				});
 
-        if (!res.ok) throw new Error("投票请求失败");
-        const resData = await res.json();
+				if (!res.ok) throw new Error("投票请求失败");
+				const resData = await res.json();
 
-        // 局部更新状态
-        const item = state.items.find((x) => x.id === featureId);
-        if (item) {
-          item.votes_count = resData.votes_count;
-          item.has_voted = resData.action === "voted" ? 1 : 0;
-        }
-      } catch (err) {
-        alert("操作失败：" + err.message);
-      } finally {
-        state.votingIds.delete(featureId);
-        render();
-      }
-    }
+				// 局部更新状态
+				const item = state.items.find((x) => x.id === featureId);
+				if (item) {
+					item.votes_count = resData.votes_count;
+					item.has_voted = resData.action === "voted" ? 1 : 0;
+				}
+			} catch (err) {
+				alert("操作失败：" + err.message);
+			} finally {
+				state.votingIds.delete(featureId);
+				render();
+			}
+		}
 
-    // 提交需求
-    async function handleSubmit(e) {
-      e.preventDefault();
-      const title = inputTitle.value.trim();
-      const desc = inputDesc.value.trim();
-      const author = inputAuthor.value.trim() || "匿名用户";
+		// 提交需求
+		async function handleSubmit(e) {
+			e.preventDefault();
+			const title = inputTitle.value.trim();
+			const desc = inputDesc.value.trim();
+			const author = inputAuthor.value.trim() || "匿名用户";
 
-      if (!title) return;
+			if (!title) return;
 
-      state.submitting = true;
-      const btnSubmit = form.querySelector("#fb-btn-submit");
-      btnSubmit.disabled = true;
-      btnSubmit.textContent = "提交中...";
+			state.submitting = true;
+			const btnSubmit = form.querySelector("#fb-btn-submit");
+			btnSubmit.disabled = true;
+			btnSubmit.textContent = "提交中...";
 
-      try {
-        const apiUrl = getApiUrl();
-        const res = await fetch(`${apiUrl}/api/features`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Voter-Id": voterId,
-          },
-          body: JSON.stringify({
-            title,
-            description: desc,
-            author,
-          }),
-        });
+			try {
+				const apiUrl = getApiUrl();
+				const res = await fetch(`${apiUrl}/api/features`, {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						"X-Voter-Id": voterId,
+					},
+					body: JSON.stringify({
+						title,
+						description: desc,
+						author,
+					}),
+				});
 
-        if (!res.ok) {
-          const errBody = await res.json().catch(() => ({}));
-          throw new Error(errBody.error || "提交失败");
-        }
+				if (!res.ok) {
+					const errBody = await res.json().catch(() => ({}));
+					throw new Error(errBody.error || "提交失败");
+				}
 
-        // 保存昵称
-        if (author && author !== "匿名用户") {
-          localStorage.setItem("pi_feature_board_author", author);
-        }
+				// 保存昵称
+				if (author && author !== "匿名用户") {
+					localStorage.setItem("pi_feature_board_author", author);
+				}
 
-        // 关闭弹窗并重置表单
-        inputTitle.value = "";
-        inputDesc.value = "";
-        modal.style.display = "none";
+				// 关闭弹窗并重置表单
+				inputTitle.value = "";
+				inputDesc.value = "";
+				modal.style.display = "none";
 
-        // 重新拉取列表
-        await loadFeatures();
-      } catch (err) {
-        alert("提交失败：" + err.message);
-      } finally {
-        state.submitting = false;
-        btnSubmit.disabled = false;
-        btnSubmit.textContent = "发布建议";
-      }
-    }
+				// 重新拉取列表
+				await loadFeatures();
+			} catch (err) {
+				alert("提交失败：" + err.message);
+			} finally {
+				state.submitting = false;
+				btnSubmit.disabled = false;
+				btnSubmit.textContent = "发布建议";
+			}
+		}
 
-    // 渲染列表函数
-    function render() {
-      if (state.loading) {
-        listContainer.innerHTML = `<div class="fb-loading">正在加载最新需求...</div>`;
-        return;
-      }
+		// 渲染列表函数
+		function render() {
+			if (state.loading) {
+				listContainer.innerHTML = `<div class="fb-loading">正在加载最新需求...</div>`;
+				return;
+			}
 
-      if (state.error) {
-        listContainer.innerHTML = `
+			if (state.error) {
+				listContainer.innerHTML = `
           <div class="fb-error">
             <p>${esc(state.error)}</p>
             <button class="fb-btn fb-btn-ghost" id="fb-retry" style="margin-top: 10px;">重试</button>
           </div>
         `;
-        listContainer.querySelector("#fb-retry")?.addEventListener("click", loadFeatures);
-        return;
-      }
+				listContainer.querySelector("#fb-retry")?.addEventListener("click", loadFeatures);
+				return;
+			}
 
-      if (!state.items.length) {
-        listContainer.innerHTML = `
+			if (!state.items.length) {
+				listContainer.innerHTML = `
           <div class="fb-empty">
             <p>暂无相关需求建议</p>
             <button class="fb-btn fb-btn-primary" id="fb-empty-new">+ 提第一个建议</button>
           </div>
         `;
-        listContainer.querySelector("#fb-empty-new")?.addEventListener("click", () => {
-          modal.style.display = "flex";
-        });
-        return;
-      }
+				listContainer.querySelector("#fb-empty-new")?.addEventListener("click", () => {
+					modal.style.display = "flex";
+				});
+				return;
+			}
 
-      listContainer.innerHTML = state.items
-        .map((item) => {
-          const st = STATUS_MAP[item.status] || STATUS_MAP.open;
-          const isVoted = item.has_voted === 1;
-          const isVoting = state.votingIds.has(item.id);
+			listContainer.innerHTML = state.items
+				.map((item) => {
+					const st = STATUS_MAP[item.status] || STATUS_MAP.open;
+					const isVoted = item.has_voted === 1;
+					const isVoting = state.votingIds.has(item.id);
 
-          return `
-            <div class="fb-card" data-id="${item.id}">
-              <div class="fb-vote-box ${isVoted ? "voted" : ""}" data-id="${item.id}" title="${isVoted ? "点击取消投票" : "点赞支持"}">
+					return `
+            <div class="fb-card" data-id="${esc(item.id)}">
+              <div class="fb-vote-box ${isVoted ? "voted" : ""}" data-id="${esc(item.id)}" title="${isVoted ? "点击取消投票" : "点赞支持"}">
                 <span class="fb-vote-icon">${isVoting ? "⏳" : isVoted ? "👍" : "▲"}</span>
-                <span class="fb-vote-count">${item.votes_count || 0}</span>
+                <span class="fb-vote-count">${esc(item.votes_count || 0)}</span>
               </div>
               <div class="fb-card-content">
                 <div class="fb-card-head">
@@ -662,64 +686,64 @@ export default {
               </div>
             </div>
           `;
-        })
-        .join("");
+				})
+				.join("");
 
-      // 绑定投票点击事件
-      listContainer.querySelectorAll(".fb-vote-box").forEach((el) => {
-        el.addEventListener("click", (e) => {
-          const id = parseInt(el.getAttribute("data-id"), 10);
-          if (id) handleVote(id);
-        });
-      });
-    }
+			// 绑定投票点击事件
+			listContainer.querySelectorAll(".fb-vote-box").forEach((el) => {
+				el.addEventListener("click", (e) => {
+					const id = parseInt(el.getAttribute("data-id"), 10);
+					if (id) handleVote(id);
+				});
+			});
+		}
 
-    // 事件绑定
-    btnNew.addEventListener("click", () => {
-      modal.style.display = "flex";
-      inputTitle.focus();
-    });
+		// 事件绑定
+		btnNew.addEventListener("click", () => {
+			modal.style.display = "flex";
+			inputTitle.focus();
+		});
 
-    btnCloseModal.addEventListener("click", () => {
-      modal.style.display = "none";
-    });
+		btnCloseModal.addEventListener("click", () => {
+			modal.style.display = "none";
+		});
 
-    btnCancel.addEventListener("click", () => {
-      modal.style.display = "none";
-    });
+		btnCancel.addEventListener("click", () => {
+			modal.style.display = "none";
+		});
 
-    modal.addEventListener("click", (e) => {
-      if (e.target === modal) modal.style.display = "none";
-    });
+		modal.addEventListener("click", (e) => {
+			if (e.target === modal) modal.style.display = "none";
+		});
 
-    btnRefresh.addEventListener("click", loadFeatures);
-    form.addEventListener("submit", handleSubmit);
+		btnRefresh.addEventListener("click", loadFeatures);
+		form.addEventListener("submit", handleSubmit);
 
-    // 状态过滤事件
-    container.querySelectorAll(".fb-tag").forEach((tag) => {
-      tag.addEventListener("click", () => {
-        container.querySelectorAll(".fb-tag").forEach((t) => t.classList.remove("active"));
-        tag.classList.add("active");
-        state.status = tag.getAttribute("data-status");
-        loadFeatures();
-      });
-    });
+		// 状态过滤事件
+		container.querySelectorAll(".fb-tag").forEach((tag) => {
+			tag.addEventListener("click", () => {
+				container.querySelectorAll(".fb-tag").forEach((t) => t.classList.remove("active"));
+				tag.classList.add("active");
+				state.status = tag.getAttribute("data-status");
+				loadFeatures();
+			});
+		});
 
-    // 排序切换事件
-    container.querySelectorAll(".fb-sort-btn").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        container.querySelectorAll(".fb-sort-btn").forEach((b) => b.classList.remove("active"));
-        btn.classList.add("active");
-        state.sort = btn.getAttribute("data-sort");
-        loadFeatures();
-      });
-    });
+		// 排序切换事件
+		container.querySelectorAll(".fb-sort-btn").forEach((btn) => {
+			btn.addEventListener("click", () => {
+				container.querySelectorAll(".fb-sort-btn").forEach((b) => b.classList.remove("active"));
+				btn.classList.add("active");
+				state.sort = btn.getAttribute("data-sort");
+				loadFeatures();
+			});
+		});
 
-    // 首次加载
-    loadFeatures();
-  },
+		// 首次加载
+		loadFeatures();
+	},
 
-  cleanup() {
-    // 销毁回调
-  },
+	cleanup() {
+		// 销毁回调
+	},
 };

@@ -65,15 +65,15 @@ npm i -g @deepseek-ai/dsh@0.1.1-rc.2   # 全局安装（自带嵌套运行时树
 
 ### DSH 环境变量速览
 
-| 变量 | 默认 | 作用 |
-| --- | --- | --- |
-| `PI_WEB_ENGINE` | `pi` | 引擎：`pi` / `dsh`（重启生效） |
-| `PI_WEB_DSH_RUNTIME` | 自动解析 | 运行时树根（node_modules 根，含 `@deepseek-ai/dsh-base`） |
-| `PI_WEB_DSH_DATA_DIR` | `PI_WEB_DATA_DIR` | DSH 专用数据目录（用户 patch 层 `<dir>/dsh-patches/*.yml`） |
-| `PI_WEB_DSH_PATCH_DIR` | 空 | 用户 patch 目录显式覆盖（优先级高于推导） |
-| `PI_WEB_DSH_QUESTION_TIMEOUT_MS` | `600000` | 模型 ask_user_question 提问桥超时（前端倒计时） |
-| `PI_WEB_DSH_SESSION_RETENTION_DAYS` | `90` | 会话 JSONL 保留天数（0 = 关闭清理） |
-| `PI_WEB_DSH_DEBUG` | 空 | `1` 时输出运行时诊断到 stderr |
+| 变量                                | 默认              | 作用                                                        |
+| ----------------------------------- | ----------------- | ----------------------------------------------------------- |
+| `PI_WEB_ENGINE`                     | `pi`              | 引擎：`pi` / `dsh`（重启生效）                              |
+| `PI_WEB_DSH_RUNTIME`                | 自动解析          | 运行时树根（node_modules 根，含 `@deepseek-ai/dsh-base`）   |
+| `PI_WEB_DSH_DATA_DIR`               | `PI_WEB_DATA_DIR` | DSH 专用数据目录（用户 patch 层 `<dir>/dsh-patches/*.yml`） |
+| `PI_WEB_DSH_PATCH_DIR`              | 空                | 用户 patch 目录显式覆盖（优先级高于推导）                   |
+| `PI_WEB_DSH_QUESTION_TIMEOUT_MS`    | `600000`          | 模型 ask_user_question 提问桥超时（前端倒计时）             |
+| `PI_WEB_DSH_SESSION_RETENTION_DAYS` | `90`              | 会话 JSONL 保留天数（0 = 关闭清理）                         |
+| `PI_WEB_DSH_DEBUG`                  | 空                | `1` 时输出运行时诊断到 stderr                               |
 
 完整列表见 `docs/env-vars.md`。
 
@@ -173,7 +173,7 @@ server {
 
 - 官方 dist 的静态资源是根绝对路径（`/assets/...`），与 JS 里的应用根推导无关。
   要让 HTML 在 /pi/ 下渲染，二选一：① 另加一条 `location /assets/ { proxy_pass
-  http://127.0.0.1:8787; }` 转发静态资源；② 用 `vite build --base=/pi/` 重新构建
+http://127.0.0.1:8787; }` 转发静态资源；② 用 `vite build --base=/pi/` 重新构建
   （产物里 assets 引用与 `import.meta.env.BASE_URL` 均为 /pi/，与 baseURI 推导
   结果一致，两种方式可混用）。
 - 插件目录（`<dataDir>/plugins/`）不需要在 nginx 单独配置——客户端请求
@@ -184,3 +184,7 @@ server {
 用户 fork 的 `package.json` 带 `piWebUiDistribution.selfUpdate: false`。该安装包不检查或提供官方 npm `pi-web-ui` 覆盖更新；顶栏说明须从当前仓库的构建包更新，核心和扩展的更新仍可用。不要删除该标记来消除提示，否则会用上游包覆盖 fork 的启动器和功能。官方无标记包保持原更新行为；策略所需的包信息缺失或无法解析时安全禁用网页包更新。
 
 本机定制包宜用独立 npm prefix 安装（例如 `~/.local/lib/pi-web-ui-fork`），并让服务及用户命令指向这个安装包，避免全局 `npm i -g pi-web-ui@latest` 覆盖运行文件。迁移时保留服务环境、端口、数据目录、SDK 来源和旧包备份；先在临时端口验证，再替换服务路径。独立 prefix 置于全局 SDK 的上级目录下时，`PI_WEB_SDK=global` 仍能通过祖先目录找到全局 Pi 核心。
+
+### Fork 构建包依赖锁
+
+用户 fork 将自带 `@earendil-works/pi-coding-agent` 精确固定到已验证的 `0.87.1`，并保持 `package-lock.json` 同步，避免安装 tarball 时把未经验证的新版 SDK 意外装进网页包。`PI_WEB_SDK=global` 显式选择不低于自带版本的全局 SDK（同版本也选全局）；缺省/auto 只跟随更高版本，任何模式都不降级。核心独立升级仍以实际加载的全局 SDK 路径为准。同步上游时应保留这个精确版本约束，升级自带 SDK 需重新验证。

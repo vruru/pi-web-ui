@@ -1,22 +1,39 @@
 /**
- * attachments — 附件构建：把 prompt.attachments（inline/reference/lines、
- * 粘贴图片 imageData、上传 fileData）转成独立的 custom message（asides）。
- * 视觉桥（纯文本主模型看图）也在这里接线：图片交给视觉模型转写成文字证据。
+ * attachments — 附件构建：把 prompt.attachments（文件/目录路径引用、行范围引用、
+ * 粘贴图片 imageData、上传 fileData、网页/对话引用）转成独立的 custom message（asides）。
+ *
+ * **一律只给路径引用**：工作区文件与上传文件都不把内容注入 prompt（小文件也不例外），
+ * 只发 `<file path=… />`，模型用自己的 read 工具按需读（自带截断/分页）。
+ * 只有图片走 image 内容块。视觉桥（纯文本主模型看图）也在这里接线：图片交给
+ * 视觉模型转写成文字证据。
  *
  * 从 agent-service.ts 抽出，行为保持不变；上下文经 AttachmentContext 注入。
  */
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { ServerMessage } from "./protocol.js";
 import type { ServerLang } from "./i18n.js";
-import { countLines, decodeText, looksLikeText, sniffImageMime } from "./text-sniff.js";
+import { sniffImageMime } from "./text-sniff.js";
 import { saveUpload, uploadsRoot } from "./uploads.js";
 import { isAbsoluteWirePath, wireToAbs } from "./files-service.js";
 import { buildVisionBridgePrompt, findVisionModels, transcribeImages } from "./vision-bridge.js";
+import { saveAttachment } from "./attachment-store.js";
 import type { ClientSettings } from "./client-state.js";
 
 /** 跨快照的视觉转写缓存：批次 hash（名称 + base64 头 + 提示词）→ 转写文本。
- *  编辑重问重发相同图片不再重复耗视觉 token。进程级共享即可。 */
+ *  编辑重问重发相同图片不再重复耗视觉 token。进程级共享即可。
+ *  长驻进程下无界 Map 会随图片种类缓慢吃内存（单条转写可达数十 KB），
+ *  超过 VISION_BRIDGE_CACHE_MAX 按插入序 FIFO 淘汰最旧。 */
+const VISION_BRIDGE_CACHE_MAX = 256;
 const visionBridgeCache = new Map<string, string>();
+
+function cacheVisionTranscript(key: string, value: string): void {
+	visionBridgeCache.set(key, value);
+	if (visionBridgeCache.size > VISION_BRIDGE_CACHE_MAX) {
+		// Map 迭代序 = 插入序，第一个 key 即最旧。
+		const oldest = visionBridgeCache.keys().next().value;
+		if (oldest !== undefined) visionBridgeCache.delete(oldest);
+	}
+}
 
 /** "provider/id" 解析；非法格式返回 null。 */
 export function parseModelSpec(spec?: string | null): {
@@ -80,9 +97,6 @@ export async function buildAttachmentMessages(
 
 	const root = resolve(ctx.cwd);
 	const MAX_ATTACHMENT_BYTES = 200 * 1024;
-	// Files at or below this size are inlined; larger files are referenced by
-	// path only (the model reads them on demand — saves tokens for small edits).
-	const MAX_INLINE_BYTES = Number(process.env.PI_WEB_INLINE_FILE_MAX ?? 12 * 1024);
 	const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"]);
 	const MIME: Record<string, string> = {
 		".png": "image/png",
@@ -97,54 +111,30 @@ export async function buildAttachmentMessages(
 	const out: { message: Parameters<AgentSession["sendCustomMessage"]>[0] }[] = [];
 
 	/** Push the aside for a raw uploaded file (fresh fileData or a restored
-	 *  uploadPath re-read from disk). Small text files are inlined so the
-	 *  model sees them immediately; everything else becomes a path reference.
+	 *  uploadPath re-read from disk). Uploads are NEVER inlined: the model gets
+	 *  the persisted absolute path and reads it on demand with its read tool.
 	 *  `upload: true` marks the card as a restorable upload — the browser
 	 *  re-sends it by path when editing & re-asking a question. */
 	const pushUploadAside = (name: string, wirePath: string, buf: Buffer): void => {
-		if (buf.length <= MAX_INLINE_BYTES && looksLikeText(buf)) {
-			const lines = countLines(buf);
-			out.push({
-				message: {
-					customType: "file",
-					content: [
-						{
-							type: "text",
-							text: `\n<file path="${wirePath}">\n\`\`\`\n${decodeText(buf)}\n\`\`\`\n</file>`,
-						},
-					],
-					display: true,
-					details: {
-						name,
-						path: wirePath,
-						mode: "inline",
-						size: buf.length,
-						lines,
-						upload: true,
+		out.push({
+			message: {
+				customType: "file",
+				content: [
+					{
+						type: "text",
+						text: `<file path="${wirePath}" size="${buf.length}" />`,
 					},
+				],
+				display: true,
+				details: {
+					name,
+					path: wirePath,
+					mode: "reference",
+					size: buf.length,
+					upload: true,
 				},
-			});
-		} else {
-			out.push({
-				message: {
-					customType: "file",
-					content: [
-						{
-							type: "text",
-							text: `<file path="${wirePath}" size="${buf.length}" />`,
-						},
-					],
-					display: true,
-					details: {
-						name,
-						path: wirePath,
-						mode: "reference",
-						size: buf.length,
-						upload: true,
-					},
-				},
-			});
-		}
+			},
+		});
 	};
 
 	// -- Vision bridge ------------------------------------------------------
@@ -286,7 +276,7 @@ export async function buildAttachmentMessages(
 								lang: vLang,
 							},
 						);
-						visionBridgeCache.set(batchHash, transcript);
+						cacheVisionTranscript(batchHash, transcript);
 						ctx.emit({
 							type: "notice",
 							level: "info",
@@ -307,8 +297,6 @@ export async function buildAttachmentMessages(
 			}
 		}
 	}
-	/** Cap for reading a file in "lines" mode (selected slice is inlined). */
-	const MAX_LINES_READ_BYTES = 2 * 1024 * 1024;
 
 	for (const [idx, att] of attachments.entries()) {
 		// Quoted conversation (left-panel right-click / global-search quote):
@@ -407,6 +395,15 @@ export async function buildAttachmentMessages(
 				});
 				continue;
 			}
+			let attachmentUrl: string | undefined;
+			let attachmentHash: string | undefined;
+			try {
+				const rec = await saveAttachment(Buffer.from(raw, "base64"), mimeType);
+				attachmentUrl = rec.url;
+				attachmentHash = rec.hash;
+			} catch {
+				/* CAS 保存失败不阻断流程 */
+			}
 			const transcript = bridgeTranscripts.get(idx);
 			if (transcript) {
 				// Bridged: the text-only main model can't see images, so it gets the
@@ -420,7 +417,12 @@ export async function buildAttachmentMessages(
 								type: "text",
 								text: `\n<vision-bridge>\n${transcript}\n</vision-bridge>`,
 							},
-							{ type: "image", data: raw, mimeType },
+							{
+								type: "image",
+								data: raw,
+								mimeType,
+								...(attachmentUrl ? { source: { type: "url", url: attachmentUrl } } : {}),
+							},
 						],
 						display: true,
 						details: {
@@ -428,6 +430,8 @@ export async function buildAttachmentMessages(
 							path: undefined,
 							mode: "bridged",
 							size: bytes,
+							attachmentUrl,
+							attachmentHash,
 						},
 					},
 				});
@@ -436,7 +440,14 @@ export async function buildAttachmentMessages(
 			out.push({
 				message: {
 					customType: "file",
-					content: [{ type: "image", data: raw, mimeType }],
+					content: [
+						{
+							type: "image",
+							data: raw,
+							mimeType,
+							...(attachmentUrl ? { source: { type: "url", url: attachmentUrl } } : {}),
+						},
+					],
 					display: true,
 					details: {
 						name: att.name ?? "image.png",
@@ -444,6 +455,8 @@ export async function buildAttachmentMessages(
 						path: undefined,
 						mode: "image",
 						size: bytes,
+						attachmentUrl,
+						attachmentHash,
 					},
 				},
 			});
@@ -453,9 +466,7 @@ export async function buildAttachmentMessages(
 		// Raw uploaded file (base64) — no workspace path involved. The bytes are
 		// persisted under <dataDir>/uploads/<clientId>/ so the model can read
 		// them on demand with its read tool (absolute path, no traversal guard
-		// needed — the path is server-generated). Small text uploads are inlined
-		// so the model sees them immediately; everything else becomes a path
-		// reference.
+		// needed — the path is server-generated). Always a path reference.
 		if (att.fileData) {
 			const buf = Buffer.from(att.fileData, "base64");
 			const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
@@ -480,7 +491,21 @@ export async function buildAttachmentMessages(
 			// Uploaded files live in a GLOBAL per-user dir (not inside the project
 			// or the per-client session store) so browsing a repo never picks up
 			// uploaded junk: <dataDir>/uploads/<clientId>/（保留期自动清理，见 uploads.ts）。
-			const { abs, displayName: safeName } = saveUpload(ctx.clientId, att.name ?? "file", buf);
+			// saveUpload 对非法 clientId/displayName 抛错（消毒失败整条拒绝，绝不
+			// 落到别的目录）—— 这里报错跳过该附件，不让一条坏附件中断整条消息。
+			let saved: { abs: string; displayName: string };
+			try {
+				saved = saveUpload(ctx.clientId, att.name ?? "file", buf);
+			} catch (err) {
+				ctx.emit({
+					type: "notice",
+					level: "error",
+					text: `上传文件保存失败，已跳过：${(err as Error).message}`,
+					textEn: `Failed to save uploaded file, skipped: ${(err as Error).message}`,
+				});
+				continue;
+			}
+			const { abs, displayName: safeName } = saved;
 			// Wire format: forward-slash absolute path (the read tool accepts
 			// absolute paths; Windows uses "C:/..." — safe inside the XML-ish tag).
 			const wirePath = abs.split(sep).join("/");
@@ -671,6 +696,7 @@ ${transcript}
 			continue;
 		}
 
+		/** Path-only aside — no file content is read or injected. */
 		const makeReference = (): {
 			message: Parameters<AgentSession["sendCustomMessage"]>[0];
 		} => ({
@@ -686,42 +712,12 @@ ${transcript}
 				details: { name, path: rel, mode: "reference", size: stat.size },
 			},
 		});
-		const makeInline = (
-			buf: Buffer,
-		): {
-			message: Parameters<AgentSession["sendCustomMessage"]>[0];
-		} => {
-			const lines = countLines(buf);
-			return {
-				message: {
-					customType: "file",
-					content: [
-						{
-							type: "text",
-							text: `\n<file path="${rel}">\n\`\`\`\n${decodeText(buf)}\n\`\`\`\n</file>`,
-						},
-					],
-					display: true,
-					details: {
-						name,
-						path: rel,
-						mode: "inline",
-						size: stat.size,
-						lines,
-					},
-				},
-			};
-		};
-
-		// Reference mode is always honored and never reads the file.
-		if (att.mode === "reference") {
-			out.push(makeReference());
-			continue;
-		}
-
-		// Line-range mode: inline only the selected 1-based inclusive range.
-		// Reading is capped so a huge file can't exhaust memory even though
-		// the selected slice is small.
+		// Everything else is a PATH REFERENCE: the file content is never injected
+		// into the prompt (small files included) — the model reads what it needs
+		// with its own read tool (built-in truncation/pagination).
+		// Line-range mode adds the `lines` attribute so the model knows which
+		// slice the user picked and only reads that part.
+		// A legacy `mode: "inline"` (old client / persisted draft) lands here too.
 		if (att.mode === "lines") {
 			const range = att.lines;
 			if (!range || range.start < 1 || range.end < range.start) {
@@ -734,51 +730,13 @@ ${transcript}
 				out.push(makeReference());
 				continue;
 			}
-			if (stat.size > MAX_LINES_READ_BYTES) {
-				ctx.emit({
-					type: "notice",
-					level: "warning",
-					text: `文件过大，已改为仅引用：${att.path}`,
-					textEn: `File too large, switched to reference-only: ${att.path}`,
-				});
-				out.push(makeReference());
-				continue;
-			}
-			const buf = await fs.readFile(abs);
-			if (buf.includes(0)) {
-				ctx.emit({
-					type: "notice",
-					level: "warning",
-					text: `二进制文件已改为仅引用：${att.path}`,
-					textEn: `Binary file, switched to reference-only: ${att.path}`,
-				});
-				out.push(makeReference());
-				continue;
-			}
-			const parts = decodeText(buf).split("\n");
-			// A trailing newline yields an empty phantom line — drop it so line
-			// numbers match the preview panel.
-			if (parts.length > 0 && parts[parts.length - 1] === "") parts.pop();
-			const start = Math.min(range.start, parts.length);
-			const end = Math.min(range.end, parts.length);
-			if (start < 1 || end < start) {
-				ctx.emit({
-					type: "notice",
-					level: "warning",
-					text: `选中行超出文件范围，已改为仅引用：${att.path}`,
-					textEn: `Selected lines out of range, switched to reference-only: ${att.path}`,
-				});
-				out.push(makeReference());
-				continue;
-			}
-			const selected = parts.slice(start - 1, end).join("\n");
 			out.push({
 				message: {
 					customType: "file",
 					content: [
 						{
 							type: "text",
-							text: `\n<file path="${rel}" lines="${start}-${end}">\n\`\`\`\n${selected}\n\`\`\`\n</file>`,
+							text: `<file path="${rel}" lines="${range.start}-${range.end}" size="${stat.size}" />`,
 						},
 					],
 					display: true,
@@ -787,59 +745,15 @@ ${transcript}
 						path: rel,
 						mode: "lines",
 						size: stat.size,
-						lines: end - start + 1,
-						startLine: start,
-						endLine: end,
+						lines: range.end - range.start + 1,
+						startLine: range.start,
+						endLine: range.end,
 					},
 				},
 			});
 			continue;
 		}
-
-		// Forced inline has a hard cap to protect the model context.
-		if (att.mode === "inline") {
-			if (stat.size > MAX_INLINE_BYTES) {
-				ctx.emit({
-					type: "notice",
-					level: "warning",
-					text: `文件过大，已改为仅引用：${att.path}`,
-					textEn: `File too large, switched to reference-only: ${att.path}`,
-				});
-				out.push(makeReference());
-				continue;
-			}
-			const buf = await fs.readFile(abs);
-			if (buf.includes(0)) {
-				ctx.emit({
-					type: "notice",
-					level: "warning",
-					text: `二进制文件已改为仅引用：${att.path}`,
-					textEn: `Binary file, switched to reference-only: ${att.path}`,
-				});
-				out.push(makeReference());
-				continue;
-			}
-			out.push(makeInline(buf));
-			continue;
-		}
-
-		// Auto: small files inline, large files reference by path.
-		if (stat.size > MAX_INLINE_BYTES) {
-			out.push(makeReference());
-			continue;
-		}
-		const buf = await fs.readFile(abs);
-		if (buf.includes(0)) {
-			ctx.emit({
-				type: "notice",
-				level: "warning",
-				text: `二进制文件已跳过（仅引用路径）：${att.path}`,
-				textEn: `Binary file skipped (path referenced only): ${att.path}`,
-			});
-			out.push(makeReference());
-			continue;
-		}
-		out.push(makeInline(buf));
+		out.push(makeReference());
 	}
 	return out;
 }

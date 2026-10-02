@@ -69,9 +69,15 @@ function qMysql(s) {
 	if (!/^[A-Za-z0-9_$]+$/.test(str)) throw new Error(`非法标识符: ${str}`);
 	return "`" + str + "`";
 }
-function qPg(s) { return '"' + String(s).replace(/"/g, '""') + '"'; }
-function qMssql(s) { return "[" + String(s).replace(/\]/g, "]]") + "]"; }
-function qSqlite(s) { return '"' + String(s).replace(/"/g, '""') + '"'; }
+function qPg(s) {
+	return '"' + String(s).replace(/"/g, '""') + '"';
+}
+function qMssql(s) {
+	return "[" + String(s).replace(/\]/g, "]]") + "]";
+}
+function qSqlite(s) {
+	return '"' + String(s).replace(/"/g, '""') + '"';
+}
 
 /** cmd/sh 引号：含空白或 shell 元字符才包一层，内层双引号翻倍（cmd 转义规则）。 */
 function winQuote(s) {
@@ -96,7 +102,9 @@ function cellVal(v) {
 				if (typeof x === "bigint") return Number(x);
 				return x;
 			});
-		} catch { s = String(v); }
+		} catch {
+			s = String(v);
+		}
 		if (s.length > MAX_CELL_LEN) s = s.slice(0, MAX_CELL_LEN) + "…";
 		return s;
 	}
@@ -130,18 +138,25 @@ function parseJsonFilter(text) {
 async function mysqlAdapter(cfg) {
 	const mod = await import("mysql2/promise");
 	const mysql = mod.default ?? mod;
-	const conn = await withTimeout(mysql.createConnection({
-		host: cfg.host || "127.0.0.1",
-		port: Number(cfg.port) || 3306,
-		user: cfg.user || "root",
-		password: cfg.password || undefined,
-		connectTimeout: CONNECT_TIMEOUT_MS,
-		dateStrings: true,
-	}), CONNECT_TIMEOUT_MS + 3000, "建立连接");
+	const conn = await withTimeout(
+		mysql.createConnection({
+			host: cfg.host || "127.0.0.1",
+			port: Number(cfg.port) || 3306,
+			user: cfg.user || "root",
+			password: cfg.password || undefined,
+			connectTimeout: CONNECT_TIMEOUT_MS,
+			dateStrings: true,
+		}),
+		CONNECT_TIMEOUT_MS + 3000,
+		"建立连接",
+	);
 	await conn.ping();
 	let curDb = null;
 	async function useDb(db) {
-		if (db && db !== curDb) { await conn.query("USE ??", [db]); curDb = db; }
+		if (db && db !== curDb) {
+			await conn.query("USE ??", [db]);
+			curDb = db;
+		}
 	}
 	return {
 		kind: "sql",
@@ -153,9 +168,12 @@ async function mysqlAdapter(cfg) {
 		async listTables(db) {
 			const [rows] = await conn.query(
 				`SELECT table_name AS name, table_type AS kind, IFNULL(table_rows,0) AS approx_rows
-				 FROM information_schema.tables WHERE table_schema=? ORDER BY table_name`, [db]);
+				 FROM information_schema.tables WHERE table_schema=? ORDER BY table_name`,
+				[db],
+			);
 			return rows.map((r) => ({
-				name: r.name, kind: r.kind === "VIEW" ? "view" : "table",
+				name: r.name,
+				kind: r.kind === "VIEW" ? "view" : "table",
 				approxRows: Number(r.approx_rows) || 0,
 			}));
 		},
@@ -163,22 +181,32 @@ async function mysqlAdapter(cfg) {
 			const [cols] = await conn.query(
 				`SELECT column_name AS name, column_type AS type, is_nullable AS nullable,
 				        column_default AS def, column_key AS ckey, extra, column_comment AS comment
-				 FROM information_schema.columns WHERE table_schema=? AND table_name=? ORDER BY ordinal_position`, [db, t]);
+				 FROM information_schema.columns WHERE table_schema=? AND table_name=? ORDER BY ordinal_position`,
+				[db, t],
+			);
 			const [idx] = await conn.query(
 				`SELECT index_name AS name, NON_UNIQUE AS non_unique,
 				        GROUP_CONCAT(column_name ORDER BY seq_in_index) AS cols
 				 FROM information_schema.statistics WHERE table_schema=? AND table_name=?
-				 GROUP BY index_name, NON_UNIQUE`, [db, t]);
+				 GROUP BY index_name, NON_UNIQUE`,
+				[db, t],
+			);
 			let ddl = "";
 			try {
 				const showSql = `SHOW CREATE TABLE ${qMysql(db)}.${qMysql(t)}`;
 				const [[row]] = await conn.query(showSql);
 				ddl = row["Create Table"] ?? row["Create View"] ?? "";
-			} catch { /* 视图等场景失败可忽略 */ }
+			} catch {
+				/* 视图等场景失败可忽略 */
+			}
 			return {
 				columns: cols.map((c) => ({
-					name: c.name, type: c.type, nullable: c.nullable === "YES",
-					key: c.ckey || "", def: c.def ?? null, comment: c.comment || "",
+					name: c.name,
+					type: c.type,
+					nullable: c.nullable === "YES",
+					key: c.ckey || "",
+					def: c.def ?? null,
+					comment: c.comment || "",
 				})),
 				indexes: idx.map((i) => ({ name: i.name, unique: !Number(i.non_unique), columns: String(i.cols ?? "") })),
 				ddl,
@@ -191,16 +219,30 @@ async function mysqlAdapter(cfg) {
 			const total = Number(totalRes[0][0]?.n ?? 0);
 			const orderSql = opt.orderBy ? ` ORDER BY ?? ${opt.dir === "desc" ? "DESC" : "ASC"}` : "";
 			const pageParams = opt.orderBy ? [db, t, opt.orderBy] : [db, t];
-			const [rows] = await conn.query(
-				`SELECT * FROM ??.??${orderSql} LIMIT ? OFFSET ?`,
-				[...pageParams, Math.min(Number(opt.limit) || 50, MAX_PAGE_ROWS), Math.max(Number(opt.offset) || 0, 0)]);
-			const fields = rows.length ? Object.keys(rows[0])
-				: (await conn.query("SELECT * FROM ??.?? LIMIT 1", [db, t]))[0]?.fields?.map((f) => f.name)
-					?? (await conn.query(
-						`SELECT column_name FROM information_schema.columns WHERE table_schema=? AND table_name=? ORDER BY ordinal_position`, [db, t]))[0].map((r) => r.column_name);
+			const [rows] = await conn.query(`SELECT * FROM ??.??${orderSql} LIMIT ? OFFSET ?`, [
+				...pageParams,
+				Math.min(Number(opt.limit) || 50, MAX_PAGE_ROWS),
+				Math.max(Number(opt.offset) || 0, 0),
+			]);
+			const fields = rows.length
+				? Object.keys(rows[0])
+				: ((await conn.query("SELECT * FROM ??.?? LIMIT 1", [db, t]))[0]?.fields?.map((f) => f.name) ??
+					(
+						await conn.query(
+							`SELECT column_name FROM information_schema.columns WHERE table_schema=? AND table_name=? ORDER BY ordinal_position`,
+							[db, t],
+						)
+					)[0].map((r) => r.column_name));
 			const [pkRows] = await conn.query(
-				`SELECT column_name FROM information_schema.columns WHERE table_schema=? AND table_name=? AND column_key='PRI' ORDER BY ordinal_position LIMIT 1`, [db, t]);
-			return { total, ...rowsToGrid(fields.length ? fields : ["*"], rows), editable: Boolean(pkRows[0]?.column_name), pkCol: pkRows[0]?.column_name ?? null };
+				`SELECT column_name FROM information_schema.columns WHERE table_schema=? AND table_name=? AND column_key='PRI' ORDER BY ordinal_position LIMIT 1`,
+				[db, t],
+			);
+			return {
+				total,
+				...rowsToGrid(fields.length ? fields : ["*"], rows),
+				editable: Boolean(pkRows[0]?.column_name),
+				pkCol: pkRows[0]?.column_name ?? null,
+			};
 		},
 		async query(db, sql) {
 			await useDb(db);
@@ -217,9 +259,7 @@ async function mysqlAdapter(cfg) {
 			const cols = Object.keys(changes);
 			if (!cols.length) throw new Error("没有要修改的列");
 			const updateSql = `UPDATE ${qMysql(db)}.${qMysql(t)} SET ${cols.map((c) => `${qMysql(c)}=?`).join(", ")} WHERE ${qMysql(pkCol)}=?`;
-			const [r] = await conn.query(
-				updateSql,
-				[...Object.values(changes), pkVal]);
+			const [r] = await conn.query(updateSql, [...Object.values(changes), pkVal]);
 			return { affected: Number(r?.affectedRows ?? 0) };
 		},
 		async insertRow(db, t, values) {
@@ -227,7 +267,8 @@ async function mysqlAdapter(cfg) {
 			if (!cols.length) throw new Error("没有可插入的列（全部留空）");
 			const [r] = await conn.query(
 				`INSERT INTO ${qMysql(db)}.${qMysql(t)} (${cols.map(qMysql).join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`,
-				Object.values(values));
+				Object.values(values),
+			);
 			return { affected: 1, id: r?.insertId ?? null };
 		},
 		async deleteRow(db, t, pkCol, pkVal) {
@@ -235,7 +276,13 @@ async function mysqlAdapter(cfg) {
 			const [r] = await conn.query(deleteSql, [pkVal]);
 			return { affected: Number(r?.affectedRows ?? 0) };
 		},
-		async close() { try { await conn.end(); } catch { /* ignore */ } },
+		async close() {
+			try {
+				await conn.end();
+			} catch {
+				/* ignore */
+			}
+		},
 	};
 }
 
@@ -265,7 +312,9 @@ async function postgresAdapter(cfg) {
 		kind: "sql",
 		dialect: "postgres",
 		async listDatabases() {
-			const r = await main.query("SELECT datname FROM pg_database WHERE datistemplate=false AND datallowconn=true ORDER BY datname");
+			const r = await main.query(
+				"SELECT datname FROM pg_database WHERE datistemplate=false AND datallowconn=true ORDER BY datname",
+			);
 			return r.rows.map((x) => x.datname);
 		},
 		async listTables(db) {
@@ -276,31 +325,47 @@ async function postgresAdapter(cfg) {
 				        GREATEST(c.reltuples::bigint, 0)::text AS approx
 				 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
 				 WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m')
-				 ORDER BY c.relname`);
+				 ORDER BY c.relname`,
+			);
 			return r2.rows.map((x) => ({ name: x.name, kind: x.kind, approxRows: Number(x.approx) || 0 }));
 		},
 		async describeTable(db, t) {
 			const c = await getCli(db);
 			const cols = await c.query(
 				`SELECT column_name, data_type, is_nullable, column_default, character_maximum_length AS max_len
-				 FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 ORDER BY ordinal_position`, [t]);
+				 FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 ORDER BY ordinal_position`,
+				[t],
+			);
 			const pk = await c.query(
 				`SELECT kcu.column_name FROM information_schema.table_constraints tc
 				 JOIN information_schema.key_column_usage kcu ON tc.constraint_name=kcu.constraint_name
-				 WHERE tc.table_schema='public' AND tc.table_name=$1 AND tc.constraint_type='PRIMARY KEY'`, [t]);
+				 WHERE tc.table_schema='public' AND tc.table_name=$1 AND tc.constraint_type='PRIMARY KEY'`,
+				[t],
+			);
 			const pkSet = new Set(pk.rows.map((x) => x.column_name));
 			const idx = await c.query(
-				`SELECT indexname, indexdef FROM pg_indexes WHERE schemaname='public' AND tablename=$1`, [t]);
-			const ddlLines = cols.rows.map((c2) =>
-				`  ${qPg(c2.column_name)} ${c2.data_type}${c2.max_len ? `(${c2.max_len})` : ""}${c2.is_nullable === "NO" ? " NOT NULL" : ""}${c2.column_default ? ` DEFAULT ${c2.column_default}` : ""}`);
+				`SELECT indexname, indexdef FROM pg_indexes WHERE schemaname='public' AND tablename=$1`,
+				[t],
+			);
+			const ddlLines = cols.rows.map(
+				(c2) =>
+					`  ${qPg(c2.column_name)} ${c2.data_type}${c2.max_len ? `(${c2.max_len})` : ""}${c2.is_nullable === "NO" ? " NOT NULL" : ""}${c2.column_default ? ` DEFAULT ${c2.column_default}` : ""}`,
+			);
 			if (pkSet.size) ddlLines.push(`  PRIMARY KEY (${[...pkSet].map(qPg).join(", ")})`);
 			return {
 				columns: cols.rows.map((c2) => ({
-					name: c2.column_name, type: c2.data_type + (c2.max_len ? `(${c2.max_len})` : ""),
-					nullable: c2.is_nullable === "YES", key: pkSet.has(c2.column_name) ? "PRI" : "",
-					def: c2.column_default ?? null, comment: "",
+					name: c2.column_name,
+					type: c2.data_type + (c2.max_len ? `(${c2.max_len})` : ""),
+					nullable: c2.is_nullable === "YES",
+					key: pkSet.has(c2.column_name) ? "PRI" : "",
+					def: c2.column_default ?? null,
+					comment: "",
 				})),
-				indexes: idx.rows.map((i) => ({ name: i.indexname, unique: /CREATE UNIQUE/i.test(i.indexdef), columns: i.indexdef })),
+				indexes: idx.rows.map((i) => ({
+					name: i.indexname,
+					unique: /CREATE UNIQUE/i.test(i.indexdef),
+					columns: i.indexdef,
+				})),
 				ddl: `CREATE TABLE ${qPg(t)} (\n${ddlLines.join(",\n")}\n);`,
 			};
 		},
@@ -308,17 +373,27 @@ async function postgresAdapter(cfg) {
 			const c = await getCli(db);
 			const cnt = await c.query(`SELECT COUNT(*)::bigint AS n FROM ${qPg("public")}.${qPg(t)}`);
 			const total = Number(cnt.rows[0]?.n ?? 0);
-			const orderSql = opt.orderBy ? ` ORDER BY ${qPg(opt.orderBy)} ${opt.dir === "desc" ? "DESC" : "ASC"} NULLS LAST` : " ORDER BY 1";
-			const r = await c.query(
-				`SELECT * FROM ${qPg("public")}.${qPg(t)}${orderSql} LIMIT $1 OFFSET $2`,
-				[Math.min(Number(opt.limit) || 50, MAX_PAGE_ROWS), Math.max(Number(opt.offset) || 0, 0)]);
+			const orderSql = opt.orderBy
+				? ` ORDER BY ${qPg(opt.orderBy)} ${opt.dir === "desc" ? "DESC" : "ASC"} NULLS LAST`
+				: " ORDER BY 1";
+			const r = await c.query(`SELECT * FROM ${qPg("public")}.${qPg(t)}${orderSql} LIMIT $1 OFFSET $2`, [
+				Math.min(Number(opt.limit) || 50, MAX_PAGE_ROWS),
+				Math.max(Number(opt.offset) || 0, 0),
+			]);
 			const columns = r.fields.map((f) => f.name);
 			const pkR = await c.query(
 				`SELECT kcu.column_name FROM information_schema.table_constraints tc
 				 JOIN information_schema.key_column_usage kcu ON tc.constraint_name=kcu.constraint_name
 				 WHERE tc.table_schema='public' AND tc.table_name=$1 AND tc.constraint_type='PRIMARY KEY'
-				 ORDER BY kcu.ordinal_position LIMIT 1`, [t]);
-			return { total, ...rowsToGrid(columns, r.rows), editable: Boolean(pkR.rows[0]?.column_name), pkCol: pkR.rows[0]?.column_name ?? null };
+				 ORDER BY kcu.ordinal_position LIMIT 1`,
+				[t],
+			);
+			return {
+				total,
+				...rowsToGrid(columns, r.rows),
+				editable: Boolean(pkR.rows[0]?.column_name),
+				pkCol: pkR.rows[0]?.column_name ?? null,
+			};
 		},
 		async query(db, sql) {
 			const c = await getCli(db || curName);
@@ -337,9 +412,10 @@ async function postgresAdapter(cfg) {
 			if (!cols.length) throw new Error("没有要修改的列");
 			const c = await getCli(db);
 			const sets = cols.map((col, i) => `${qPg(col)}=$${i + 1}`).join(", ");
-			const r = await c.query(
-				`UPDATE ${qPg("public")}.${qPg(t)} SET ${sets} WHERE ${qPg(pkCol)}=$${cols.length + 1}`,
-				[...Object.values(changes), pkVal]);
+			const r = await c.query(`UPDATE ${qPg("public")}.${qPg(t)} SET ${sets} WHERE ${qPg(pkCol)}=$${cols.length + 1}`, [
+				...Object.values(changes),
+				pkVal,
+			]);
 			return { affected: r.rowCount ?? 0 };
 		},
 		async insertRow(db, t, values) {
@@ -349,7 +425,8 @@ async function postgresAdapter(cfg) {
 			const ph = cols.map((_, i) => `$${i + 1}`).join(", ");
 			const r = await c.query(
 				`INSERT INTO ${qPg("public")}.${qPg(t)} (${cols.map(qPg).join(", ")}) VALUES (${ph}) RETURNING 1 AS ok`,
-				Object.values(values));
+				Object.values(values),
+			);
 			return { affected: r.rowCount ?? 1, id: null };
 		},
 		async deleteRow(db, t, pkCol, pkVal) {
@@ -357,7 +434,15 @@ async function postgresAdapter(cfg) {
 			const r = await c.query(`DELETE FROM ${qPg("public")}.${qPg(t)} WHERE ${qPg(pkCol)}=$1`, [pkVal]);
 			return { affected: r.rowCount ?? 0 };
 		},
-		async close() { for (const c of clients.values()) { try { await c.end(); } catch { /* ignore */ } } },
+		async close() {
+			for (const c of clients.values()) {
+				try {
+					await c.end();
+				} catch {
+					/* ignore */
+				}
+			}
+		},
 	};
 }
 
@@ -369,7 +454,9 @@ async function sqliteAdapter(cfg) {
 	const DatabaseSync = mod.DatabaseSync ?? mod.default?.DatabaseSync;
 	if (!DatabaseSync) throw new Error("当前 Node 不支持 node:sqlite（需 ≥22.13）");
 	const db = new DatabaseSync(String(cfg.file).trim());
-	function all(sql, ...args) { return db.prepare(sql).all(...args); }
+	function all(sql, ...args) {
+		return db.prepare(sql).all(...args);
+	}
 	// 主键探测缓存：有 INTEGER/复合主键用之；无主键表回退 rowid（查询时以 __rid__ 列带出）
 	const pkCache = new Map();
 	function tablePk(t) {
@@ -383,10 +470,13 @@ async function sqliteAdapter(cfg) {
 	return {
 		kind: "sql",
 		dialect: "sqlite",
-		async listDatabases() { return ["main"]; },
+		async listDatabases() {
+			return ["main"];
+		},
 		async listTables() {
-			return all(`SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name`)
-				.map((r) => ({ name: r.name, kind: r.type === "view" ? "view" : "table", approxRows: 0 }));
+			return all(
+				`SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name`,
+			).map((r) => ({ name: r.name, kind: r.type === "view" ? "view" : "table", approxRows: 0 }));
 		},
 		async describeTable(_db, t) {
 			const info = all(`PRAGMA table_info(${qSqlite(t)})`);
@@ -398,8 +488,12 @@ async function sqliteAdapter(cfg) {
 			const master = all(`SELECT sql FROM sqlite_master WHERE name=?`, t)[0];
 			return {
 				columns: info.map((c) => ({
-					name: c.name, type: c.type || "", nullable: !Number(c.pk) ? c.notnull === 0 : false,
-					key: Number(c.pk) ? "PRI" : "", def: c.dflt_value ?? null, comment: "",
+					name: c.name,
+					type: c.type || "",
+					nullable: !Number(c.pk) ? c.notnull === 0 : false,
+					key: Number(c.pk) ? "PRI" : "",
+					def: c.dflt_value ?? null,
+					comment: "",
 				})),
 				indexes,
 				ddl: master?.sql ?? "",
@@ -410,8 +504,11 @@ async function sqliteAdapter(cfg) {
 			const orderSql = opt.orderBy ? ` ORDER BY ${qSqlite(opt.orderBy)} ${opt.dir === "desc" ? "DESC" : "ASC"}` : "";
 			const useRid = !tablePk(t);
 			const sel = useRid ? `rowid AS "__rid__", *` : "*";
-			const rows = all(`SELECT ${sel} FROM ${qSqlite(t)}${orderSql} LIMIT ? OFFSET ?`,
-				Math.min(Number(opt.limit) || 50, MAX_PAGE_ROWS), Math.max(Number(opt.offset) || 0, 0));
+			const rows = all(
+				`SELECT ${sel} FROM ${qSqlite(t)}${orderSql} LIMIT ? OFFSET ?`,
+				Math.min(Number(opt.limit) || 50, MAX_PAGE_ROWS),
+				Math.max(Number(opt.offset) || 0, 0),
+			);
 			const colsRow = all(`PRAGMA table_info(${qSqlite(t)})`);
 			const columns = [...(useRid ? ["__rid__"] : []), ...colsRow.map((c) => c.name)];
 			return { total, ...rowsToGrid(columns, rows), editable: true, pkCol: tablePk(t) ?? "__rid__" };
@@ -430,24 +527,37 @@ async function sqliteAdapter(cfg) {
 		async updateRow(_db, t, pkCol, pkVal, changes) {
 			const cols = Object.keys(changes);
 			if (!cols.length) throw new Error("没有要修改的列");
-			const info = db.prepare(
-				`UPDATE ${qSqlite(t)} SET ${cols.map(qSqlite).map((c, i) => `${c}=?`).join(", ")} WHERE ${qSqlite(pkCol)}=?`
-			).run(...Object.values(changes), pkVal);
+			const info = db
+				.prepare(
+					`UPDATE ${qSqlite(t)} SET ${cols
+						.map(qSqlite)
+						.map((c, i) => `${c}=?`)
+						.join(", ")} WHERE ${qSqlite(pkCol)}=?`,
+				)
+				.run(...Object.values(changes), pkVal);
 			return { affected: Number(info.changes ?? 0) };
 		},
 		async insertRow(_db, t, values) {
 			const cols = Object.keys(values);
 			if (!cols.length) throw new Error("没有可插入的列（全部留空）");
-			const info = db.prepare(
-				`INSERT INTO ${qSqlite(t)} (${cols.map(qSqlite).join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`
-			).run(...Object.values(values));
+			const info = db
+				.prepare(
+					`INSERT INTO ${qSqlite(t)} (${cols.map(qSqlite).join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`,
+				)
+				.run(...Object.values(values));
 			return { affected: 1, id: info.lastInsertRowid != null ? Number(info.lastInsertRowid) : null };
 		},
 		async deleteRow(_db, t, pkCol, pkVal) {
 			const info = db.prepare(`DELETE FROM ${qSqlite(t)} WHERE ${qSqlite(pkCol)}=?`).run(pkVal);
 			return { affected: Number(info.changes ?? 0) };
 		},
-		async close() { try { db.close(); } catch { /* ignore */ } },
+		async close() {
+			try {
+				db.close();
+			} catch {
+				/* ignore */
+			}
+		},
 	};
 }
 
@@ -477,9 +587,14 @@ async function mssqlAdapter(cfg) {
 	const main = await getPool(baseCfg.database);
 	async function qual(db, t) {
 		// 查真实 schema，避免写死 dbo
-		const r = await (await getPool(db)).request()
+		const r = await (
+			await getPool(db)
+		)
+			.request()
 			.input("t", mssql.VarChar(256), t)
-			.query(`SELECT TOP 1 OBJECT_SCHEMA_NAME(object_id) AS s FROM ${qMssql(db)}.sys.objects WHERE name=@t AND type IN ('U','V')`);
+			.query(
+				`SELECT TOP 1 OBJECT_SCHEMA_NAME(object_id) AS s FROM ${qMssql(db)}.sys.objects WHERE name=@t AND type IN ('U','V')`,
+			);
 		const schema = r.recordset[0]?.s || "dbo";
 		return `${qMssql(db)}.${qMssql(schema)}.${qMssql(t)}`;
 	}
@@ -491,30 +606,48 @@ async function mssqlAdapter(cfg) {
 			return r.recordset.map((x) => x.name);
 		},
 		async listTables(db) {
-			const r = await (await getPool(db)).request()
-				.query(`SELECT name, CASE type WHEN 'U' THEN 'table' ELSE 'view' END AS kind FROM ${qMssql(db)}.sys.objects WHERE type IN ('U','V') ORDER BY name`);
+			const r = await (
+				await getPool(db)
+			)
+				.request()
+				.query(
+					`SELECT name, CASE type WHEN 'U' THEN 'table' ELSE 'view' END AS kind FROM ${qMssql(db)}.sys.objects WHERE type IN ('U','V') ORDER BY name`,
+				);
 			return r.recordset.map((x) => ({ name: x.name, kind: x.kind, approxRows: 0 }));
 		},
 		async describeTable(db, t) {
 			const pool = await getPool(db);
 			const fq = await qual(db, t);
-			const cols = await pool.request().input("t", mssql.VarChar(256), t).query(
-				`SELECT COLUMN_NAME AS name, DATA_TYPE AS type, IS_NULLABLE AS nullable, COLUMN_DEFAULT AS def,
+			const cols = await pool
+				.request()
+				.input("t", mssql.VarChar(256), t)
+				.query(
+					`SELECT COLUMN_NAME AS name, DATA_TYPE AS type, IS_NULLABLE AS nullable, COLUMN_DEFAULT AS def,
 				        CHARACTER_MAXIMUM_LENGTH AS max_len
-				 FROM ${qMssql(db)}.INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME=@t ORDER BY ORDINAL_POSITION`);
-			const pk = await pool.request().input("t", mssql.VarChar(256), t).query(
-				`SELECT ku.COLUMN_NAME AS name FROM ${qMssql(db)}.INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+				 FROM ${qMssql(db)}.INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME=@t ORDER BY ORDINAL_POSITION`,
+				);
+			const pk = await pool
+				.request()
+				.input("t", mssql.VarChar(256), t)
+				.query(
+					`SELECT ku.COLUMN_NAME AS name FROM ${qMssql(db)}.INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
 				 JOIN ${qMssql(db)}.INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku ON tc.CONSTRAINT_NAME=ku.CONSTRAINT_NAME
-				 WHERE tc.TABLE_NAME=@t AND tc.CONSTRAINT_TYPE='PRIMARY KEY'`);
+				 WHERE tc.TABLE_NAME=@t AND tc.CONSTRAINT_TYPE='PRIMARY KEY'`,
+				);
 			const pkSet = new Set(pk.recordset.map((x) => x.name));
 			return {
 				columns: cols.recordset.map((c) => ({
-					name: c.name, type: c.type + (c.max_len && c.max_len > 0 && c.max_len < 8000 ? `(${c.max_len})` : ""),
-					nullable: c.nullable === "YES", key: pkSet.has(c.name) ? "PRI" : "", def: c.def ?? null, comment: "",
+					name: c.name,
+					type: c.type + (c.max_len && c.max_len > 0 && c.max_len < 8000 ? `(${c.max_len})` : ""),
+					nullable: c.nullable === "YES",
+					key: pkSet.has(c.name) ? "PRI" : "",
+					def: c.def ?? null,
+					comment: "",
 				})),
 				indexes: [],
-				ddl: `-- ${fq}\n` + cols.recordset.map((c) =>
-					`  ${c.name} ${c.type} ${c.nullable === "YES" ? "NULL" : "NOT NULL"}`).join("\n"),
+				ddl:
+					`-- ${fq}\n` +
+					cols.recordset.map((c) => `  ${c.name} ${c.type} ${c.nullable === "YES" ? "NULL" : "NOT NULL"}`).join("\n"),
 			};
 		},
 		async selectPage(db, t, opt) {
@@ -525,16 +658,30 @@ async function mssqlAdapter(cfg) {
 			const orderSql = opt.orderBy
 				? ` ORDER BY ${qMssql(opt.orderBy)} ${opt.dir === "desc" ? "DESC" : "ASC"} OFFSET @off ROWS FETCH NEXT @lim ROWS ONLY`
 				: ` ORDER BY (SELECT NULL) OFFSET @off ROWS FETCH NEXT @lim ROWS ONLY`;
-			const r = await pool.request()
+			const r = await pool
+				.request()
 				.input("off", mssql.Int, Math.max(Number(opt.offset) || 0, 0))
 				.input("lim", mssql.Int, Math.min(Number(opt.limit) || 50, MAX_PAGE_ROWS))
 				.query(`SELECT * FROM ${fq}${orderSql}`);
-			const columns = r.recordset.columns ? Object.keys(r.recordset.columns) : (r.recordset[0] ? Object.keys(r.recordset[0]) : []);
-			const pkR = await pool.request().input("t", mssql.VarChar(256), t).query(
-				`SELECT TOP 1 ku.COLUMN_NAME AS name FROM ${qMssql(db)}.INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+			const columns = r.recordset.columns
+				? Object.keys(r.recordset.columns)
+				: r.recordset[0]
+					? Object.keys(r.recordset[0])
+					: [];
+			const pkR = await pool
+				.request()
+				.input("t", mssql.VarChar(256), t)
+				.query(
+					`SELECT TOP 1 ku.COLUMN_NAME AS name FROM ${qMssql(db)}.INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
 				 JOIN ${qMssql(db)}.INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku ON tc.CONSTRAINT_NAME=ku.CONSTRAINT_NAME
-				 WHERE tc.TABLE_NAME=@t AND tc.CONSTRAINT_TYPE='PRIMARY KEY'`);
-			return { total, ...rowsToGrid(columns, r.recordset), editable: Boolean(pkR.recordset[0]?.name), pkCol: pkR.recordset[0]?.name ?? null };
+				 WHERE tc.TABLE_NAME=@t AND tc.CONSTRAINT_TYPE='PRIMARY KEY'`,
+				);
+			return {
+				total,
+				...rowsToGrid(columns, r.recordset),
+				editable: Boolean(pkR.recordset[0]?.name),
+				pkCol: pkR.recordset[0]?.name ?? null,
+			};
 		},
 		async query(db, sql) {
 			const pool = await getPool(db || baseCfg.database);
@@ -567,16 +714,28 @@ async function mssqlAdapter(cfg) {
 			const req = pool.request();
 			cols.forEach((c, i) => req.input(`v${i}`, values[c]));
 			const r = await req.query(
-				`INSERT INTO ${fq} (${cols.map(qMssql).join(", ")}) OUTPUT inserted.* VALUES (${cols.map((_, i) => `@v${i}`).join(", ")})`);
+				`INSERT INTO ${fq} (${cols.map(qMssql).join(", ")}) OUTPUT inserted.* VALUES (${cols.map((_, i) => `@v${i}`).join(", ")})`,
+			);
 			return { affected: 1, id: r.recordset?.[0] ?? null };
 		},
 		async deleteRow(db, t, pkCol, pkVal) {
 			const pool = await getPool(db);
 			const fq = await qual(db, t);
-			const r = await pool.request().input("pk", pkVal).query(`DELETE FROM ${fq} WHERE ${qMssql(pkCol)}=@pk`);
+			const r = await pool
+				.request()
+				.input("pk", pkVal)
+				.query(`DELETE FROM ${fq} WHERE ${qMssql(pkCol)}=@pk`);
 			return { affected: r.rowsAffected?.[0] ?? 0 };
 		},
-		async close() { for (const p of pools.values()) { try { await p.close(); } catch { /* ignore */ } } },
+		async close() {
+			for (const p of pools.values()) {
+				try {
+					await p.close();
+				} catch {
+					/* ignore */
+				}
+			}
+		},
 	};
 }
 
@@ -585,7 +744,9 @@ async function mongoAdapter(cfg) {
 	const MongoClient = mod.MongoClient ?? mod.default?.MongoClient;
 	let url = cfg.uri;
 	if (!url) {
-		const auth = cfg.user ? `${encodeURIComponent(String(cfg.user))}:${encodeURIComponent(String(cfg.password || ""))}@` : "";
+		const auth = cfg.user
+			? `${encodeURIComponent(String(cfg.user))}:${encodeURIComponent(String(cfg.password || ""))}@`
+			: "";
 		url = `mongodb://${auth}${cfg.host || "127.0.0.1"}:${Number(cfg.port) || 27017}/${cfg.database ? encodeURIComponent(cfg.database) : ""}`;
 	}
 	const client = new MongoClient(url, { serverSelectionTimeoutMS: CONNECT_TIMEOUT_MS });
@@ -603,14 +764,23 @@ async function mongoAdapter(cfg) {
 		async describeTable(db, t) {
 			const coll = client.db(db).collection(t);
 			let indexes = [];
-			try { indexes = (await coll.listIndexes().toArray()).map((i) => ({ name: i.name, unique: Boolean(i.unique), columns: JSON.stringify(i.key) })); } catch { /* ignore */ }
+			try {
+				indexes = (await coll.listIndexes().toArray()).map((i) => ({
+					name: i.name,
+					unique: Boolean(i.unique),
+					columns: JSON.stringify(i.key),
+				}));
+			} catch {
+				/* ignore */
+			}
 			return { columns: [], indexes, ddl: `集合 ${db}.${t}（文档型无固定结构，请到「数据」页浏览）` };
 		},
 		async selectPage(db, t, opt) {
 			const coll = client.db(db).collection(t);
 			const filter = parseJsonFilter(opt.filter);
 			const total = await coll.countDocuments(filter);
-			const docsRaw = await coll.find(filter)
+			const docsRaw = await coll
+				.find(filter)
 				.skip(Math.max(Number(opt.offset) || 0, 0))
 				.limit(Math.min(Number(opt.limit) || 50, MAX_PAGE_ROWS))
 				.toArray();
@@ -627,8 +797,11 @@ async function mongoAdapter(cfg) {
 		},
 		async docSave(db, t, id, docJson) {
 			let body;
-			try { body = JSON.parse(String(docJson ?? "")); }
-			catch (e) { throw new Error(`文档 JSON 解析失败：${e.message}`); }
+			try {
+				body = JSON.parse(String(docJson ?? ""));
+			} catch (e) {
+				throw new Error(`文档 JSON 解析失败：${e.message}`);
+			}
 			if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("文档必须是 JSON 对象");
 			const toId = (v) => (typeof v === "string" && /^[0-9a-f]{24}$/i.test(v) ? new ObjectId(v) : v);
 			const coll = client.db(db).collection(t);
@@ -637,8 +810,11 @@ async function mongoAdapter(cfg) {
 		},
 		async docInsert(db, t, docJson) {
 			let body;
-			try { body = JSON.parse(String(docJson ?? "")); }
-			catch (e) { throw new Error(`文档 JSON 解析失败：${e.message}`); }
+			try {
+				body = JSON.parse(String(docJson ?? ""));
+			} catch (e) {
+				throw new Error(`文档 JSON 解析失败：${e.message}`);
+			}
 			if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("文档必须是 JSON 对象");
 			if (typeof body._id === "string" && /^[0-9a-f]{24}$/i.test(body._id)) body._id = new ObjectId(body._id);
 			const r = await client.db(db).collection(t).insertOne(body);
@@ -646,11 +822,22 @@ async function mongoAdapter(cfg) {
 		},
 		async docDelete(db, t, id) {
 			const toId = (v) => (typeof v === "string" && /^[0-9a-f]{24}$/i.test(v) ? new ObjectId(v) : v);
-			const r = await client.db(db).collection(t).deleteOne({ _id: toId(id) });
+			const r = await client
+				.db(db)
+				.collection(t)
+				.deleteOne({ _id: toId(id) });
 			return { affected: r.deletedCount ?? 0 };
 		},
-		async query() { throw new Error("MongoDB 不支持 SQL——请在「数据」页用 JSON 过滤条件查询"); },
-		async close() { try { await client.close(); } catch { /* ignore */ } },
+		async query() {
+			throw new Error("MongoDB 不支持 SQL——请在「数据」页用 JSON 过滤条件查询");
+		},
+		async close() {
+			try {
+				await client.close();
+			} catch {
+				/* ignore */
+			}
+		},
 	};
 }
 
@@ -667,7 +854,9 @@ async function redisAdapter(cfg) {
 		retryStrategy: () => null,
 		lazyConnect: false,
 	});
-	cli.on("error", () => { /* 静默，操作层报错 */ });
+	cli.on("error", () => {
+		/* 静默，操作层报错 */
+	});
 	await withTimeout(cli.ping(), CONNECT_TIMEOUT_MS + 2000, "建立连接");
 
 	async function scanKeys(pattern, cursorIn, want) {
@@ -699,7 +888,9 @@ async function redisAdapter(cfg) {
 		if (type === "string") value = (await cli.get(key)) ?? "(nil)";
 		else if (type === "hash") {
 			const h = await cli.hgetall(key);
-			value = Object.entries(h).map(([k, v]) => `${k}: ${v}`).join("\n");
+			value = Object.entries(h)
+				.map(([k, v]) => `${k}: ${v}`)
+				.join("\n");
 		} else if (type === "list") value = (await cli.lrange(key, 0, 199)).map((v, i) => `${i}: ${v}`).join("\n");
 		else if (type === "set") value = [...(await cli.smembers(key))].slice(0, 200).join("\n");
 		else if (type === "zset") {
@@ -712,26 +903,43 @@ async function redisAdapter(cfg) {
 			value = r.map(([id, fs]) => `${id} ${JSON.stringify(fs)}`).join("\n");
 		} else value = `(类型 ${type} 暂不支持预览)`;
 		let truncated = false;
-		if (value.length > 64_000) { value = value.slice(0, 64_000) + "\n…[截断]"; truncated = true; }
-		const size = type === "string"
-			? (await cli.strlen(key))
-			: type === "hash" ? await cli.hlen(key)
-				: type === "list" ? await cli.llen(key)
-					: type === "set" ? await cli.scard(key)
-						: type === "zset" ? await cli.zcard(key)
-							: type === "stream" ? await cli.xlen(key) : 0;
+		if (value.length > 64_000) {
+			value = value.slice(0, 64_000) + "\n…[截断]";
+			truncated = true;
+		}
+		const size =
+			type === "string"
+				? await cli.strlen(key)
+				: type === "hash"
+					? await cli.hlen(key)
+					: type === "list"
+						? await cli.llen(key)
+						: type === "set"
+							? await cli.scard(key)
+							: type === "zset"
+								? await cli.zcard(key)
+								: type === "stream"
+									? await cli.xlen(key)
+									: 0;
 		return { type, ttl, size, value, truncated };
 	}
 
 	/** 简单命令行分词（支持单双引号） */
 	function tokenize(line) {
 		const out = [];
-		let cur = "", quote = null;
+		let cur = "",
+			quote = null;
 		for (const ch of String(line)) {
-			if (quote) { if (ch === quote) quote = null; else cur += ch; }
-			else if (ch === '"' || ch === "'") quote = ch;
-			else if (/\s/.test(ch)) { if (cur) { out.push(cur); cur = ""; } }
-			else cur += ch;
+			if (quote) {
+				if (ch === quote) quote = null;
+				else cur += ch;
+			} else if (ch === '"' || ch === "'") quote = ch;
+			else if (/\s/.test(ch)) {
+				if (cur) {
+					out.push(cur);
+					cur = "";
+				}
+			} else cur += ch;
 		}
 		if (cur) out.push(cur);
 		return out;
@@ -744,8 +952,11 @@ async function redisAdapter(cfg) {
 		listTables: async () => [],
 		describeTable: async () => ({ columns: [], indexes: [], ddl: "" }),
 		selectPage: async () => ({ total: 0, columns: [], rows: [] }),
-		query: async () => { throw new Error("Redis 请使用「键」标签的原始命令输入"); },
-		scanKeys, keyDetail,
+		query: async () => {
+			throw new Error("Redis 请使用「键」标签的原始命令输入");
+		},
+		scanKeys,
+		keyDetail,
 		delKey: async (key) => await cli.del(key),
 		keySet: async (key, value) => {
 			const type = await cli.type(key);
@@ -764,7 +975,13 @@ async function redisAdapter(cfg) {
 			const line = mem.split(/\r?\n/).find((l) => l.startsWith("used_memory_human"));
 			return { dbsize, usedMemory: line ? line.split(":")[1]?.trim() : "?" };
 		},
-		async close() { try { cli.disconnect(); } catch { /* ignore */ } },
+		async close() {
+			try {
+				cli.disconnect();
+			} catch {
+				/* ignore */
+			}
+		},
 	};
 }
 
@@ -782,8 +999,12 @@ const ADAPTER_FACTORIES = {
 // ---------------------------------------------------------------------------
 
 const DRIVER_MODULE = {
-	mysql: "mysql2", postgres: "pg", sqlite: "node:sqlite",
-	sqlserver: "mssql", mongodb: "mongodb", redis: "ioredis",
+	mysql: "mysql2",
+	postgres: "pg",
+	sqlite: "node:sqlite",
+	sqlserver: "mssql",
+	mongodb: "mongodb",
+	redis: "ioredis",
 };
 
 export default {
@@ -810,18 +1031,27 @@ export default {
 			try {
 				const cfg = JSON.parse(await rf(join(host.dir, CONFIG_FILE), "utf8"));
 				st.conns = Array.isArray(cfg.conns) ? cfg.conns : [];
-			} catch { st.conns = []; }
+			} catch {
+				st.conns = [];
+			}
 			if (sec?.set) {
 				// 一次性迁移：历史明文密码 → 加密机密 + 文件剥离
 				let migrated = false;
 				for (const c of st.conns) {
 					if (c.password && c.id) {
-						try { sec.set(`conn:${c.id}`, String(c.password)); } catch {}
+						try {
+							sec.set(`conn:${c.id}`, String(c.password));
+						} catch {}
 						delete c.password;
 						migrated = true;
 					}
 				}
-				if (migrated) { try { await saveConfig(); } catch {} host.log("已将连接密码迁移到加密存储"); }
+				if (migrated) {
+					try {
+						await saveConfig();
+					} catch {}
+					host.log("已将连接密码迁移到加密存储");
+				}
 			}
 			if (sec?.get) {
 				// 回填内存副本（驱动连接需要真实密码）
@@ -843,10 +1073,16 @@ export default {
 
 		function publicConn(c) {
 			return {
-				id: c.id, name: c.name, type: c.type,
-				host: c.host, port: c.port, user: c.user,
-				database: c.database ?? "", file: c.file ?? "",
-				hasPass: Boolean(c.password), hasUri: Boolean(c.uri),
+				id: c.id,
+				name: c.name,
+				type: c.type,
+				host: c.host,
+				port: c.port,
+				user: c.user,
+				database: c.database ?? "",
+				file: c.file ?? "",
+				hasPass: Boolean(c.password),
+				hasUri: Boolean(c.uri),
 				redisDb: c.redisDb ?? 0,
 			};
 		}
@@ -859,11 +1095,15 @@ export default {
 				types: DB_TYPES,
 				conns: st.conns.map(publicConn),
 				// AI 打开的连接（ownerId __agent__）不计入，避免左栏状态点 confusion
-				active: [...st.runtime.values()].filter((r) => r.ownerId !== "__agent__").map((r) => ({ connId: r.connId, hostId: r.hostId, label: r.label })),
+				active: [...st.runtime.values()]
+					.filter((r) => r.ownerId !== "__agent__")
+					.map((r) => ({ connId: r.connId, hostId: r.hostId, label: r.label })),
 			};
 		}
 
-		function broadcastAll() { host.broadcast({ kind: "state", state: publicState() }); }
+		function broadcastAll() {
+			host.broadcast({ kind: "state", state: publicState() });
+		}
 
 		function respond(action, reqId, clientId, extra = {}) {
 			host.sendTo(clientId, { res: true, reqId, ok: true, action, ...extra });
@@ -875,10 +1115,16 @@ export default {
 		// ---- 依赖自动安装 -----------------------------------------------------
 		async function loadDeps() {
 			// 按驱动粒度探测可用性（只装了部分也能用对应类型）
-			const results = await Promise.all(Object.entries(DRIVER_MODULE).map(async ([_type, name]) => {
-				try { await import(name); return [name, true]; }
-				catch { return [name, false]; }
-			}));
+			const results = await Promise.all(
+				Object.entries(DRIVER_MODULE).map(async ([_type, name]) => {
+					try {
+						await import(name);
+						return [name, true];
+					} catch {
+						return [name, false];
+					}
+				}),
+			);
 			st.depsAvail = Object.fromEntries(results);
 			st.depsOk = Object.values(st.depsAvail).every(Boolean);
 			if (!st.depsOk) host.log("驱动可用性:", JSON.stringify(st.depsAvail));
@@ -891,8 +1137,11 @@ export default {
 		}
 
 		function resolveNpmCli() {
-			try { return createRequire(import.meta.url).resolve("npm/bin/npm-cli.js"); }
-			catch { /* 插件不依赖 npm 包，常走下面 */ }
+			try {
+				return createRequire(import.meta.url).resolve("npm/bin/npm-cli.js");
+			} catch {
+				/* 插件不依赖 npm 包，常走下面 */
+			}
 			// node 可执行文件旁的 npm（Windows 标准安装 / fnm / nvm 布局）——
 			// 免 shell 直调：路径含空格也稳，服务 PATH 里没有 npm 也能装
 			try {
@@ -901,7 +1150,9 @@ export default {
 					join(dirname(process.execPath), "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
 				];
 				for (const c of cands) if (existsSync(c)) return c;
-			} catch { /* ignore */ }
+			} catch {
+				/* ignore */
+			}
 			return null;
 		}
 
@@ -911,7 +1162,9 @@ export default {
 			try {
 				const at = Number(JSON.parse(readFileSync(join(dir, INSTALL_LOCK), "utf8"))?.at ?? 0);
 				if (Number.isFinite(at) && Date.now() - at < INSTALL_LOCK_STALE_MS) return true;
-			} catch { /* 无锁或已过期/损坏 */ }
+			} catch {
+				/* 无锁或已过期/损坏 */
+			}
 			return false;
 		}
 
@@ -930,8 +1183,11 @@ export default {
 			broadcastAll();
 			host.log(`installing deps: ${DEPS.join(" ")}${auto ? " (auto)" : ""}`);
 			host.notify("info", "🗄️ 数据库插件：开始安装驱动依赖（首次约需几分钟）…");
-			try { writeFileSync(join(host.dir, INSTALL_LOCK), JSON.stringify({ at: Date.now(), pid: process.pid })); }
-			catch { /* 锁写失败也不挡安装 */ }
+			try {
+				writeFileSync(join(host.dir, INSTALL_LOCK), JSON.stringify({ at: Date.now(), pid: process.pid }));
+			} catch {
+				/* 锁写失败也不挡安装 */
+			}
 			const npmCli = resolveNpmCli();
 			const args = ["--prefix", host.dir, "install", ...DEPS, "--no-audit", "--no-fund"];
 			// Windows 上 npm 是 .cmd：优先 node 直调 npm-cli（免 shell）；实在找不到
@@ -940,18 +1196,33 @@ export default {
 			// "arguments are not escaped, only concatenated" deprecation）。
 			const child = npmCli
 				? spawn(process.execPath, [npmCli, ...args], { stdio: ["ignore", "ignore", "pipe"] })
-				: spawn(`npm ${args.map((a) => winQuote(a)).join(" ")}`, [], { stdio: ["ignore", "ignore", "pipe"], shell: true });
+				: spawn(`npm ${args.map((a) => winQuote(a)).join(" ")}`, [], {
+						stdio: ["ignore", "ignore", "pipe"],
+						shell: true,
+					});
 			st.installer = child;
 			// 安装看门狗：超时没装完就杀掉判失败，避免“驱动安装中…”永远转下去
 			const timer = setTimeout(() => {
 				host.log(`install timed out after ${INSTALL_TIMEOUT_MS / 60000}min, killing npm`);
-				try { child.kill("SIGTERM"); } catch { /* ignore */ }
-				setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* ignore */ } }, 5000).unref?.();
+				try {
+					child.kill("SIGTERM");
+				} catch {
+					/* ignore */
+				}
+				setTimeout(() => {
+					try {
+						child.kill("SIGKILL");
+					} catch {
+						/* ignore */
+					}
+				}, 5000).unref?.();
 				finish(false, "安装超时");
 			}, INSTALL_TIMEOUT_MS);
 			timer.unref?.();
 			let errTail = "";
-			child.stderr?.on("data", (d) => { errTail = (errTail + d.toString()).slice(-1000); });
+			child.stderr?.on("data", (d) => {
+				errTail = (errTail + d.toString()).slice(-1000);
+			});
 			let done = false;
 			child.on("error", (err) => finish(false, err.message));
 			child.on("exit", (code, signal) => finish(code === 0, signal ? `npm 被终止（${signal}）` : `npm exit ${code}`));
@@ -960,7 +1231,11 @@ export default {
 				done = true;
 				clearTimeout(timer);
 				if (st.installer === child) st.installer = null;
-				try { rmSync(join(host.dir, INSTALL_LOCK), { force: true }); } catch { /* ignore */ }
+				try {
+					rmSync(join(host.dir, INSTALL_LOCK), { force: true });
+				} catch {
+					/* ignore */
+				}
 				st.depsInstalling = false;
 				if (ok) await loadDeps();
 				// 取 stderr 最后一个非空行（通常是 npm error 摘要），避免只有干巴巴的 exit 码
@@ -1027,14 +1302,45 @@ export default {
 		// ------------------------------------------------------------------
 		// 消息路由
 		// ------------------------------------------------------------------
+		/** 写/危险操作（按 connId 动连接的）——每次都留审计日志。
+		 *  归属校验的边界：ownerId 来自客户端 hello 自报的 clientId（服务端不认证），
+		 *  多标签共享口令下既可仿冒、且运行时池本来就是全标签共享的（publicState 广播
+		 *  所有 connId 给每个标签页），做 owner 相等拦截会打断正常跨标签使用——
+		 *  故退化为「connId 存在性校验（getRuntime 抛错）+ 写操作审计日志」。 */
+		const MUTATING_ACTIONS = new Set([
+			"disconnect",
+			"query_exec",
+			"row_update",
+			"row_insert",
+			"row_delete",
+			"doc_save",
+			"doc_insert",
+			"doc_delete",
+			"redis_del",
+			"redis_key_set",
+			"redis_cmd",
+		]);
+
 		const off = host.onMessage(async (payload, clientId) => {
 			await ensureReady();
 			const msg = payload ?? {};
 			const { action, reqId } = msg;
 
+			if (MUTATING_ACTIONS.has(action)) {
+				const runtime = typeof msg.connId === "string" ? st.runtime.get(msg.connId) : undefined;
+				const detail =
+					action === "query_exec"
+						? String(msg.sql ?? "").slice(0, 200)
+						: action === "redis_cmd"
+							? String(msg.cmd ?? "").slice(0, 200)
+							: "";
+				host.log(
+					`db-client 审计：${action} conn=${msg.connId ?? "-"} owner=${runtime?.ownerId ?? "-"} by=${clientId}${detail ? ` detail=${detail}` : ""}`,
+				);
+			}
+
 			const reply = (err, extra) =>
-				err ? fail(action, reqId, clientId, err)
-					: respond(action, reqId, clientId, extra ?? {});
+				err ? fail(action, reqId, clientId, err) : respond(action, reqId, clientId, extra ?? {});
 			try {
 				switch (action) {
 					case "state": {
@@ -1055,7 +1361,7 @@ export default {
 							if (i < 0) throw new Error("连接不存在");
 							const old = st.conns[i];
 							// 密码语义不变：留空 = 沿用旧值；显式 null = 清除（同步删机密）
-							storeConnSecret(c.id, c.password === null ? null : (c.password || undefined));
+							storeConnSecret(c.id, c.password === null ? null : c.password || undefined);
 							st.conns[i] = {
 								...old,
 								name: c.name ?? old.name,
@@ -1064,10 +1370,10 @@ export default {
 								port: Number(c.port) || old.port,
 								user: c.user ?? old.user,
 								// 凭据留空 = 沿用旧值；显式 null = 清除
-								password: c.password === null ? undefined : (c.password || old.password),
+								password: c.password === null ? undefined : c.password || old.password,
 								database: c.database ?? old.database,
 								file: c.file ?? old.file,
-								uri: c.uri === null ? undefined : (c.uri || old.uri),
+								uri: c.uri === null ? undefined : c.uri || old.uri,
 								redisDb: Number.isFinite(+c.redisDb) ? +c.redisDb : old.redisDb,
 							};
 						} else {
@@ -1123,17 +1429,34 @@ export default {
 						const cfg = st.conns.find((x) => x.id === msg.id);
 						if (!cfg) throw new Error("连接不存在");
 						for (const r of st.runtime.values()) {
-							if (r.hostId === cfg.id) { // 已开 → 直接复用
-								return void respond(action, reqId, clientId, { connId: r.connId, label: r.label, kind: r.adapter.kind, dialect: r.adapter.dialect });
+							if (r.hostId === cfg.id) {
+								// 已开 → 直接复用
+								return void respond(action, reqId, clientId, {
+									connId: r.connId,
+									label: r.label,
+									kind: r.adapter.kind,
+									dialect: r.adapter.dialect,
+								});
 							}
 						}
 						if (st.runtime.size >= MAX_RUNTIME) throw new Error(`最多同时打开 ${MAX_RUNTIME} 个连接，请先断开一些`);
 						const adapter = await openAdapter(cfg);
 						const connId = `c${st.nextConnId++}`;
-						const r = { connId, ownerId: clientId, hostId: cfg.id, label: cfg.name || cfg.host || cfg.file || cfg.type, adapter };
+						const r = {
+							connId,
+							ownerId: clientId,
+							hostId: cfg.id,
+							label: cfg.name || cfg.host || cfg.file || cfg.type,
+							adapter,
+						};
 						st.runtime.set(connId, r);
 						broadcastAll();
-						return void respond(action, reqId, clientId, { connId, label: r.label, kind: adapter.kind, dialect: adapter.dialect });
+						return void respond(action, reqId, clientId, {
+							connId,
+							label: r.label,
+							kind: adapter.kind,
+							dialect: adapter.dialect,
+						});
 					}
 
 					case "disconnect": {
@@ -1144,7 +1467,9 @@ export default {
 					// ---- 通用 SQL/NoSQL 浏览 ----
 					case "dbs_list": {
 						const r = getRuntime(msg.connId);
-						return void respond(action, reqId, clientId, { databases: await withTimeout(r.adapter.listDatabases(), OP_TIMEOUT_MS, "查询") });
+						return void respond(action, reqId, clientId, {
+							databases: await withTimeout(r.adapter.listDatabases(), OP_TIMEOUT_MS, "查询"),
+						});
 					}
 					case "tables_list": {
 						const r = getRuntime(msg.connId);
@@ -1159,10 +1484,17 @@ export default {
 					}
 					case "page": {
 						const r = getRuntime(msg.connId);
-						const grid = await withTimeout(r.adapter.selectPage(msg.db, msg.table, {
-							offset: msg.offset, limit: msg.limit,
-							orderBy: msg.orderBy, dir: msg.dir, filter: msg.filter,
-						}), OP_TIMEOUT_MS, "查询");
+						const grid = await withTimeout(
+							r.adapter.selectPage(msg.db, msg.table, {
+								offset: msg.offset,
+								limit: msg.limit,
+								orderBy: msg.orderBy,
+								dir: msg.dir,
+								filter: msg.filter,
+							}),
+							OP_TIMEOUT_MS,
+							"查询",
+						);
 						return void respond(action, reqId, clientId, { grid });
 					}
 					case "query_exec": {
@@ -1179,19 +1511,29 @@ export default {
 						if (!r.adapter.updateRow) throw new Error("该数据源不支持行编辑");
 						const out = await withTimeout(
 							r.adapter.updateRow(msg.db, msg.table, String(msg.pk?.col ?? ""), msg.pk?.val, msg.changes ?? {}),
-							OP_TIMEOUT_MS, "写入");
+							OP_TIMEOUT_MS,
+							"写入",
+						);
 						return void respond(action, reqId, clientId, out);
 					}
 					case "row_insert": {
 						const r = getRuntime(msg.connId);
 						if (!r.adapter.insertRow) throw new Error("该数据源不支持插入行");
-						const out = await withTimeout(r.adapter.insertRow(msg.db, msg.table, msg.values ?? {}), OP_TIMEOUT_MS, "写入");
+						const out = await withTimeout(
+							r.adapter.insertRow(msg.db, msg.table, msg.values ?? {}),
+							OP_TIMEOUT_MS,
+							"写入",
+						);
 						return void respond(action, reqId, clientId, out);
 					}
 					case "row_delete": {
 						const r = getRuntime(msg.connId);
 						if (!r.adapter.deleteRow) throw new Error("该数据源不支持删除行");
-						const out = await withTimeout(r.adapter.deleteRow(msg.db, msg.table, String(msg.pk?.col ?? ""), msg.pk?.val), OP_TIMEOUT_MS, "写入");
+						const out = await withTimeout(
+							r.adapter.deleteRow(msg.db, msg.table, String(msg.pk?.col ?? ""), msg.pk?.val),
+							OP_TIMEOUT_MS,
+							"写入",
+						);
 						return void respond(action, reqId, clientId, out);
 					}
 
@@ -1199,7 +1541,11 @@ export default {
 					case "doc_save": {
 						const r = getRuntime(msg.connId);
 						if (!r.adapter.docSave) throw new Error("该数据源不支持文档编辑");
-						const out = await withTimeout(r.adapter.docSave(msg.db, msg.table, msg.id, msg.docJson), OP_TIMEOUT_MS, "写入");
+						const out = await withTimeout(
+							r.adapter.docSave(msg.db, msg.table, msg.id, msg.docJson),
+							OP_TIMEOUT_MS,
+							"写入",
+						);
 						return void respond(action, reqId, clientId, out);
 					}
 					case "doc_insert": {
@@ -1219,7 +1565,11 @@ export default {
 					case "redis_scan": {
 						const r = getRuntime(msg.connId);
 						if (!r.adapter.scanKeys) throw new Error("该连接不是 Redis");
-						const out = await withTimeout(r.adapter.scanKeys(msg.pattern, msg.cursor, msg.count), OP_TIMEOUT_MS, "查询");
+						const out = await withTimeout(
+							r.adapter.scanKeys(msg.pattern, msg.cursor, msg.count),
+							OP_TIMEOUT_MS,
+							"查询",
+						);
 						return void respond(action, reqId, clientId, out);
 					}
 					case "redis_key": {
@@ -1235,7 +1585,11 @@ export default {
 					case "redis_key_set": {
 						const r = getRuntime(msg.connId);
 						if (!r.adapter.keySet) throw new Error("该连接不是 Redis 或不支持键编辑");
-						const out = await withTimeout(r.adapter.keySet(String(msg.key ?? ""), String(msg.value ?? "")), OP_TIMEOUT_MS, "写入");
+						const out = await withTimeout(
+							r.adapter.keySet(String(msg.key ?? ""), String(msg.value ?? "")),
+							OP_TIMEOUT_MS,
+							"写入",
+						);
 						return void respond(action, reqId, clientId, out);
 					}
 					case "redis_cmd": {
@@ -1268,10 +1622,20 @@ export default {
 			const q = String(ref ?? "").trim();
 			if (!q) {
 				if (st.conns.length === 1) return st.conns[0];
-				throw new Error(`有 ${st.conns.length} 个连接，请指定 connection（id 或名称）：` + st.conns.map((c) => `${c.name}(${c.id}/${c.type})`).join("、"));
+				throw new Error(
+					`有 ${st.conns.length} 个连接，请指定 connection（id 或名称）：` +
+						st.conns.map((c) => `${c.name}(${c.id}/${c.type})`).join("、"),
+				);
 			}
-			return st.conns.find((c) => c.id === q) ?? st.conns.find((c) => c.name === q)
-				?? (() => { throw new Error(`找不到连接「${q}」；现有：` + st.conns.map((c) => `${c.name}(${c.id}/${c.type})`).join("、")); })();
+			return (
+				st.conns.find((c) => c.id === q) ??
+				st.conns.find((c) => c.name === q) ??
+				(() => {
+					throw new Error(
+						`找不到连接「${q}」；现有：` + st.conns.map((c) => `${c.name}(${c.id}/${c.type})`).join("、"),
+					);
+				})()
+			);
 		}
 
 		async function getAiAdapter(ref) {
@@ -1281,7 +1645,13 @@ export default {
 			if (st.runtime.size >= MAX_RUNTIME) throw new Error(`最多同时打开 ${MAX_RUNTIME} 个连接，请先在面板断开一些`);
 			const adapter = await openAdapter(cfg);
 			const connId = `a${st.nextConnId++}`;
-			st.runtime.set(connId, { connId, ownerId: "__agent__", hostId: cfg.id, label: cfg.name || cfg.host || cfg.file || cfg.type, adapter });
+			st.runtime.set(connId, {
+				connId,
+				ownerId: "__agent__",
+				hostId: cfg.id,
+				label: cfg.name || cfg.host || cfg.file || cfg.type,
+				adapter,
+			});
 			return { cfg, adapter };
 		}
 
@@ -1299,9 +1669,11 @@ export default {
 			const cols = grid.columns ?? [];
 			const rows = grid.rows ?? [];
 			const head = cols.join("\t");
-			const lines = rows.slice(0, maxRows).map((r) => r.map((v) => v === null ? "NULL" : String(v)).join("\t"));
+			const lines = rows.slice(0, maxRows).map((r) => r.map((v) => (v === null ? "NULL" : String(v))).join("\t"));
 			if (grid.total != null && (grid.affected || rows.length)) {
-				lines.unshift(`共 ${grid.total} 行${rows.length > maxRows ? `（仅显示前 ${maxRows} 行）` : ""}${grid.elapsedMs != null ? ` · ${grid.elapsedMs}ms` : ""}`);
+				lines.unshift(
+					`共 ${grid.total} 行${rows.length > maxRows ? `（仅显示前 ${maxRows} 行）` : ""}${grid.elapsedMs != null ? ` · ${grid.elapsedMs}ms` : ""}`,
+				);
 			}
 			if (grid.affected) lines.push(`影响 ${grid.affected} 行`);
 			return [head, ...lines].filter((l) => l !== "").join("\n") || "(空结果)";
@@ -1312,21 +1684,29 @@ export default {
 				{
 					name: "db_connections",
 					label: "列出数据库连接",
-					description: "列出已保存的数据库连接（名称/id/类型/地址）。查库第一步：先用它确认 connection 参数填什么。",
+					description:
+						"List saved database connections (name/id/type/address). First step for DB work: use it to see valid connection values.",
 					parameters: { type: "object", properties: {} },
 					execute: async () => {
 						await ensureReady();
 						if (!st.conns.length) return "还没有保存任何数据库连接。";
-						return st.conns.map((c) => `${c.name} (id=${c.id}, type=${c.type}, ${c.type === "sqlite" ? c.file : `${c.user ? `${c.user}@` : ""}${c.host}:${c.port}${c.database ? `/${c.database}` : ""}`})`).join("\n");
+						return st.conns
+							.map(
+								(c) =>
+									`${c.name} (id=${c.id}, type=${c.type}, ${c.type === "sqlite" ? c.file : `${c.user ? `${c.user}@` : ""}${c.host}:${c.port}${c.database ? `/${c.database}` : ""}`})`,
+							)
+							.join("\n");
 					},
 				},
 				{
 					name: "db_databases",
 					label: "列出库",
-					description: "列出某个连接下的数据库名。",
+					description: "List database names under a connection.",
 					parameters: {
 						type: "object",
-						properties: { connection: { type: "string", description: "连接 id 或名称（唯一连接时可省略）" } },
+						properties: {
+							connection: { type: "string", description: "Connection id or name; omit if only one connection exists" },
+						},
 					},
 					execute: async (_id, args) => {
 						const { adapter } = await getAiAdapter(args?.connection);
@@ -1336,12 +1716,12 @@ export default {
 				{
 					name: "db_tables",
 					label: "列出表",
-					description: "列出指定库的表/集合/视图（名称 + 类型）。",
+					description: "List tables/collections/views of a database (name + type).",
 					parameters: {
 						type: "object",
 						properties: {
-							connection: { type: "string", description: "连接 id 或名称（唯一连接时可省略）" },
-							database: { type: "string", description: "库名（有默认库的连接可省略）" },
+							connection: { type: "string", description: "Connection id or name; omit if only one connection exists" },
+							database: { type: "string", description: "Database name; omit on connections with a default database" },
 						},
 					},
 					execute: async (_id, args) => {
@@ -1355,13 +1735,13 @@ export default {
 				{
 					name: "db_schema",
 					label: "查看表结构",
-					description: "查看表的列/索引/DDL（写 SQL 前先用它确认列名）。",
+					description: "Show a table's columns/indexes/DDL (check column names before writing SQL).",
 					parameters: {
 						type: "object",
 						properties: {
-							connection: { type: "string", description: "连接 id 或名称（唯一连接时可省略）" },
-							database: { type: "string", description: "库名（有默认库的连接可省略）" },
-							table: { type: "string", description: "表名" },
+							connection: { type: "string", description: "Connection id or name; omit if only one connection exists" },
+							database: { type: "string", description: "Database name; omit on connections with a default database" },
+							table: { type: "string", description: "Table name" },
 						},
 						required: ["table"],
 					},
@@ -1369,26 +1749,36 @@ export default {
 						const { cfg, adapter } = await getAiAdapter(args?.connection);
 						const db = defaultDb(cfg, adapter, args?.database);
 						const d = await withTimeout(adapter.describeTable(db, String(args.table)), OP_TIMEOUT_MS, "查询");
-						const cols = (d.columns ?? []).map((c) => `  ${c.name} ${c.type}${c.nullable ? "" : " NOT NULL"}${c.key ? ` [${c.key}]` : ""}${c.def != null ? ` DEFAULT ${c.def}` : ""}`).join("\n");
-						const idx = (d.indexes ?? []).map((i) => `  ${i.name}${i.unique ? " UNIQUE" : ""}: ${i.columns}`).join("\n");
-						return [`列:\n${cols || "(无固定列信息)"}`, idx ? `索引:\n${idx}` : "", d.ddl ? `DDL:\n${d.ddl}` : ""].filter(Boolean).join("\n\n");
+						const cols = (d.columns ?? [])
+							.map(
+								(c) =>
+									`  ${c.name} ${c.type}${c.nullable ? "" : " NOT NULL"}${c.key ? ` [${c.key}]` : ""}${c.def != null ? ` DEFAULT ${c.def}` : ""}`,
+							)
+							.join("\n");
+						const idx = (d.indexes ?? [])
+							.map((i) => `  ${i.name}${i.unique ? " UNIQUE" : ""}: ${i.columns}`)
+							.join("\n");
+						return [`列:\n${cols || "(无固定列信息)"}`, idx ? `索引:\n${idx}` : "", d.ddl ? `DDL:\n${d.ddl}` : ""]
+							.filter(Boolean)
+							.join("\n\n");
 					},
 				},
 				{
 					name: "db_rows",
 					label: "分页查数据",
-					description: "分页查看表/集合的数据（只读）。MongoDB 可传 filter（JSON 对象字符串）。",
+					description:
+						"Read table/collection data page by page (read-only). MongoDB accepts filter (JSON object string).",
 					parameters: {
 						type: "object",
 						properties: {
-							connection: { type: "string", description: "连接 id 或名称（唯一连接时可省略）" },
-							database: { type: "string", description: "库名（有默认库的连接可省略）" },
-							table: { type: "string", description: "表名/集合名" },
-							limit: { type: "number", description: "每页行数，默认 50，最大 500" },
-							offset: { type: "number", description: "偏移，默认 0" },
-							orderBy: { type: "string", description: "排序列（可选）" },
-							dir: { type: "string", enum: ["asc", "desc"], description: "排序方向" },
-							filter: { type: "string", description: "MongoDB JSON 过滤条件，如 {\"age\":{\"$gt\":18}}" },
+							connection: { type: "string", description: "Connection id or name; omit if only one connection exists" },
+							database: { type: "string", description: "Database name; omit on connections with a default database" },
+							table: { type: "string", description: "Table/collection name" },
+							limit: { type: "number", description: "Rows per page, default 50, max 500" },
+							offset: { type: "number", description: "Offset, default 0" },
+							orderBy: { type: "string", description: "Sort column (optional)" },
+							dir: { type: "string", enum: ["asc", "desc"], description: "Sort direction" },
+							filter: { type: "string", description: 'MongoDB JSON filter, e.g. {"age":{"$gt":18}}' },
 						},
 						required: ["table"],
 					},
@@ -1396,25 +1786,34 @@ export default {
 						const { cfg, adapter } = await getAiAdapter(args?.connection);
 						if (adapter.kind === "redis") throw new Error("Redis 请用 db_redis_keys / db_redis_get / db_redis_cmd");
 						const db = defaultDb(cfg, adapter, args?.database);
-						const grid = await withTimeout(adapter.selectPage(db, String(args.table), {
-							offset: args?.offset, limit: args?.limit, orderBy: args?.orderBy, dir: args?.dir, filter: args?.filter,
-						}), OP_TIMEOUT_MS, "查询");
+						const grid = await withTimeout(
+							adapter.selectPage(db, String(args.table), {
+								offset: args?.offset,
+								limit: args?.limit,
+								orderBy: args?.orderBy,
+								dir: args?.dir,
+								filter: args?.filter,
+							}),
+							OP_TIMEOUT_MS,
+							"查询",
+						);
 						return fmtGrid(grid);
 					},
 				},
 				{
 					name: "db_query",
 					label: "执行 SQL",
-					description: "对 SQL 系连接执行一条 SQL（MySQL/PostgreSQL/SQLite/SQL Server；MongoDB/Redis 不可用）。SELECT 直接返回结果集。",
+					description:
+						"Run one SQL statement on a SQL connection (MySQL/PostgreSQL/SQLite/SQL Server; not for MongoDB/Redis). SELECT returns the result set.",
 					promptGuidelines: [
-						"INSERT/UPDATE/DELETE/DROP 等写操作执行前，先把 SQL 给用户确认一次。",
+						"Confirm the SQL with the user once before running writes such as INSERT/UPDATE/DELETE/DROP.",
 					],
 					parameters: {
 						type: "object",
 						properties: {
-							connection: { type: "string", description: "连接 id 或名称（唯一连接时可省略）" },
-							database: { type: "string", description: "库名（有默认库的连接可省略）" },
-							sql: { type: "string", description: "SQL 语句" },
+							connection: { type: "string", description: "Connection id or name; omit if only one connection exists" },
+							database: { type: "string", description: "Database name; omit on connections with a default database" },
+							sql: { type: "string", description: "SQL statement" },
 						},
 						required: ["sql"],
 					},
@@ -1422,7 +1821,8 @@ export default {
 						const sql = String(args?.sql ?? "");
 						if (!sql.trim()) throw new Error("SQL 为空");
 						const { cfg, adapter } = await getAiAdapter(args?.connection);
-						if (adapter.kind !== "sql") throw new Error("该连接不是 SQL 数据库（MongoDB 请用 db_rows + filter，Redis 请用 db_redis_*）");
+						if (adapter.kind !== "sql")
+							throw new Error("该连接不是 SQL 数据库（MongoDB 请用 db_rows + filter，Redis 请用 db_redis_*）");
 						const db = defaultDb(cfg, adapter, args?.database);
 						const grid = await withTimeout(adapter.query(db, sql), OP_TIMEOUT_MS, "查询");
 						return fmtGrid(grid);
@@ -1431,19 +1831,23 @@ export default {
 				{
 					name: "db_redis_keys",
 					label: "扫描 Redis 键",
-					description: "扫描 Redis 键（返回 键 + 类型）。仅 Redis 连接可用。",
+					description: "Scan Redis keys (returns key + type). Redis connections only.",
 					parameters: {
 						type: "object",
 						properties: {
-							connection: { type: "string", description: "连接 id 或名称（唯一连接时可省略）" },
-							pattern: { type: "string", description: "匹配模式，默认 *" },
-							count: { type: "number", description: "最多返回键数，默认 200" },
+							connection: { type: "string", description: "Connection id or name; omit if only one connection exists" },
+							pattern: { type: "string", description: "Match pattern, default *" },
+							count: { type: "number", description: "Max keys to return, default 200" },
 						},
 					},
 					execute: async (_id, args) => {
 						const { adapter } = await getAiAdapter(args?.connection);
 						if (!adapter.scanKeys) throw new Error("该连接不是 Redis");
-						const out = await withTimeout(adapter.scanKeys(args?.pattern || "*", "0", args?.count ?? 200), OP_TIMEOUT_MS, "查询");
+						const out = await withTimeout(
+							adapter.scanKeys(args?.pattern || "*", "0", args?.count ?? 200),
+							OP_TIMEOUT_MS,
+							"查询",
+						);
 						if (!out.keys.length) return "(没有匹配的键)";
 						return out.keys.map((k) => `${k.key} [${k.type}]`).join("\n");
 					},
@@ -1451,12 +1855,12 @@ export default {
 				{
 					name: "db_redis_get",
 					label: "查看 Redis 键值",
-					description: "查看 Redis 键的类型/TTL/大小/内容。仅 Redis 连接可用。",
+					description: "Show a Redis key's type/TTL/size/content. Redis connections only.",
 					parameters: {
 						type: "object",
 						properties: {
-							connection: { type: "string", description: "连接 id 或名称（唯一连接时可省略）" },
-							key: { type: "string", description: "键名" },
+							connection: { type: "string", description: "Connection id or name; omit if only one connection exists" },
+							key: { type: "string", description: "Key name" },
 						},
 						required: ["key"],
 					},
@@ -1470,15 +1874,15 @@ export default {
 				{
 					name: "db_redis_cmd",
 					label: "执行 Redis 命令",
-					description: "对 Redis 连接执行原始命令，如 GET foo。读命令直接执行。",
+					description: "Run a raw Redis command, e.g. GET foo. Read commands run directly.",
 					promptGuidelines: [
-						"DEL/FLUSHDB/FLUSHALL/SET 等写/删命令执行前，先向用户确认一次。",
+						"Confirm with the user once before running write/delete commands such as DEL/FLUSHDB/FLUSHALL/SET.",
 					],
 					parameters: {
 						type: "object",
 						properties: {
-							connection: { type: "string", description: "连接 id 或名称（唯一连接时可省略）" },
-							cmd: { type: "string", description: "原始命令，如 GET foo" },
+							connection: { type: "string", description: "Connection id or name; omit if only one connection exists" },
+							cmd: { type: "string", description: "Raw command, e.g. GET foo" },
 						},
 						required: ["cmd"],
 					},
@@ -1497,7 +1901,12 @@ export default {
 			// 不卡 depsOk：sqlite 零依赖可用，缺驱动的连接在调用时报友好错误
 			if (host.registerAgentTool) {
 				const offs = aiTools().map((t) => host.registerAgentTool(t));
-				st.toolUnregister = () => offs.forEach((off) => { try { off(); } catch {} });
+				st.toolUnregister = () =>
+					offs.forEach((off) => {
+						try {
+							off();
+						} catch {}
+					});
 				host.log("AI 数据库工具已开启");
 			}
 		}
@@ -1516,20 +1925,36 @@ export default {
 		return () => {
 			st.dead = true;
 			off();
-			try { offAttach?.(); } catch {}
-			try { st.toolUnregister?.(); } catch {}
+			try {
+				offAttach?.();
+			} catch {}
+			try {
+				st.toolUnregister?.();
+			} catch {}
 			st.toolUnregister = null;
 			if (st.installer) {
 				// 关机/重载时正装着：杀掉安装子进程并同步清锁——否则残留的
 				// stderr 管道会拖住事件循环让关机 hang 住，强杀又留下半截
 				// node_modules；锁清掉后下次启动自动重装即可恢复。
-				try { st.installer.kill("SIGTERM"); } catch { /* ignore */ }
+				try {
+					st.installer.kill("SIGTERM");
+				} catch {
+					/* ignore */
+				}
 				st.installer = null;
 				st.depsInstalling = false;
-				try { rmSync(join(host.dir, INSTALL_LOCK), { force: true }); } catch { /* ignore */ }
+				try {
+					rmSync(join(host.dir, INSTALL_LOCK), { force: true });
+				} catch {
+					/* ignore */
+				}
 			}
 			for (const r of st.runtime.values()) {
-				try { void r.adapter?.close?.(); } catch { /* ignore */ }
+				try {
+					void r.adapter?.close?.();
+				} catch {
+					/* ignore */
+				}
 			}
 			st.runtime.clear();
 		};

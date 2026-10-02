@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { FiX } from "react-icons/fi";
 import { useT } from "../i18n";
 import { archiveAction, uploadFolder, pickFolder, type ArchiveAction, type FolderEntry } from "../file-transfer";
 
@@ -80,7 +81,19 @@ export function FileTransferDialog({
 					void run();
 				}}
 			>
-				<h3 id="file-transfer-title">{title}</h3>
+				<div className="file-transfer-head">
+					<h3 id="file-transfer-title">{title}</h3>
+					<button
+						type="button"
+						className="file-transfer-close"
+						title={t("close")}
+						aria-label={t("close")}
+						disabled={busy}
+						onClick={onClose}
+					>
+						<FiX />
+					</button>
+				</div>
 				<p className="file-transfer-path">{(request.action === "upload" ? request.dir : request.path) || "."}</p>
 				<p>{t("fileArchiveLimits")}</p>
 				{request.action === "extract" && (

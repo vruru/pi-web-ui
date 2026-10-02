@@ -166,7 +166,17 @@ AI 拿到正文后：legado_rules → legado_source_probe → legado_run_rule �
 
 - **零 npm 依赖**：GBK 解码用内置 `TextDecoder('gbk')`；编码用惰性构建的反查表（遍历 GBK 双字节空间反向建映射，约 20ms、只在用到非 UTF-8 charset 时构建）。
 - **绝不透传浏览器请求头**：只带默认 UA/Accept 与书源自己声明的 `headers`——否则 pi-web 的 token cookie 会被带去第三方站点（`tests/legado-web-test.mjs` 有回归）。
+- **私网/回环黑名单（SSRF 防护）**：`/proxy` 拒绝抓取回环、私网、链路本地目标（127/8、10/8、172.16/12、192.168/16、169.254/16、0/8、CGNAT 100.64/10、组播/保留段、`::1`、`fe80::/10`、`fc00::/7`、`*.localhost`），域名按 DNS 解析结果判定，重定向逐跳复查（手动跟、≤5 跳）。本机自建书源站需要抓自己的话，设环境变量 `LEGADO_ALLOW_PRIVATE_HOSTS=<主机名或IP，逗号分隔>` 显式放行。
 - 静态资源不用插件挂路由：`client/app/` 由宿主 `/plugins/<id>/client/*` 托管；前端用相对路径加载，应用根前缀（nginx 子路径 `/pi`）自适应（`app/src/core/apiBase.ts`）。
+
+## 书源安全（务必先读）
+
+书源是**第三方写的规则 + JS 代码**，添加书源等于「允许这段代码在你的机器上运行」：
+
+- **书源 JS 以插件进程权限运行**（内嵌 UI 在浏览器里、AI 诊断在插件 worker 里），没有真正的沙箱隔离（架构级限制，对标原版 Legado 的 Rhino 方案也没有）：它能通过 `java.ajax` 发任意 HTTP 请求、读写本插件提供的内存缓存与变量作用域。**只导入可信来源的书源**，不要来路不明的「全能书源」。
+- **时间预算**：单条规则 JS 求值超过 3 秒按失败中止（`app/src/core/js.ts` 协作式检查 + 引擎 worker 任务超时兜底），慢规则/死循环不会拖垮宿主。
+- **`/proxy` 不碰内网**：见上方黑名单说明；书源抓不到 `127.0.0.1`、内网网段与云元数据地址（169.254.169.254）。
+- **数据面**：书源数据只落 `<dataDir>/legado-web/*.json`，书源 JS 拿不到宿主 token、cookies 与文件系统（`java` 桥只暴露规则需要的方法，见 `app/src/core/js.ts` 的 `makeJava`）。
 
 ## 数据
 

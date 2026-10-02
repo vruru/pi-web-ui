@@ -6,12 +6,13 @@
  *  - 禁用语义：被禁用的工具名经 syncPluginToolsIntoSession 从会话移除（机制层面）。
  * 零 token、零网络，毫秒级。
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { normalizeDisabledPluginTools } from "../../server/client-state.js";
 import { syncPluginToolsIntoSession, PluginManager } from "../../server/plugins.js";
+import { SettingsService, type SettingsHost } from "../../server/settings-service.js";
 
 describe("normalizeDisabledPluginTools", () => {
 	it("非数组回落空（默认全开）", () => {
@@ -101,6 +102,12 @@ export default {
 			expect(info?.agentTools?.map((t) => t.name)).toEqual(["fixture_alpha", "fixture_zebra"]);
 			const rescanned = await mgr.list();
 			expect(rescanned.find((p) => p.id === "fixture")?.agentTools).toHaveLength(2);
+
+			const allTools = mgr.getAgentTools();
+			expect(allTools).toHaveLength(2);
+			expect(allTools[0]?.pluginId).toBe("fixture");
+			expect(allTools[1]?.pluginId).toBe("fixture");
+
 			mgr.dispose();
 		} finally {
 			rmSync(base, { recursive: true, force: true });
@@ -122,5 +129,76 @@ describe("禁用语义（会话同步层面）", () => {
 		);
 		expect(next).toEqual(new Set());
 		expect(session._customTools.map((d) => d.name)).toEqual(["bash"]);
+	});
+
+	it("更新 disabledPlugins 时触发 toolGatingChanged 并调用 applyToolGating (issue #395)", async () => {
+		const applyToolGating = vi.fn();
+		const host = {
+			clientId: "c-test",
+			stateStore: {
+				getSettings: () => ({
+					promptMode: "append",
+					customSystemPrompt: "",
+					promptTemplate: "",
+					promptOverrides: {},
+					disabledSkills: [],
+					disabledExtensions: [],
+					disabledAgentTools: [],
+					disabledPluginTools: [],
+					terminalToolsEnabled: false,
+					terminalBash: false,
+					terminalBashIdleMs: 15_000,
+					terminalBashMaxForegroundMs: 60_000,
+					editSoftEnabled: false,
+					questionnaireEnabled: true,
+					goalModeEnabled: true,
+					thinkingWrap: false,
+					toolsWrap: true,
+					skillsFullText: [],
+					visionBridgeEnabled: true,
+					visionBridgeModel: null,
+					visionBridgePromptMode: "append",
+					visionBridgePrompt: "",
+					subagentDefaultModel: null,
+					retryMaxAttempts: 6,
+					softCapTokens: 0,
+					softCapByModel: {},
+					quickPhrases: [],
+					quickPhrasesEnabled: true,
+					reviewPrompt: "",
+					reviewDisabledSkills: [],
+					disabledPlugins: [],
+					uiLayout: {},
+				}),
+				saveSettings: () => {},
+				getPresets: () => [],
+				getQuickPhrasesSeeded: () => false,
+			},
+			emit: () => {},
+			flushSnapshot: () => {},
+			isDisposed: () => false,
+			getSession: () => {
+				throw new Error("no session");
+			},
+			cwd: () => "/tmp",
+			agentDir: () => "/tmp",
+			isStreaming: () => false,
+			reloadSession: async () => {},
+			applyRetryOverrides: () => {},
+			applyCompactionOverrides: () => {},
+			applyToolGating,
+			promptSnapshot: () => ({ full: "", texts: {}, toolsSchema: "" }),
+			getMarkerState: () => ({ markersEnabled: true, disabledMarkers: [], markers: [] }),
+			getApprovalPolicy: () => ({ enabled: false }),
+			onGoalModeDisabled: () => {},
+		} as unknown as SettingsHost;
+
+		const templates = {
+			list: () => [],
+		} as unknown as import("../../server/subagent-templates.js").SubagentTemplatesStore;
+		const approvalRules = { list: () => [] } as unknown as import("../../server/approval-rules.js").ApprovalRulesStore;
+		const svc = new SettingsService(host, templates, approvalRules);
+		await svc.set({ disabledPlugins: ["vscode-editor"] });
+		expect(applyToolGating).toHaveBeenCalledTimes(1);
 	});
 });

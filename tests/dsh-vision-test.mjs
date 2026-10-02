@@ -48,7 +48,7 @@ try {
 	rtAvailable = false;
 }
 if (!rtAvailable) {
-	console.log("⏭ SKIP：未找到 dsh 运行时树（需 npm i -g @deepseek-ai/dsh@0.1.1-rc.2 或 PI_WEB_DSH_RUNTIME）");
+	console.log("⏭ SKIP：未找到 dsh 运行时树（需 npm i -g @deepseek-ai/dsh@0.1.5-rc.3 或 PI_WEB_DSH_RUNTIME）");
 	process.exit(0);
 }
 

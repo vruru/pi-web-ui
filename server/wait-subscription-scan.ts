@@ -25,7 +25,7 @@
 // conversation switches. See the Chinese block above for the persistence layout
 // and the fail-open vs fail-closed rationale.
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import path from "node:path";
 
@@ -134,11 +134,10 @@ export function resolveAsyncRunsDir(env: NodeJS.ProcessEnv = process.env): strin
 }
 
 /**
- * 活跃 run marker 的最长可信存活期：对齐 pi-subagents
- * active-run-index.ts 的 DEFAULT_STALE_TERMINAL_ACTIVE_MARKER_MS（24h）。
- * 崩溃遗留的 marker 超过该时长即视为孤儿，不阻止运行时释放（保留自限）。
+ * 【已废弃】按 marker mtime 的 24h 孤儿守卫（原 DEFAULT_STALE_ACTIVE_MARKER_MS）
+ * 已移除：run 是否终结改由 status.json 的 state 判定（见 hasActiveSubagentRun）。
+ * mtime 只能说明「marker 很久没动」，对 >24h 的超长 run 会误杀活跃证据。
  */
-export const DEFAULT_STALE_ACTIVE_MARKER_MS = 24 * 60 * 60 * 1000;
 
 /** 活跃 marker 索引目录名，与 pi-subagents 的 ACTIVE_RUN_INDEX_DIR 一致。 */
 const ACTIVE_RUN_INDEX_DIR = ".active-runs";
@@ -154,24 +153,29 @@ export interface ActiveRunScanOptions {
 	asyncRunsDir?: string;
 	/** 会话标识 = AsyncStatus.sessionId = session .jsonl 绝对路径。 */
 	sessionId?: string;
-	now?: () => number;
-	/** marker 超过该时长视为崩溃孤儿，不保留。默认 24h（对齐上游）。 */
-	staleMarkerMs?: number;
 	/** I/O 警告出口（测试可静音）。默认 console.warn。 */
 	warn?: (message: string, error: unknown) => void;
 }
 
 /**
  * 磁盘扫描：该会话是否还有活跃（queued/running）的 pi-subagents 异步 run。
- * 任何 I/O / 解析 / 过期错误都按「无证据」处理（fail-open，见文件头说明）。
+ * 任何 I/O / 解析错误都按「无证据」处理（fail-open，见文件头说明）。
  * ENOENT（目录/文件尚不存在、marker 刚被清掉）保持静默；其余 I/O 错误
  * console.warn 一次（与 hasPendingWaitSubscription 对齐）。
+ *
+ * run 是否已终结的廉价判据是 status.json 的 state 字段——它本来就在同一循环
+ * 里逐 marker 读取，零额外 I/O。孤儿清理因此只作用于「已终结 run」的遗留
+ * marker（终结态在下方无条件判为无证据）；曾按 marker mtime 超 24h 一律
+ * 跳过的旧守卫已移除：它同样命中「超长 run（>24h 仍在跑）」的活跃 marker，
+ * 会把正常运行误杀成孤儿、提前释放运行时，父会话永远等不到 wake。与上游
+ * pi-subagents 的 DEFAULT_STALE_TERMINAL_ACTIVE_MARKER_MS 语义对齐——24h
+ * 自限只该管 terminal marker，不该管还声称存活的 run。代价：进程崩溃遗留
+ * 的 queued/running status 不再随 mtime 过期自动失效，其代价（多保留一个
+ * 空闲运行时）远小于误杀超长 run 的静默停滞。
  */
 export function hasActiveSubagentRun(options: ActiveRunScanOptions): boolean {
 	const sessionId = options.sessionId;
 	if (!sessionId) return false;
-	const now = options.now ?? Date.now;
-	const staleMarkerMs = options.staleMarkerMs ?? DEFAULT_STALE_ACTIVE_MARKER_MS;
 	const warn = options.warn ?? ((message: string, error: unknown) => console.warn(message, error));
 	const isNotFound = (error: unknown): boolean =>
 		typeof error === "object" &&
@@ -189,15 +193,6 @@ export function hasActiveSubagentRun(options: ActiveRunScanOptions): boolean {
 	}
 	for (const runId of markers) {
 		if (runId.startsWith(".")) continue; // 不把隐藏文件当 run 证据
-		const markerFile = path.join(indexDir, runId);
-		// 孤儿防护：marker 太久没被 touch（崩溃遗留，run 早已不在）→ 无证据。
-		try {
-			const ageMs = now() - statSync(markerFile).mtimeMs;
-			if (ageMs > staleMarkerMs) continue;
-		} catch (error) {
-			if (!isNotFound(error)) warn(`Failed to stat active-run marker '${markerFile}':`, error);
-			continue; // ENOENT（刚被清除的竞态）→ 无证据
-		}
 		let status: unknown;
 		try {
 			status = JSON.parse(readFileSync(path.join(runsDir, runId, "status.json"), "utf-8"));
@@ -209,7 +204,9 @@ export function hasActiveSubagentRun(options: ActiveRunScanOptions): boolean {
 		if (!status || typeof status !== "object" || Array.isArray(status)) continue;
 		const probe = status as AsyncStatusProbe;
 		if (probe.sessionId !== sessionId) continue; // 别的会话的 run
-		if (probe.state !== "queued" && probe.state !== "running") continue; // 已结束
+		// 终结态（complete/failed/stopped/…）→ run 已结束：遗留 marker 按孤儿
+		// 清理对待，无条件不算证据；只有 queued/running 才是活跃证据。
+		if (probe.state !== "queued" && probe.state !== "running") continue;
 		return true;
 	}
 	return false;
@@ -275,6 +272,12 @@ export function hasPendingWaitSubscription(options: PendingWakeScanOptions): boo
 
 /** displaceActive 决策的输入快照（纯数据，便于单测）。 */
 export interface DisplacementDecisionInput {
+	/** 用户显式「钉住」的对话常驻运行列表：任何空闲态都不得释放（最高优先级，
+	 *  覆盖「打开未继续即移出」等自动规则；显式 dismiss 仍可移出）。
+	 *  User-pinned conversations stay in the running list across switches even
+	 *  when idle with no live terminals — overrides every automatic rule below;
+	 *  an explicit dismiss still removes it. */
+	pinned?: boolean;
 	reviewing: boolean;
 	wizardRunning: boolean;
 	streaming: boolean;
@@ -283,6 +286,11 @@ export interface DisplacementDecisionInput {
 	 *  Compaction in progress — switching away disposes the runtime, which
 	 *  aborts the compaction. Retain like streaming. */
 	compacting?: boolean;
+	/** 用户消息正在投递中（prompt() 已进门、还没进入流式）：前置的附件构建 /
+	 *  工作区影子快照都是异步的，此期间对话既不 streaming 也未落盘新消息，
+	 *  *切走/新建对话* 会把它当空闲对话替换并销毁 runtime，导致这条消息被
+	 *  静默丢弃（投递写进已销毁的会话）。保留它，等投递落定。 */
+	promptInFlight?: boolean;
 	/** 存活 PTY 数（已退出、仅保留输出的终端不计入）——没有活进程的残留终端
 	 *  不应把空闲对话永久钉在运行列表里。Live PTY count only: exited
 	 *  terminals that merely retain output do not retain the conversation. */
@@ -309,11 +317,13 @@ export interface DisplacementDecisionInput {
 /**
  * 纯函数版置换决策：true = 保留（不得 dispose），false = 调用方可释放。
  * Pure decision core of displaceActive(): true = retain, false = may dispose.
- * 顺序与 displaceActive 保持一致：review/wizard → streaming → terminals →
+ * 顺序与 displaceActive 保持一致：pin → review/wizard → streaming → terminals →
  * active subagent run → pending wake → listed+continued（「打开后继续过」的会话也保留）。
  */
 export function shouldRetainActive(input: DisplacementDecisionInput): boolean {
+	if (input.pinned) return true;
 	if (input.reviewing || input.wizardRunning) return true;
+	if (input.promptInFlight) return true;
 	if (input.streaming || input.compacting) return true;
 	if (input.openTerminals > 0) return true;
 	const hasActiveRun =

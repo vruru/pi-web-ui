@@ -29,6 +29,9 @@ import { join } from "node:path";
 import WebSocket from "ws";
 import { freePort, portUp } from "./lib/port-utils.mjs";
 
+// 测试内假书源站监听 127.0.0.1，SSRF 防护对回环地址放行
+process.env.LEGADO_ALLOW_PRIVATE_HOSTS = process.env.LEGADO_ALLOW_PRIVATE_HOSTS ?? "127.0.0.1,localhost";
+
 const PORT = 8993;
 const UPSTREAM_PORT = 8994;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -132,7 +135,13 @@ try {
 	freePort(UPSTREAM_PORT);
 	upstream = await startUpstream();
 	proc = spawn(serverPath, [join(import.meta.dirname, "..", "dist", "server", "index.js")], {
-		env: { ...process.env, PI_WEB_PORT: String(PORT), PI_WEB_DATA_DIR: dataDir, PI_WEB_CWD: import.meta.dirname },
+		env: {
+			...process.env,
+			PI_WEB_PORT: String(PORT),
+			PI_WEB_DATA_DIR: dataDir,
+			PI_WEB_CWD: import.meta.dirname,
+			LEGADO_ALLOW_PRIVATE_HOSTS: process.env.LEGADO_ALLOW_PRIVATE_HOSTS ?? "127.0.0.1,localhost",
+		},
 		stdio: ["ignore", "pipe", "pipe"],
 	});
 	proc.stderr.on("data", (d) => process.stderr.write(`[server] ${d}`));

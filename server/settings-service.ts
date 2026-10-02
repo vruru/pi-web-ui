@@ -12,6 +12,8 @@ import { fileURLToPath } from "node:url";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type {
 	ServerMessage,
+	UiApprovalPolicyState,
+	UiApprovalRule,
 	UiExtensionInfo,
 	UiLayoutPrefs,
 	UiSettingsState,
@@ -32,7 +34,9 @@ import {
 import { normalizeSoftCapByModel, normalizeSoftCapTokens } from "./soft-cap.js";
 import { findVisionModels, SYSTEM_PROMPT } from "./vision-bridge.js";
 import { COMMITMSG_SYSTEM_PROMPT } from "./scm-commitmsg.js";
+import { PLAN_MODE_SYSTEM_PROMPT } from "./plan-mode.js";
 import { DEFAULT_TEMPLATES, type SubagentTemplatesStore } from "./subagent-templates.js";
+import type { ApprovalRulesStore } from "./approval-rules.js";
 import { deriveLegacy, foldLegacyIntoDisabled, normalizeDisabledAgentTools } from "./tool-manager.js";
 
 /** ClientSession 提供给本服务的宿主能力（窄接口，便于独立测试）。 */
@@ -74,6 +78,11 @@ export interface SettingsHost {
 	promptSnapshot: () => { full: string; texts: Record<string, string>; toolsSchema: string };
 	/** 可选：内置标记状态（设置面板展示用）。 */
 	getMarkerState?: () => MarkerStateForSettings;
+	/** 可选：当前对话的审批放行策略（「本对话全部允许 / 允许同类」的撤销区用；
+	 *  纯内存态，见 server/tool-approval.ts 的 ApprovalPolicy）。 */
+	getApprovalPolicy?: () => UiApprovalPolicyState;
+	/** 可选：目标模式总开关 on→off 时调 —— 停掉在飞的目标/调研（否则循环照跑照派）。 */
+	onGoalModeDisabled?: () => void;
 }
 
 export class SettingsService {
@@ -88,6 +97,8 @@ export class SettingsService {
 		private readonly host: SettingsHost,
 		/** 全局子代理模板库（所有客户端共享；模板改动无需 reload runtime）。 */
 		private readonly templates: SubagentTemplatesStore,
+		/** 全局审批规则库（所有客户端共享；修改实时生效无需 reload runtime）。 */
+		private readonly approvalRules?: ApprovalRulesStore,
 	) {
 		this.settings = host.stateStore.getSettings(host.clientId);
 		this.presets = host.stateStore.getPresets(host.clientId);
@@ -109,13 +120,6 @@ export class SettingsService {
 			dir = dirname(dir);
 		}
 		return false;
-	}
-
-	get reviewPrefs(): Pick<ClientSettings, "reviewPrompt" | "reviewDisabledSkills"> {
-		return {
-			reviewPrompt: this.settings.reviewPrompt,
-			reviewDisabledSkills: this.settings.reviewDisabledSkills,
-		};
 	}
 
 	hasPendingReload(): boolean {
@@ -336,8 +340,12 @@ export class SettingsService {
 				terminalToolsEnabled: legacyTools.terminalToolsEnabled,
 				terminalBash: this.settings.terminalBash,
 				terminalBashIdleMs: this.settings.terminalBashIdleMs,
+				terminalBashMaxForegroundMs: this.settings.terminalBashMaxForegroundMs,
 				toolWatchdogTimeoutMs: this.settings.toolWatchdogTimeoutMs,
 				readDirEnabled: this.settings.readDirEnabled !== false,
+				toolApprovalEnabled: this.settings.toolApprovalEnabled !== false,
+				approvalPolicy: this.host.getApprovalPolicy?.() ?? { allowAll: false, categories: [] },
+				approvalRules: this.approvalRules?.list() ?? [],
 				editSoftEnabled: legacyTools.editSoftEnabled,
 				questionnaireEnabled: legacyTools.questionnaireEnabled,
 				parallelReminderEnabled: this.settings.parallelReminderEnabled ?? true,
@@ -353,6 +361,8 @@ export class SettingsService {
 				visionBridgePrompt: this.settings.visionBridgePrompt,
 				scmCommitMsgPromptMode: this.settings.scmCommitMsgPromptMode,
 				scmCommitMsgPrompt: this.settings.scmCommitMsgPrompt,
+				planModePromptMode: this.settings.planModePromptMode,
+				planModePrompt: this.settings.planModePrompt,
 				reviewPrompt: this.settings.reviewPrompt,
 				reviewDisabledSkills: [...this.settings.reviewDisabledSkills],
 				disabledPlugins: [...(this.settings.disabledPlugins ?? [])],
@@ -366,6 +376,7 @@ export class SettingsService {
 				toolsSchema: promptSnap.toolsSchema,
 				visionBridgeDefaultPrompt: SYSTEM_PROMPT,
 				scmCommitMsgDefaultPrompt: COMMITMSG_SYSTEM_PROMPT,
+				planModeDefaultPrompt: PLAN_MODE_SYSTEM_PROMPT,
 				visionModels: this.collectVisionModels(),
 				disabledSkills: [...this.settings.disabledSkills],
 				disabledExtensions: [...this.settings.disabledExtensions],
@@ -449,10 +460,13 @@ export class SettingsService {
 		terminalToolsEnabled?: boolean;
 		terminalBash?: boolean;
 		terminalBashIdleMs?: number;
+		terminalBashMaxForegroundMs?: number;
 		toolWatchdogTimeoutMs?: number;
 		/** read 工具读目录开关（默认开；见 server/read-tool.ts）。运行时无需重载，
 		 *  覆盖定义每次调用实时读取。 */
 		readDirEnabled?: boolean;
+		/** 工具执行审批总开关（默认开；纯运行开关，每次审批实时读取，无需 reload）。 */
+		toolApprovalEnabled?: boolean;
 		editSoftEnabled?: boolean;
 		questionnaireEnabled?: boolean;
 		/** 同项目并行提醒开关（默认开；纯运行开关，下一轮即生效，无需 reload）。 */
@@ -470,6 +484,8 @@ export class SettingsService {
 		visionBridgePrompt?: string;
 		scmCommitMsgPromptMode?: PromptMode;
 		scmCommitMsgPrompt?: string;
+		planModePromptMode?: PromptMode;
+		planModePrompt?: string;
 		reviewPrompt?: string;
 		reviewDisabledSkills?: string[];
 		disabledPlugins?: string[];
@@ -495,6 +511,7 @@ export class SettingsService {
 		const toolGatingChanged =
 			partial.disabledAgentTools !== undefined ||
 			partial.disabledPluginTools !== undefined ||
+			partial.disabledPlugins !== undefined ||
 			partial.terminalToolsEnabled !== undefined ||
 			partial.editSoftEnabled !== undefined ||
 			partial.questionnaireEnabled !== undefined;
@@ -559,6 +576,9 @@ export class SettingsService {
 		if (partial.terminalBashIdleMs !== undefined) {
 			this.settings.terminalBashIdleMs = Math.max(0, Math.floor(partial.terminalBashIdleMs) || 0);
 		}
+		if (partial.terminalBashMaxForegroundMs !== undefined) {
+			this.settings.terminalBashMaxForegroundMs = Math.max(0, Math.floor(partial.terminalBashMaxForegroundMs) || 0);
+		}
 		if (partial.toolWatchdogTimeoutMs !== undefined) {
 			this.settings.toolWatchdogTimeoutMs = normalizeToolWatchdogTimeoutMs(partial.toolWatchdogTimeoutMs);
 		}
@@ -566,9 +586,16 @@ export class SettingsService {
 		if (partial.readDirEnabled !== undefined) {
 			this.settings.readDirEnabled = partial.readDirEnabled;
 		}
+		// 工具执行审批总开关：审批入口每次实时读取（askApproval 顶部门禁），无需 reload。
+		if (partial.toolApprovalEnabled !== undefined) {
+			this.settings.toolApprovalEnabled = partial.toolApprovalEnabled;
+		}
 		// 目标模式总开关：运行时无需重载（goal bar / 服务端入口实时读取）。
+		// on→off 时立即停掉在飞的目标/调研 —— 不停的话循环照跑照派，开关名存实亡。
 		if (partial.goalModeEnabled !== undefined) {
+			const wasOn = this.settings.goalModeEnabled !== false;
 			this.settings.goalModeEnabled = partial.goalModeEnabled;
+			if (wasOn && partial.goalModeEnabled === false) this.host.onGoalModeDisabled?.();
 		}
 		// 同项目并行提醒开关：同上，发送入口逐轮实时读取，无需 reload。
 		if (partial.parallelReminderEnabled !== undefined) {
@@ -612,6 +639,12 @@ export class SettingsService {
 		if (partial.scmCommitMsgPrompt !== undefined) {
 			this.settings.scmCommitMsgPrompt = partial.scmCommitMsgPrompt;
 		}
+		if (partial.planModePromptMode !== undefined) {
+			this.settings.planModePromptMode = partial.planModePromptMode;
+		}
+		if (partial.planModePrompt !== undefined) {
+			this.settings.planModePrompt = partial.planModePrompt;
+		}
 		if (partial.reviewPrompt !== undefined) {
 			this.settings.reviewPrompt = partial.reviewPrompt;
 		}
@@ -652,10 +685,12 @@ export class SettingsService {
 		if (partial.quickPhrasesEnabled !== undefined) {
 			this.settings.quickPhrasesEnabled = partial.quickPhrasesEnabled;
 		}
+		// 统一工具开关 live 生效（ActiveSet 加减；失败静默，下次创建/reload 重放）。
+		// 必须在 this.push() 前生效，保证 promptSnapshot 收集到的是最新的活跃工具集与完整提示词！
+		if (toolGatingChanged) this.host.applyToolGating();
 		this.host.stateStore.saveSettings(this.host.clientId, this.settings);
 		this.push();
-		// 统一工具开关 live 生效（ActiveSet 加减；失败静默，下次创建/reload 重放）。
-		if (toolGatingChanged) this.host.applyToolGating();
+		this.host.flushSnapshot();
 		if (needsReload) await this.applyRuntime();
 	}
 
@@ -684,6 +719,7 @@ export class SettingsService {
 			terminalToolsEnabled: this.settings.terminalToolsEnabled,
 			terminalBash: this.settings.terminalBash,
 			terminalBashIdleMs: this.settings.terminalBashIdleMs,
+			terminalBashMaxForegroundMs: this.settings.terminalBashMaxForegroundMs,
 			editSoftEnabled: this.settings.editSoftEnabled,
 			retryMaxAttempts: this.settings.retryMaxAttempts,
 			softCapTokens: this.settings.softCapTokens,
@@ -736,8 +772,11 @@ export class SettingsService {
 			// 终端接管偏好随预设走；旧预设缺字段时保留当前值。
 			terminalBash: p.terminalBash ?? this.settings.terminalBash,
 			terminalBashIdleMs: p.terminalBashIdleMs ?? this.settings.terminalBashIdleMs,
+			terminalBashMaxForegroundMs: p.terminalBashMaxForegroundMs ?? this.settings.terminalBashMaxForegroundMs,
 			// read 读目录是纯运行行为开关，不进预设——保留当前值。
 			readDirEnabled: this.settings.readDirEnabled !== false,
+			// 工具审批总开关同样是纯运行开关，不进预设——保留当前值。
+			toolApprovalEnabled: this.settings.toolApprovalEnabled !== false,
 			// toolWatchdogTimeoutMs 是纯运行行为参数，不进预设——保留当前值。
 			toolWatchdogTimeoutMs: this.settings.toolWatchdogTimeoutMs,
 			editSoftEnabled: presetLegacy.editSoftEnabled,
@@ -776,6 +815,9 @@ export class SettingsService {
 			// 「AI 提交信息」提示词同样不进预设——保留当前值。
 			scmCommitMsgPromptMode: this.settings.scmCommitMsgPromptMode,
 			scmCommitMsgPrompt: this.settings.scmCommitMsgPrompt,
+			// 计划模式提示词同样不进预设——保留当前值。
+			planModePromptMode: this.settings.planModePromptMode,
+			planModePrompt: this.settings.planModePrompt,
 			// 子代理默认模型也不进预设——保留当前值。
 			subagentDefaultModel: this.settings.subagentDefaultModel,
 			// 快捷短语是纯 UI 偏好，不进预设——保留当前值。
@@ -830,6 +872,94 @@ export class SettingsService {
 			level: "info",
 			text: `子代理模板已删除：${name}`,
 			textEn: `Subagent template deleted: ${name}`,
+		});
+	}
+
+	/** Upsert 一条审批规则（全局共享）。 */
+	async saveApprovalRule(rule: UiApprovalRule): Promise<void> {
+		if (!this.approvalRules) return;
+		const err = this.approvalRules.upsert(rule);
+		if (err) {
+			this.host.emit({
+				type: "notice",
+				level: "error",
+				text: `审批规则保存失败：${err}`,
+				textEn: `Failed to save approval rule: ${err}`,
+			});
+			return;
+		}
+		this.push();
+		this.host.emit({
+			type: "notice",
+			level: "info",
+			text: `审批规则已保存：${rule.label}`,
+			textEn: `Approval rule saved: ${rule.labelEn || rule.label}`,
+		});
+	}
+
+	/** 批量更新审批规则列表（重排或批量保存，全局共享）。 */
+	async saveApprovalRules(rules: UiApprovalRule[]): Promise<void> {
+		if (!this.approvalRules) return;
+		const err = this.approvalRules.saveAll(rules);
+		if (err) {
+			this.host.emit({
+				type: "notice",
+				level: "error",
+				text: `审批规则列表保存失败：${err}`,
+				textEn: `Failed to save approval rules: ${err}`,
+			});
+			return;
+		}
+		this.push();
+		this.host.emit({
+			type: "notice",
+			level: "info",
+			text: "审批规则列表已更新",
+			textEn: "Approval rules updated",
+		});
+	}
+
+	/** 删除一条自定义审批规则。 */
+	async deleteApprovalRule(id: string): Promise<void> {
+		if (!this.approvalRules) return;
+		const ok = this.approvalRules.remove(id);
+		if (!ok) {
+			this.host.emit({
+				type: "notice",
+				level: "error",
+				text: "审批规则删除失败（内置规则不可删除）",
+				textEn: "Failed to delete approval rule (built-in rules cannot be deleted)",
+			});
+			return;
+		}
+		this.push();
+		this.host.emit({
+			type: "notice",
+			level: "info",
+			text: "审批规则已删除",
+			textEn: "Approval rule deleted",
+		});
+	}
+
+	/** 恢复某条内置审批规则到系统默认设定。 */
+	async resetBuiltinApprovalRule(id: string): Promise<void> {
+		if (!this.approvalRules) return;
+		const ok = this.approvalRules.resetBuiltin(id);
+		if (!ok) {
+			this.host.emit({
+				type: "notice",
+				level: "error",
+				text: "恢复默认失败：未找到对应内置规则",
+				textEn: "Failed to reset: built-in rule not found",
+			});
+			return;
+		}
+		this.push();
+		this.host.emit({
+			type: "notice",
+			level: "info",
+			text: "内置规则已恢复默认",
+			textEn: "Built-in rule reset to default",
 		});
 	}
 

@@ -24,8 +24,9 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { existsSync, mkdirSync, realpathSync, rmSync, statSync, writeFileSync, type Dirent } from "node:fs";
+import { readdir as fspReaddir } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { killPidTree } from "./process-utils.js";
 
@@ -134,8 +135,9 @@ function realpathOf(p: string): string {
  * 目标自身（存在时）或它最近一个**已存在的祖先**的真实路径；一路到盘根都解析不出来 → null。
  * 用途是复核符号链接：`<root>/link/file.txt` 里 link 若是指向别处的 junction，
  * 单看字符串它「在 root 里」，realpath 之后就露馅了。
+ * 导出给 plugin-facilities / plugins.ts 的写类操作复用（同一套越界复核语义）。
  */
-function realPathOfNearest(abs: string): string | null {
+export function realPathOfNearest(abs: string): string | null {
 	let probe = abs;
 	for (let i = 0; i < MAX_ANCESTOR_HOPS; i++) {
 		try {
@@ -152,6 +154,27 @@ function realPathOfNearest(abs: string): string | null {
 /** 相对路径统一成 `/` 分隔（wire / 日志 / 前端都用正斜杠，Windows 的 path 会回 `\`）。 */
 function toSlash(p: string): string {
 	return p.split(sep).join("/");
+}
+
+/**
+ * 递归列目录，返回树内全部符号链接 / junction 的绝对路径。
+ * win32 上 Dirent.isSymbolicLink() 同样覆盖 junction（lstat 语义）；只读不跟随。
+ * 目录读不了（权限/竞态删除）返回空数组 —— 兜底交给写入前的逐目标 realpath 复核。
+ */
+async function findSymlinks(dir: string): Promise<string[]> {
+	const out: string[] = [];
+	let entries: Dirent[];
+	try {
+		entries = await fspReaddir(dir, { recursive: true, withFileTypes: true });
+	} catch {
+		return out;
+	}
+	for (const e of entries) {
+		if (!e.isSymbolicLink()) continue;
+		const parent = e.parentPath ?? dir;
+		out.push(join(parent, e.name));
+	}
+	return out;
 }
 
 function errMessage(err: unknown): string {
@@ -249,24 +272,55 @@ async function runGit(
 		child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
 
 		let timedOut = false;
-		const timer = setTimeout(() => {
-			timedOut = true;
-			if (typeof child.pid === "number" && child.pid > 0) killPidTree(child.pid);
-			else child.kill("SIGKILL");
-		}, opts.timeoutMs);
-
+		let settled = false;
+		let graceTimer: NodeJS.Timeout | undefined;
 		let spawnError: string | undefined;
-		child.on("error", (err) => {
-			spawnError = `无法启动 git（${bin}）：${errMessage(err)}`;
-		});
-		child.on("close", (code) => {
+		const finish = (code: number | null) => {
+			if (settled) return;
+			settled = true;
 			clearTimeout(timer);
+			if (graceTimer) clearTimeout(graceTimer);
 			stdout.flush();
 			stderr.flush();
 			let tail = stderrLines.join("\n");
 			if (tail.length > MAX_STDERR_TAIL) tail = `…${tail.slice(-MAX_STDERR_TAIL)}`;
 			settle({ code: code ?? -1, timedOut, stderrTail: tail, ...(spawnError ? { spawnError } : {}) });
+		};
+		const timer = setTimeout(() => {
+			timedOut = true;
+			if (typeof child.pid === "number" && child.pid > 0) {
+				void killPidTree(child.pid);
+				// On Windows taskkill is asynchronous and a child may not emit close
+				// promptly. Directly kill the git process too, then force settlement
+				// after a short grace period so callers never hang on close.
+				try {
+					child.kill("SIGKILL");
+				} catch {
+					/* already dead */
+				}
+			} else {
+				try {
+					child.kill("SIGKILL");
+				} catch {
+					/* already dead */
+				}
+			}
+			graceTimer = setTimeout(() => {
+				try {
+					child.stdout?.destroy();
+					child.stderr?.destroy();
+				} catch {
+					/* already closed */
+				}
+				finish(-1);
+			}, 500);
+		}, opts.timeoutMs);
+
+		child.on("error", (err) => {
+			spawnError = `无法启动 git（${bin}）：${errMessage(err)}`;
+			if (timedOut) finish(-1);
 		});
+		child.on("close", (code) => finish(code));
 	});
 }
 
@@ -420,6 +474,26 @@ export async function createProject(
 		return undefined;
 	};
 	try {
+		// 本轮真正 clone 出的目录（根目录本身除外 —— 它是授权目录，绝不清理）与
+		// 已写入的文件，供「clone 后置复核命中」时回滚，不把半个带毒仓库留在盘上。
+		const clonedThisRun = plannedRepos.filter((r) => !samePath(r.dest, root)).map((r) => r.dest);
+		const writtenThisRun: string[] = [];
+		const cleanupThisRun = (): void => {
+			for (const f of writtenThisRun) {
+				try {
+					rmSync(f, { force: true });
+				} catch {
+					/* 清理尽力而为 */
+				}
+			}
+			for (const d of clonedThisRun) {
+				try {
+					rmSync(d, { recursive: true, force: true });
+				} catch {
+					/* 清理尽力而为 */
+				}
+			}
+		};
 		for (const r of plannedRepos) {
 			const atRoot = samePath(r.dest, root);
 			// 根目录已存在是常态（它就是那个已存在的授权目录），既不 rm 也不 mkdir ——
@@ -444,10 +518,33 @@ export async function createProject(
 			if (why) return fail(`${why}${res.stderrTail === "" ? "" : `：${res.stderrTail}`}`);
 		}
 
+		// ——— ⑥ clone 后置复核（写文件前）：前置校验（③④）都在 clone 之前，而恶意
+		//     仓库可以在 clone 时落地指向 root 之外的符号链接，随后的文件写入就会跟着
+		//     链接跑出授权目录（「先 clone 后校验」的逃逸窗口）。两道防线：
+		//     a. 扫描 clone 出的目录树，出现任何符号链接即视为恶意仓库整体拒绝
+		//        （clone --depth 1 不跑包管理器，正常仓库极少提交 symlink，宁可误杀）；
+		//     b. 每个写入目标写前再做一次 realPathOfNearest 复核（覆盖 a 与写盘之间的窗口）。
+		//     任一命中：清理本轮 clone 的目录（rmSync 不跟随符号链接，安全）与已写文件。
+		for (const dest of clonedThisRun) {
+			const offenders = await findSymlinks(dest);
+			if (offenders.length > 0) {
+				cleanupThisRun();
+				return fail(`仓库包含符号链接（视为恶意仓库拒绝），例如：${toSlash(relative(root, offenders[0]!))}`);
+			}
+		}
+
 		for (const f of plannedFiles) {
+			// 写前复核目标仍解析在 rootReal 内：前置校验时它还不存在（最近祖先在 root 内），
+			// clone 之后可能被仓库塞进来的符号链接顶掉。
+			const real = realPathOfNearest(f.abs);
+			if (real === null || !isInsideRoot(rootReal, real)) {
+				cleanupThisRun();
+				return fail(`files 路径越界（clone 后复核：符号链接指向 dir 之外）：${f.rel}`);
+			}
 			emit(`write ${f.rel}`);
 			mkdirSync(dirname(f.abs), { recursive: true });
 			writeFileSync(f.abs, f.content, "utf8");
+			writtenThisRun.push(f.abs);
 		}
 
 		if (spec?.gitInit === true) {

@@ -84,6 +84,8 @@ writeFileSync(join(dataDir, "subagent-templates.json"), JSON.stringify(TEMPLATES
 // 探针扩展：每次发往 provider 的请求都记一条「角色 + 当前思考强度」。
 // 角色判定：请求体里同时出现工具结果（role=tool）= 主对话的收尾回合；
 // 否则看用户消息里的派单标记（子代理的提示词）；都不是 = 主对话首回合。
+// 子代理完成后服务端会自动唤醒空闲的派发会话（主对话的续跑回合）：它的载荷带着子代理
+// 的标题（含派单标记），必须先认出来（main-resume），否则会被标记匹配误记成子代理回合。
 // ---------------------------------------------------------------------------
 writeFileSync(
 	join(extDir, "thinking-probe.ts"),
@@ -108,6 +110,7 @@ export default function (pi: any) {
 				const mark = name.toUpperCase();
 				if (sysText.includes("ROLE_" + mark) || userText.includes("SPAWN_" + mark)) role = name;
 			}
+			if (flat.includes("Subagent results are ready")) role = "main-resume";
 			note("REQ role=" + role + " think=" + ctx.thinkingLevel + " effort=" + (event?.payload?.reasoning_effort ?? "-") + " model=" + (ctx.model?.id ?? "?"));
 		} catch (e: any) {
 			note("ERR " + (e && e.message ? e.message : String(e)));
@@ -137,7 +140,7 @@ const spawnCall = (index, template, prompt) => ({
 	index,
 	id: `call_${template}`,
 	type: "function",
-	function: { name: "subagent_spawn", arguments: JSON.stringify({ prompt, type: template, template }) },
+	function: { name: "subagent", arguments: JSON.stringify({ action: "spawn", prompt, type: template, template }) },
 });
 
 const mock = createServer(async (req, res) => {
@@ -160,6 +163,13 @@ const mock = createServer(async (req, res) => {
 	const sysText = JSON.stringify(messages.filter((m) => m.role !== "user" && m.role !== "assistant"));
 	const userText = JSON.stringify(messages.filter((m) => m.role === "user"));
 	const hasToolResult = messages.some((m) => m.role === "tool");
+
+	// 主对话的自动续跑回合（子代理结果送达）：载荷里带子代理标题（含 SPAWN_X），先于
+	// 下面的标记匹配处理 —— 它是主对话，不是子代理。只回文本，绝不再派单。
+	if (JSON.stringify(messages).includes("Subagent results are ready")) {
+		sse(res, [delta(payload.model, { content: "MAIN_RESUMED" }), delta(payload.model, {}, "stop")]);
+		return;
+	}
 
 	// 子代理回合：模板提示词（ROLE_X）或派单标记（SPAWN_X）在场 → 回文本，绝不再派单
 	//（少一层防递归：标记匹配不上也不会变成无限派单）。
@@ -323,13 +333,30 @@ try {
 		.catch(() => null);
 	check("主对话收尾回合完成（3 个子代理都已启动）", !!finished);
 
-	await sleep(1500); // 等探针日志落盘
+	// 等探针日志落盘：子代理结果会在主对话空闲后把它自动唤醒一次，等到那一轮出现为止。
+	for (let n = 0; n < 100; n++) {
+		if (existsSync(LOG) && readFileSync(LOG, "utf8").includes("role=main-resume ")) break;
+		await sleep(100);
+	}
+	await sleep(1500);
 
 	const lines = (existsSync(LOG) ? readFileSync(LOG, "utf8") : "").split("\n").filter(Boolean);
 	console.log("  probe log:\n" + (lines.length ? lines.map((l) => "    " + l).join("\n") : "    (空)"));
 	// 防递归（本测试的夹具自身约束）：恰好 1 个主对话首回合 + 3 个子代理回合 + 1 个收尾回合。
-	const reqLines = lines.filter((l) => l.startsWith("REQ "));
+	// 之后是自动续跑：子代理结果送达时唤醒主对话（同时完成的合并成一轮，至多每个子代理一轮）。
+	const allReqLines = lines.filter((l) => l.startsWith("REQ "));
+	const resumeLines = allReqLines.filter((l) => l.includes("role=main-resume "));
+	const reqLines = allReqLines.filter((l) => !l.includes("role=main-resume "));
 	check("派发没有意外递归（5 条请求）", reqLines.length === 5, `实际 ${reqLines.length} 条`);
+	for (const name of TEMPLATE_NAMES) {
+		const count = reqLines.filter((l) => l.includes(`role=${name} `)).length;
+		check(`子代理 ${name} 恰好跑一轮（没有被再次派发或续跑）`, count === 1, `实际 ${count} 轮`);
+	}
+	check(
+		"子代理完成后只唤醒主对话续跑（1–3 轮），续跑沿用主对话强度 low",
+		resumeLines.length >= 1 && resumeLines.length <= 3 && resumeLines.every((l) => l.includes(" think=low ")),
+		resumeLines.join(" | ") || "无",
+	);
 	const thinkingOf = (role) => {
 		const hit = reqLines.find((l) => l.includes(`role=${role} `));
 		if (!hit) return null;

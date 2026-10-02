@@ -9,6 +9,7 @@ import {
 	buildToolsSchemaText,
 	collectTemplateTokens,
 	effectiveTemplate,
+	estimatePromptTokens,
 	isReadonlyPromptSource,
 	renderDefaultPrompt,
 	renderPromptTemplate,
@@ -314,5 +315,29 @@ describe("READONLY_PROMPT_SOURCES / isReadonlyPromptSource — 只读来源判�
 		expect(isReadonlyPromptSource("guidelines")).toBe(false);
 		expect(isReadonlyPromptSource("append")).toBe(false);
 		expect(isReadonlyPromptSource("typo")).toBe(false);
+	});
+});
+
+describe("estimatePromptTokens — token 占用估算", () => {
+	it("空串为 0；纯 ASCII ≈ 1 token / 4 字符（向上取整）", () => {
+		expect(estimatePromptTokens("")).toBe(0);
+		expect(estimatePromptTokens("abcdefgh")).toBe(2);
+		expect(estimatePromptTokens("abc")).toBe(1);
+	});
+
+	it("CJK 字符按 1 token/字，混排按两类分别计", () => {
+		expect(estimatePromptTokens("你好世界")).toBe(4);
+		// 4 个汉字 + 8 个 ASCII 字符
+		expect(estimatePromptTokens("你好世界abcdefgh")).toBe(6);
+	});
+
+	it("实际提示词量级合理（默认模板渲染结果不为 0 且随内容增长）", () => {
+		const short = renderDefaultPrompt(resolveSectionTexts(inputs()));
+		const more = renderDefaultPrompt(
+			resolveSectionTexts(inputs({ contextFiles: [{ path: "A.md", content: "x".repeat(10_000) }] })),
+		);
+		const base = estimatePromptTokens(short);
+		expect(base).toBeGreaterThan(0);
+		expect(estimatePromptTokens(more)).toBeGreaterThan(base + 2000);
 	});
 });

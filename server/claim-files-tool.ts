@@ -13,7 +13,7 @@
 
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { bilingual, pick, type ServerLang } from "./i18n.js";
+import { pick, type ServerLang } from "./i18n.js";
 import { CLAIM_FILES_TOOL_NAME } from "./tool-manager.js";
 import { CLAIM_TTL_MS, resolveClaimPath, type ClaimStore } from "./claim-store.js";
 
@@ -44,16 +44,10 @@ export function makeClaimFilesTool(host: ClaimFilesHost, lang?: () => ServerLang
 	return defineTool({
 		name: CLAIM_FILES_TOOL_NAME,
 		label: "Claim files to avoid parallel conflicts",
-		description: bilingual(
-			"Declare which files you are about to edit so parallel runs in the same project can steer clear (advisory only — it never blocks edits). " +
-				"action=claim reserves paths for THIS conversation (first wins; already claimed by others is reported, not overridden); action=release frees yours (no paths = all yours); action=list shows this project's claim table. " +
-				"Claims expire after ~30 min idle (each of your prompts refreshes them) and are released when the conversation closes. " +
-				"Paths must stay inside the project directory. Only pi-engine conversations can claim (no customTool surface on DSH).",
-			"声明你要改哪些文件，让同项目的并行对话绕行（纯建议，不拦任何编辑）。" +
-				"action=claim 把路径记到本对话名下（先到先得；别人已认领的会告诉你，不抢占）；action=release 放掉你自己的（不给 paths = 全放）；action=list 看本项目的认领表。" +
-				"认领闲置约 30 分钟过期（你每次发 prompt 自动续期），对话关闭时释放。" +
-				"路径必须在项目目录内。只有 pi 引擎对话能认领（DSH 无 customTool 注册面）。",
-		),
+		description:
+			"Declare files you are about to edit so parallel runs in the same project steer clear (advisory only — never blocks edits). " +
+			"claim reserves paths for THIS conversation (first wins; conflicts reported, not overridden); release frees yours (no paths = all yours); list shows the project's claim table. " +
+			"Claims expire after ~30 min idle (your prompts refresh them) and release when the conversation closes. Paths must stay inside the project.",
 		promptSnippet: "claim files you are about to edit (advisory, first-wins) so parallel runs steer clear",
 		parameters: Type.Object({
 			action: Type.Optional(

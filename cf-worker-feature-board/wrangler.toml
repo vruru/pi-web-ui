@@ -2,6 +2,13 @@ name = "feature-board-api"
 main = "src/index.js"
 compatibility_date = "2024-04-01"
 
+# CORS 白名单（逗号分隔的完整 Origin）。留空 = 不回任何 Access-Control-Allow-Origin
+# （插件前端与 API 同源部署时无需跨域）；需要跨域时填入如
+# "https://board.example.com,https://dev.example.com"。放在顶层 [vars]：所有环境
+# 共用一份默认，可用 per-env vars 覆盖。
+[vars]
+allowed_origins = ""
+
 # D1 数据库绑定（在执行 npx wrangler d1 create 后填入 database_id）
 [[d1_databases]]
 binding = "DB"

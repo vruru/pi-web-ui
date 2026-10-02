@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { FiCheckCircle, FiCopy, FiLoader, FiX } from "react-icons/fi";
 import { useT } from "../i18n";
+import { useEscapeKey } from "../shortcut-stack";
 import { closeExportImage, setExportImageIncludes, useExportImage } from "../export-image-state";
 import {
 	isLightColor,
@@ -49,14 +50,11 @@ export function SaveImageDialog(): ReactNode {
 		setError("");
 	}, [exp.open]);
 
-	useEffect(() => {
-		if (!exp.open) return;
-		const onKey = (e: KeyboardEvent) => {
-			if (e.key === "Escape") closeExportImage();
-		};
-		document.addEventListener("keydown", onKey);
-		return () => document.removeEventListener("keydown", onKey);
-	}, [exp.open]);
+	// 审查 #12：Esc 改走 shortcut-stack 分层栈（与 Modal 同一调度）；
+	// 面板关着时不启用，不吞下层弹窗的 Esc。
+	useEscapeKey(() => {
+		closeExportImage();
+	}, exp.open);
 
 	useLayoutEffect(() => {
 		if (!exp.open) return;

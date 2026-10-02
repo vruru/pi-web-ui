@@ -12,11 +12,16 @@
  * 与 SDK ls 完全一致）；其余情况（文件、图片、路径不存在、读取报错）原样
  * 转发基底，行为与内置完全一致。
  *
+ * 基底也可能是**第三方扩展注册的 read**：`customTools` 恒胜、会把它顶掉（见
+ * tool-overrides.ts），所以那种情况下改走 `withReadDirSupport()` —— 把扩展的实现
+ * 整个当基底叠目录能力，它的 schema/描述/prompt 指引/渲染原样保留（扩展独有的参数
+ * 照旧可用），只有目录分支归 pi-web-ui。
+ *
  * 开关：`readDirEnabled`（设置面板「工具」页，默认开）。**行为开关**不是
  * ActiveSet 开关（read 本体不可关，关了 agent 就残了），因此不进
  * tool-manager 的 AGENT_TOOL_CATALOG；每次调用实时读设置，改动即时生效。
  *
- * 双语约定（issue #91）：definition 走 bilingual(en, zh) 内联双语；per-call
+ * 文案约定：工具 definition（description/promptSnippet/promptGuidelines）为纯英文；per-call
  * 返回文本（目录头）按 lang 取 pick(lang, zh, en, key)，缺表回落英文内联。
  *
  * DSH 引擎无 customTool 注册面（工具来自 shipped preset），本覆盖只服务 pi 引擎。
@@ -26,14 +31,15 @@ import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve as nodeResolve } from "node:path";
 import {
-	DEFAULT_MAX_BYTES,
-	DEFAULT_MAX_LINES,
 	createLsToolDefinition,
 	createReadToolDefinition,
 	defineTool,
+	type AgentToolResult,
 } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
-import { bilingual, pick, type ServerLang } from "./i18n.js";
+import { pick, type ServerLang } from "./i18n.js";
+// 覆盖层要接住任意具体定义（内置的、扩展注册的），只能用 any 参数化的工具定义别名。
+import type { AnyToolDefinition } from "./tool-overrides.js";
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 
@@ -80,30 +86,21 @@ interface ReadDirInput {
 const readDirSchema = Type.Object(
 	{
 		path: Type.String({
-			description: bilingual(
-				"Path to the file (or directory) to read (relative or absolute)",
-				"要读取的文件（或目录）路径（相对或绝对）",
-			),
+			description: "Path to the file (or directory) to read (relative or absolute)",
 		}),
 		file_path: Type.Optional(
 			Type.String({
-				description: bilingual(
-					"Alias of `path` — some clients/models emit file_path; if both are given, `path` wins",
-					"`path` 的别名 —— 部分客户端/模型习惯发 file_path；两者都给时以 `path` 为准",
-				),
+				description: "Alias of `path` — some clients/models emit file_path; if both are given, `path` wins",
 			}),
 		),
 		offset: Type.Optional(
 			Type.Number({
-				description: bilingual("Line number to start reading from (1-indexed)", "从第几行开始读（从 1 起算）"),
+				description: "Line number to start reading from (1-indexed)",
 			}),
 		),
 		limit: Type.Optional(
 			Type.Number({
-				description: bilingual(
-					"Maximum number of lines to read (for a directory path: maximum number of entries)",
-					"最多读多少行（路径是目录时 = 最多列多少条目）",
-				),
+				description: "Maximum number of lines to read (for a directory path: maximum number of entries)",
 			}),
 		),
 	},
@@ -124,9 +121,106 @@ export function prepareReadArguments(raw: unknown): Static<typeof readDirSchema>
 	return args as unknown as Static<typeof readDirSchema>;
 }
 
+/** Directory support note appended to any read definition (definitions are English-only). */
+const DIR_DESCRIPTION_NOTE =
+	"Also accepts a directory path: its entries are then listed instead of file contents (one entry per line, directories suffixed with '/'); in that case `limit` caps the number of entries and `offset` is ignored.";
+
+const DIR_GUIDELINE = "Use read on a directory to list its entries — no need to shell out to `ls`";
+
 /**
- * 生成「read 读目录」覆盖定义。cwd 仅供创建时固定；执行时优先 ctx.cwd
- * （会话工作区）。
+ * 两条路（内置基底 / 扩展基底）共用的执行体：先判「路径是不是目录」—— 是就复用 SDK 的
+ * ls 列条目（排序/`/` 后缀/截断提示口径一致），否则把请求转发给基底实现。
+ *
+ * `normalizePath`：只给了 `file_path` 别名时补出 `path` 再转发（SDK 内置实现需要）；
+ * 扩展基底传 false —— 它自带 `prepareArguments`，参数原样交给它，免得我们这边把扩展
+ * 独有的字段（如 better-edit 的 `windows`）吃掉。
+ */
+async function dirAwareExecute(
+	base: AnyToolDefinition,
+	ls: AnyToolDefinition,
+	fallbackCwd: string,
+	dirEnabled: () => boolean,
+	getLang: () => ServerLang,
+	normalizePath: boolean,
+	toolCallId: string,
+	params: unknown,
+	signal: AbortSignal | undefined,
+	onUpdate: unknown,
+	ctx: Parameters<AnyToolDefinition["execute"]>[4],
+): Promise<AgentToolResult<any>> {
+	const input = (params ?? {}) as ReadDirInput;
+	// 兜底（不依赖 prepareArguments 一定跑过）：path 缺省/空时用 file_path。
+	const rawPath = typeof input.path === "string" && input.path.trim() ? input.path : input.file_path;
+	const path = typeof rawPath === "string" ? rawPath : "";
+	if (path && dirEnabled()) {
+		const cwd = typeof ctx?.cwd === "string" ? ctx.cwd : fallbackCwd;
+		if (await isDirectoryPath(resolvePathForDirCheck(path, cwd))) {
+			const limit = typeof input.limit === "number" && input.limit > 0 ? Math.floor(input.limit) : undefined;
+			// 列目录本体完全复用 SDK 的 ls。
+			const listed = (await ls.execute(
+				toolCallId,
+				{ path, ...(limit !== undefined ? { limit } : {}) },
+				signal,
+				onUpdate as never,
+				ctx,
+			)) as AgentToolResult<unknown>;
+			const header = pick(getLang(), `[目录：${path}]`, `[Directory: ${path}]`, "read.dir.header", { path });
+			// 只取列出来的正文：截断/条目上限提示已在正文末尾，read 卡片的
+			// details 不需要 ls 的字段。
+			const content = listed.content.map((part, index) =>
+				index === 0 && part.type === "text" ? { ...part, text: `${header}\n${part.text}` } : part,
+			);
+			return { content, details: undefined };
+		}
+	}
+	return base.execute(
+		toolCallId,
+		(normalizePath ? { ...input, path } : params) as never,
+		signal,
+		onUpdate as never,
+		ctx,
+	);
+}
+
+/**
+ * 在**任意** read 实现（SDK 内置，或第三方扩展 `registerTool` 注册的同名工具）之上叠加
+ * 「路径是目录时列出条目」。基底的 name/label/描述/参数 schema/prepareArguments/render*
+ * 全部原样保留，只补一句目录说明与一条目录指引 —— 于是扩展的锚协议、独有参数、渲染都不丢。
+ */
+export function withReadDirSupport(
+	base: AnyToolDefinition,
+	fallbackCwd: string,
+	options: ReadDirToolOptions = {},
+): AnyToolDefinition {
+	const dirEnabled = options.dirEnabled ?? ((): boolean => true);
+	const getLang = options.getLang ?? ((): ServerLang => "en");
+	const ls = createLsToolDefinition(fallbackCwd);
+	return defineTool({
+		...base,
+		description: `${base.description} ${DIR_DESCRIPTION_NOTE}`,
+		promptGuidelines: [...(base.promptGuidelines ?? []), DIR_GUIDELINE],
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			return dirAwareExecute(
+				base,
+				ls,
+				fallbackCwd,
+				dirEnabled,
+				getLang,
+				false,
+				toolCallId,
+				params,
+				signal,
+				onUpdate,
+				ctx,
+			);
+		},
+	}) as AnyToolDefinition;
+}
+
+/**
+ * 生成「read 读目录」覆盖定义（**没有**扩展同名工具时的完整实现：内置基底 + 英文描述 +
+ * `file_path` 别名）。cwd 仅供创建时固定；执行时优先 ctx.cwd（会话工作区）。
+ * 有扩展同名工具时改用 `withReadDirSupport` 组合它的实现（见 tool-overrides.ts）。
  */
 export function makeReadDirTool(fallbackCwd: string, options: ReadDirToolOptions = {}) {
 	const base = createReadToolDefinition(fallbackCwd);
@@ -136,51 +230,31 @@ export function makeReadDirTool(fallbackCwd: string, options: ReadDirToolOptions
 
 	return defineTool({
 		...base,
-		description: bilingual(
-			`${base.description} Also accepts \`file_path\` as an alias of \`path\`. If the path is a directory, its entries are listed instead of file contents (one entry per line, directories suffixed with '/'); in that case \`limit\` caps the number of entries and \`offset\` is ignored.`,
-			`读取文件内容。支持文本文件与图片（jpg, png, gif, webp, bmp），图片作为附件发出。文本输出截断到 ${DEFAULT_MAX_LINES} 行或 ${DEFAULT_MAX_BYTES / 1024}KB（先到者为准），大文件用 offset/limit 续读。路径也可用 \`file_path\` 传（path 的别名，两者都给时以 path 为准）。路径是目录时改为列出目录条目（一行一项，目录带 '/' 后缀；此时 limit 是条目上限，offset 忽略）。`,
-		),
-		promptSnippet: bilingual(
-			"Read file contents (a directory path lists its entries)",
-			"读取文件内容（传目录则列出其条目）",
-		),
+		description:
+			`${base.description} Also accepts \`file_path\` as an alias of \`path\`. ` +
+			"If the path is a directory, its entries are listed instead (one per line, directories suffixed with '/'); `limit` caps the entries and `offset` is ignored.",
+		promptSnippet: "Read file contents (a directory path lists its entries)",
 		promptGuidelines: [
 			...(base.promptGuidelines ?? []),
-			bilingual(
-				"Use read on a directory to list its entries — no need to shell out to `ls`",
-				"要看目录内容直接把目录路径交给 read，不必再走 bash 的 ls",
-			),
+			"Use read on a directory to list its entries — no need to shell out to `ls`",
 		],
 		parameters: readDirSchema,
 		prepareArguments: prepareReadArguments,
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
-			const input = (params ?? {}) as ReadDirInput;
-			// 兜底（不依赖 prepareArguments 一定跑过）：path 缺省/空时用 file_path。
-			const rawPath = typeof input.path === "string" && input.path.trim() ? input.path : input.file_path;
-			const path = typeof rawPath === "string" ? rawPath : "";
-			if (path && dirEnabled()) {
-				const cwd = typeof ctx?.cwd === "string" ? ctx.cwd : fallbackCwd;
-				if (await isDirectoryPath(resolvePathForDirCheck(path, cwd))) {
-					const limit = typeof input.limit === "number" && input.limit > 0 ? Math.floor(input.limit) : undefined;
-					// 列目录本体完全复用 SDK 的 ls（排序/`/` 后缀/截断提示口径一致）。
-					const listed = await ls.execute(
-						toolCallId,
-						{ path, ...(limit !== undefined ? { limit } : {}) },
-						signal,
-						onUpdate as never,
-						ctx,
-					);
-					const header = pick(getLang(), `[目录：${path}]`, `[Directory: ${path}]`, "read.dir.header", { path });
-					// 只取列出来的正文：截断/条目上限提示已在正文末尾，read 卡片的
-					// details 不需要 ls 的字段。
-					const content = listed.content.map((part, index) =>
-						index === 0 && part.type === "text" ? { ...part, text: `${header}\n${part.text}` } : part,
-					);
-					return { content, details: undefined };
-				}
-			}
-			// 转发内置实现时带上归一后的 path（模型可能只给了 file_path）。
-			return base.execute(toolCallId, { ...input, path }, signal, onUpdate, ctx);
+			// 目录分支与转发都在共用执行体里（normalizePath=true：只给了 file_path 时补出 path）。
+			return dirAwareExecute(
+				base,
+				ls,
+				fallbackCwd,
+				dirEnabled,
+				getLang,
+				true,
+				toolCallId,
+				params,
+				signal,
+				onUpdate,
+				ctx,
+			);
 		},
 	});
 }

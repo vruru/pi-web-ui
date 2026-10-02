@@ -34,6 +34,7 @@ describe("takeover preserves the outgoing idle runtime", () => {
 				convs: new Map([[conversation.id, conversation]]),
 				takeoverDepartures: new Set(),
 				pendingQuestions: new Map(),
+				pendingApprovals: new Map(),
 				pendingPageCalls: new Map(),
 				clearAllToolWatchdogs: vi.fn(),
 				emitConversations: vi.fn(),

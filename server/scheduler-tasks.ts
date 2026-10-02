@@ -257,6 +257,7 @@ export class SchedulerStore {
 			executor?: SchedulerExecutor;
 			onChange?: () => void;
 			notify?: (level: "info" | "warning" | "error", text: string, textEn?: string) => void;
+			onTaskRemoved?: (taskId: string) => void;
 		} = {},
 	) {}
 
@@ -426,6 +427,11 @@ export class SchedulerStore {
 		if (ok) {
 			this.save();
 			this.changed();
+			try {
+				this.opts.onTaskRemoved?.(id);
+			} catch {
+				/* 回调失败不影响删除 */
+			}
 		}
 		return ok;
 	}

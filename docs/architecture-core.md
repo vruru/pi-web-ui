@@ -35,15 +35,15 @@
 
 `web/src/app-globals.ts` 是模块级单例 store，放「**整棵树都要知道**」的少量运行态：服务端身份/能力（整个连接内只变一次）+ 连接态与当前工作目录（低频变化，靠单字段订阅隔离）：
 
-| 字段 | 来源 | 谁在用 |
-| --- | --- | --- |
-| `engine`（`"pi"` / `"dsh"`） | `ready.engine`（老服务端不传 → 回落 `"pi"`） | FooterBar 引擎图标、GoalBar/SettingsModal/ChatInput 的 DSH gating（无审查模型 / 无插件市场 / 无 mid-run steering） |
-| `managed`（`PI_WEB_MANAGED=1`） | `ready.managed` | TopBar 更新入口、PiSetupModal 安装引导、SettingsModal 插件市场 |
-| `tabs`（`PI_WEB_TABS`） | `ready.tabs` | 顶栏视图 tab 白名单（undefined = 全部） |
-| `service`（被哪个平台服务托管） | `ready.service`（`server/launch-origin.ts` 探测） | TopBar 更新面板的「重启服务」按钮（缺省 = 前台/dev/Docker → 不画按钮，服务端也拒绝 `restart_service`） |
-| `appVersion` / `serverVersion` | `ready` | TopBar 版本号 |
-| `status` / `ready` | useChat 的 reducer（`status` 动作 / hello+快照） | 左栏（能不能拉清单）、ChatInput（输入框能不能用）、TopBar / FooterBar 的连接点 |
-| `cwd`（当前对话的工作目录） | `chat.state?.cwd` | 左栏分组与「当前」标记、右栏路径拼接、全局搜索的当前项目标记、底栏目录选择器 |
+| 字段                            | 来源                                              | 谁在用                                                                                                             |
+| ------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `engine`（`"pi"` / `"dsh"`）    | `ready.engine`（老服务端不传 → 回落 `"pi"`）      | FooterBar 引擎图标、GoalBar/SettingsModal/ChatInput 的 DSH gating（无审查模型 / 无插件市场 / 无 mid-run steering） |
+| `managed`（`PI_WEB_MANAGED=1`） | `ready.managed`                                   | TopBar 更新入口、PiSetupModal 安装引导、SettingsModal 插件市场                                                     |
+| `tabs`（`PI_WEB_TABS`）         | `ready.tabs`                                      | 顶栏视图 tab 白名单（undefined = 全部）                                                                            |
+| `service`（被哪个平台服务托管） | `ready.service`（`server/launch-origin.ts` 探测） | TopBar 更新面板的「重启服务」按钮（缺省 = 前台/dev/Docker → 不画按钮，服务端也拒绝 `restart_service`）             |
+| `appVersion` / `serverVersion`  | `ready`                                           | TopBar 版本号                                                                                                      |
+| `status` / `ready`              | useChat 的 reducer（`status` 动作 / hello+快照）  | 左栏（能不能拉清单）、ChatInput（输入框能不能用）、TopBar / FooterBar 的连接点                                     |
+| `cwd`（当前对话的工作目录）     | `chat.state?.cwd`                                 | 左栏分组与「当前」标记、右栏路径拼接、全局搜索的当前项目标记、底栏目录选择器                                       |
 
 写入点两处，都是单一来源、只镜像不复制：`use-chat.ts` 收到 `ready` 时写身份/能力（**在 dispatch 之前**同步落地，不闪一帧 `pi`）；另一个 effect 把 `ready` / `status` / `cwd` 镜像过来（值就是 reducer 里的真值，最多晚一帧 —— 对应默认值只会是「未就绪 / 未连接 / 空目录」，看不出来）。非 React 代码用 `getAppGlobals()` / `subscribeAppGlobals()`。
 
@@ -130,6 +130,42 @@
 
 **豁免 `ask_user_question`**：问卷阻塞等的是「人类回答」，不是挂死的工具——arm 前按工具名跳过（`tool_execution_start` 里 `event.toolName !== ASK_USER_QUESTION_TOOL_NAME`）。它的收场自有路子：用户回答/取消、会话 dispose（`cancelPendingQuestions`），**不限时**（标准 pi 引擎；DSH 引擎无此看门狗，提问走 `PI_WEB_DSH_QUESTION_TIMEOUT_MS` 自己的 10 分钟）。同理，问卷挂着也不算「失联」——stall 检查（`startStallTimer`，默认 180s 无 SDK 事件告警）对 `isWaitingOnUser(conv.id)` 的对话跳过。回归：`tests/question-bridge-test.mjs`（`PI_WEB_TOOL_TIMEOUT_MS=2000` 挂着不答超过阈值仍不终止）。
 
+### 审批三档放行与自定义规则库
+
+人机协同审批（`tool_approval_pending`）原先只有「批准 / 拒绝 / 修改并放行」三个单次选项，同一类高危操作反复出现时每次都要点。现在的审批系统分为**规则评估引擎**与**放行策略**两个层次：
+
+#### 1. 自定义规则库与匹配引擎（`<dataDir>/approval-rules.json`）
+
+规则由 `server/approval-rules.ts` 的 `ApprovalRulesStore` 持久化，所有客户端全局共享。规则在设置面板「审批规则」页可视化编辑与排序，按列表顺序自顶向下匹配，首个命中生效：
+
+- **适用工具**（tools）：支持单工具（如 `bash`）、多工具组合（如 `["write", "edit", "edit_soft"]`）或通配 `*`；
+- **检查字段**（field）：`command`（命令字符串）、`path`（目标文件路径：认 `path` / `file_path` / `file` 三种写法，见 `extractTargetPath()`，扩展实现如 pi-better-edit 的 `edit` 用 `file`）、`params`（完整参数 JSON 字符串）；
+- **匹配模式**（match）：
+  - `regex`：大小写不敏感正则表达式匹配；
+  - `glob`：路径通配符（支持 `*` 单段、`**` 跨目录跨段，统一归一化正反斜杠）；
+  - `contains`：包含子串匹配；
+  - `prefix`：前缀开头匹配；
+  - `outside_workspace`：工作区外写入越界检测（基于当前工作区 cwd 与额外 roots 物理路径判定）；
+- **命中动作**（action）：
+  - `ask`：触发人机协同审批（弹窗让用户决定，支持就地编辑参数与允许同类）；
+  - `deny`：直接拒绝阻断执行并向模型回传错误（不弹窗、不产生待审批 pending）；
+  - `allow`：免审直接放行（白名单，跳过后续规则与内置检测，直接执行工具）。
+- **内置规则转化**：原硬编码的 10 项内置高危检测（`rm -rf`、Windows `del /s /q`、磁盘格式化、破坏性 Git、危险 `chmod`、系统目录重定向、敏感配置 `.env`/SSH/Shell 以及越界写入）全部转换为默认内置规则（`builtin: true`），用户可自由停用、调整动作或一键恢复默认。
+
+#### 2. 三档放行策略（运行时快速免问）
+
+门禁统一在 `ClientSession.askApproval` 入口（纯函数 `approvalSuppressionReason(policy, enabled, categoryId)`，`server/tool-approval.ts`，单测 `tests/unit/tool-approval.test.ts`）：
+
+1. **全局关**：设置 →「工具」页的「工具执行审批」总开关（`ClientSettings.toolApprovalEnabled`，默认开，纯运行开关不进预设）。关掉后一切审批都不弹——内置高危检测直接放行、插件 pre guard 的 `ask` 也按放行处理（`withToolGuard` 的 `ask` 分支只改 `needApproval`，最终都经 `askApproval` 定夺）；开关被关掉的那一刻，挂着的待审批项由 `autoApprovePendingApprovals` 全部按批准放行（不让人对着弹窗干等）。
+2. **本对话全部允许**（弹窗按钮，`tool_approval_response.scope = "all"`）：该对话后续任何高危操作都不再询问。
+3. **本对话允许同类**（弹窗按钮，`scope = "category"`，仅在本次命中规则档位时出现）：只放行同一档位。档位 = `UiApprovalCategory{ id, label, labelEn }`，id 稳定不许改名：`bash.rm-rf` / `bash.win-del` / `bash.disk` / `bash.git-destructive` / `bash.chmod` / `bash.system-redirect` / `file.sensitive.env` / `file.sensitive.ssh` / `file.sensitive.shell` / `file.outside-workspace` / `plugin:<pluginId>`（插件 pre guard 的 `ask` 按插件分档）。无档位的拦截（自定义 reason）只受前两档影响。
+
+**策略挂在哪**：`Conversation.approvalPolicy = { allowAll, categories: Map<id, UiApprovalCategory> }`，**仅内存**（不落 client-state），且挂在对话对象上而不是 ClientSession——手动过户搬的就是对话本体，策略跟着走；重启服务 / 新对话即恢复询问。记住后同对话内**已被新策略覆盖的其它待审批项一并放行**（`approveCoveredPending`），并给一句回执 notice。
+
+**撤销**：设置 →「工具」页列出当前对话已记住的放行（`UiSettingsState.approvalPolicy`，服务端 `approvalPolicyState()` 现取），逐条「撤销」走客户端 `set_approval_policy`（`allowAll` 赋值 + `categories` 作保留名单整体替换；纯内存态，不走 `set_settings`）。弹窗本身在策略生效后就不再出现，所以撤销入口必须留在设置里。
+
+回归：`tests/approval-policy-test.mjs`（协议面：开关持久化 / 策略推回面板 / 垃圾消息 no-op）、`tests/approval-rules-test.mjs`（自定义规则协议面）、`tests/unit/approval-rules.test.ts`（匹配引擎单测）、`tests/unit/tool-approval.test.ts`（档位与三档判定）。
+
 ### 待答问卷进快照（重连恢复对话框）
 
 `question_pending` 是即时通道：只推给「提问那一刻在线」的连接，刷新页面 / WS 重连 / 新标签页都收不到那条历史消息，而服务端还在阻塞等人回答——面板会凭空消失（`DshQuestionDialog` 没有别的入口）。因此待答问卷同时挂在快照上（`UiState.pendingQuestion`，标准引擎按对话过滤：`pendingQuestionForSnapshot()` 只带当前对话的那张，切回原对话会重推快照；DSH 的提问桥是 runtime 级的，不分对话）。前端 `use-chat.ts` 收到 `snapshot` / `snapshot_delta` 时用纯函数 `web/src/pending-question.ts` 的 `resolvePendingQuestion` 决定面板去留：快照有待答问卷就恢复（已答过的 id 跳过——回答消息与在途快照会交错），但只有「由快照恢复出来的」面板才接受快照收起（避免一张回答之前的旧快照把刚由即时通道弹出的面板闪掉）。单测 `tests/unit/pending-question.test.ts`。
@@ -152,15 +188,67 @@ bash 工具卡片运行中显示「停止」→ 发 `{ type: "abort_bash" }` →
 
 内置 `edit` 要求 oldText 与文件恰好匹配（含缩进/空白）。对缩进非语法意义的语言（如 JS/JSON），模型给出的 oldText 常与文件差几个空格/制表符而导致编辑失败。pi-web-ui 经 `customTools` 注入一个**不覆盖**内置 `edit` 的独立工具 `edit_soft`（`server/edit-soft-tool.ts`）：先用精确子串匹配，失败后按「逐行核心（trim）序列一致」做宽松匹配（忽略行首/行尾空白差异），命中后**整行原样写入 newText**（缩进即最终缩进）。仅唯一匹配才写，重叠 edit 报错，并参与同一个 per-file 变异队列（`withFileMutationQueue`）。
 
+**多 edit 必须按位置排序再逆序应用**（`applySoftEdits`）：所有 edit 都相对同一份原内容定位，得到各自的 `start/end` 后要**先按位置升序排**、再逆序套用，左侧偏移才稳定。早期实现漏了排序，直接按 edits 的传入顺序逆序应用 —— 模型若把靠后的 edit 写在前面，后面的替换先改变长度，前面的偏移随即串位，写出错乱内容（历史 bug：`protocol.ts` / `use-chat.ts` / `ChatInput.tsx` 被写坏）。内置 `edit` 同样是先按 `matchIndex` 排序（`edit-diff.js`），此处对齐。回归测试覆盖全部 6 种排列。
+
+**非法片段防御**：宽松匹配要求 oldText 每行都是完整行。（a）精确命中若跨多行却首/尾未落在行边界（如 `a);\nfoo(`），直接子串替换会吃掉行首/行尾残留写出粘连内容（`foo(z();b);`）→ 拒绝并提示按整行给；（b）宽松阶段整块对不上、且首/尾行只是某行的一部分时，报「片段」错而非笼统的「找不到」；（c）单行片段（如 `b();`）不改行结构，照旧支持。
+
 开关走统一工具管理（`server/tool-manager.ts` 的 `disabledAgentTools`，默认关）：关闭时该工具从活跃集移除（`applyAgentToolsGating` 经 `setActiveToolsByName`，与终端/子代理工具同一机制，live 生效无需 reload），不会出现在 Available tools 段。DSH 引擎无该工具，设置面板无「工具」分区。
 
 ### read 覆盖：路径是目录时列出目录条目（`server/read-tool.ts`）
 
 SDK 内置 `read` 只处理文件（`read("server")` 直接 `EISDIR: illegal operation on a directory`），SDK 自带的 `ls` 又不在默认活跃集（`["read","bash","edit","write"]`）里，模型要看一眼目录只能改用 bash。pi-web-ui 因此经 `customTools` **按名覆盖**内置 `read`（bash 覆盖是先例）：用 `createReadToolDefinition(cwd)` 拿原实现当基底，`execute` 里先判路径是不是目录 —— 是目录就分流到 SDK 的 `createLsToolDefinition(cwd)`（一行一项、目录带 `/` 后缀、排序与条目/字节截断口径与 SDK `ls` 完全一致），正文前置一行 `[Directory: <path>]`；其余情况（文件、图片、路径不存在、读取报错）原样转发基底，行为与内置一致。目录分支里 `limit` 是条目上限、`offset` 忽略。
 
-开关 `readDirEnabled`（设置 → 工具页首行，默认开）：这是**行为开关**（read 本体不可关，关了 agent 就残），不是 ActiveSet 开关 —— 因此不进 `tool-manager.ts` 的 `AGENT_TOOL_CATALOG`，覆盖定义每次调用实时读设置（改动即时生效、无需 reload），也不进设置预设。DSH 引擎无 customTool 注册面（工具来自 shipped preset），不支持该覆盖，快照里恒为 true。
+开关 `readDirEnabled`（设置 → 工具页首行，默认开）：这是**行为开关**（read 本体的开/关在设置页「核心工具」区，走 ActiveSet；这里管的是覆盖层列举目录的行为，与 read 工具本体是否启用无关），不是 ActiveSet 开关 —— 因此不进 `tool-manager.ts` 的 `AGENT_TOOL_CATALOG`，覆盖定义每次调用实时读设置（改动即时生效、无需 reload），也不进设置预设。DSH 引擎无 customTool 注册面（工具来自 shipped preset），不支持该覆盖，快照里恒为 true。
 
 参数上额外接受 `file_path` 作为 `path` 的别名（部分客户端/模型习惯发 `file_path`）：schema 里 `path` 仍必填，靠 `prepareArguments` 在校验前把只有 `file_path` 的调用归一成 `path`（两者都给时 `path` 为准），转发内置实现时也带上归一后的 `path`。前端工具卡头的路径提示（`web/src/tool-args.ts`）本来就同时认这两个名（SDK 自带 renderers 亦然）。
+
+**基底也可能是第三方扩展注册的 `read`**：SDK 的合并链是 `[...扩展注册的工具, ...customTools]` 逐个后写赢，所以覆盖层若直接进创建时的 `customTools` 就会**静默顶掉**扩展的同名工具 —— 而官方 `docs/extensions.md` §Overriding Built-in Tools 明写扩展可以覆盖 `read`/`edit`/`write` 等（逐个列出了 `read`）。因此 `read` / `write` / `edit` 三处覆盖**不在创建时注册**，改由 `server/tool-overrides.ts` 在会话建好后注入，基底优先取扩展实现 —— 详见下一节「覆盖与第三方扩展同名工具共存」。
+
+### 覆盖与第三方扩展同名工具共存（`server/tool-overrides.ts`）
+
+pi-web-ui 覆盖了 SDK 内置 `read` / `write` / `edit`（bash 覆盖是另一个先例）。SDK 的注册表合并链是 `allCustomTools = [...扩展注册的工具, ...customTools]` 再逐个 `definitionRegistry.set(name, …)` —— **后写赢**：创建时把覆盖塞进 `customTools`，等于让 `docs/extensions.md`「扩展可覆盖内置工具」那句承诺失效（第三方扩展的同名工具永远轮不到，且症状会伪装：覆盖层转发内置实现 ⇒ 读文件/图片/目录都正常，只有扩展特有的能力没有，例如 `pi-better-edit` 的 read 不出 `HASH│content` 锚、它的 `edit` 随后一律 `E_UNKNOWN_ANCHOR`）。
+
+现在的做法：这三处覆盖在**会话建好后**由 `installToolOverrides(session, specs)` 注入 —— 逐个按名字从 `session.extensionRunner.getAllRegisteredTools()` 取扩展实现当基底（取不到才用 pi-web-ui 自己的完整实现），交给 `composeWith` 装饰后**前置**写回 `session._customTools` 并 `_refreshToolRegistry()`（与插件工具同步 `syncPluginToolsIntoSession` 同一手法）：
+
+- `read`：有扩展 read → `withReadDirSupport(扩展定义)` —— 基底的 name/label/描述/参数 schema/`prepareArguments`/render 槽位全部原样保留，只补一句目录说明、一条目录指引与目录分支（目录分支仍复用 SDK `ls` 的排序/`/` 后缀/截断口径）；没有 → `makeReadDirTool()`（内置基底 + 英文描述 + `file_path` 别名）。转发基底时**不改写扩展的参数**（`file_path` 归一只属于内置那份，扩展自带 `prepareArguments`）。
+- `write` / `edit`：有扩展同名工具 → 把它的定义当权限沙箱包装的**基底**（执行时先过只读 / 工作区外拦截与审批，再委托扩展实现）；没有 → 包装 SDK 内置实现。
+
+四条不变量：① 扩展那份实现的 schema / 描述 / prompt 指引 / 渲染不被替换（扩展独有参数如 better-edit 的 `windows` 照旧可用）；② 覆盖项前置 ⇒ pi-web-ui **插件**注册的同名工具（也是 customTools、比覆盖层后写）仍是最后赢家，与改动前的相对顺序一致；③ 重复注入幂等（同名先剔除再前置）；④ 会话对象形状不符（SDK 改私有字段名）返回 `null`，按「覆盖没装上」降级（等价改动前行为，不会更差）；`extensionRunner` 缺失时同样退回内置基底。
+
+`extractTargetPath()`（`server/approval-rules.ts`）：权限沙箱与审批规则要按「目标文件」判定，必须认三种写法 —— SDK 内置用 `path`、`read` 有 `file_path` 别名、部分扩展（`pi-better-edit` 的 `edit`）用 `file`；只认 `path` 会在叠上扩展实现后取到空串、被判成工作区内而**静默放行**。规则引擎的 `path` 字段走同一个函数。
+
+开关仍是行为开关（`readDirEnabled`），不进 `tool-manager.ts` 的 `AGENT_TOOL_CATALOG`；DSH 引擎无 customTool 注册面，不接。工具定义提示词遵循纯英文约定（`tests/unit/tool-prompt-hygiene.test.ts`）。回归：`tests/unit/tool-overrides.test.ts`（基底解析 / 前置顺序 / 幂等 / 降级）、`tests/unit/read-dir.test.ts`（`withReadDirSupport` 的 schema、描述、转发与目录分支）、`tests/unit/approval-rules.test.ts`（`extractTargetPath` 与规则字段）。
+
+### 审查者模式：自动委派（`server/delegate-mode.ts`）
+
+「强制 AI 开持久子代理」的服务端实现，形态是**会话级开关 + 全自动路由 + 纯委派闸门**（默认关）：
+
+1. **自动路由**（`ClientSession.dispatchToDelegate`）：`prompt()` 一进来就问它要不要接管 —— 开着就把这条文本转给**一个常驻落盘执行对话**（每会话一个，跨轮复用；与目标模式 2.0 的执行对话同一通道：`spawnSubagentConversation(..., persist=true)`，落盘、进历史、可续聊）。首轮的 prompt 直接交给 spawn 起步，**之后**每轮才 `sendUserMessage` 追加（首轮再发一次会被 SDK 拒：`Agent is already processing a prompt`）。主对话这一轮**不跑模型**，只发一条 notice。执行对话跑完 → 主对话一条 notice（带最后一条回复摘要 + 左栏可打开），**不做自动验收**（v1 口径：验收由人/主对话下一轮做）。
+2. **纯委派闸门**（`withDelegationGate`，挂在与计划模式同构的三处：customTools 整列 / `write`·`edit` 覆盖 / 常驻终端 `checkSafety`）：写类工具、非常规 bash（复用 `bashCommandIsReadOnly`）、**派发类工具**（`spawn`/`delegate_task`/`set_goal`/…）一律拒。派发类也拒的理由与计划模式不同：那边是「别绕开只读约束」，这边是「派活是服务端的活，别自己再开一份上下文」。
+3. **软约束**（`DELEGATION_SYSTEM_PROMPT`）：提示模型它是审查者、该干什么（定验收标准 → 看 diff/测试 → 接受或提下一轮要求）。
+
+**与计划模式的优先级**：计划模式开着时**不自动派活**（计划模式已把 spawn/旁路工具全拒，再自动派活就是死锁），提示词段也只注入一条 —— 计划模式那一轮自己在主对话里出计划。DSH 引擎没有 customTools 注册面（闸门无处可挂）→ `setDelegateMode` 明确回 notice 拒绝，不静默失败。
+
+状态：布尔随会话转录落盘（customType `delegate/mode`，回放见 `readDelegateModeFromSession`）；**执行对话 id 不落盘** —— 它是本进程内的活对象，重启后首条请求重建（宁可多一个执行对话，也别指向一个不存在的 id）。判定纯函数（单测 `tests/unit/delegate-mode.test.ts`），端到端回归 `tests/delegate-mode-test.mjs`（零 token，已在 smoke ALL 列表）。
+
+⚠️ 落盘执行对话占「每项目 8 个普通对话」名额之一（与目标模式的执行对话同一个池子）—— 满员时派活会抛错并提示关掉模式或先释放名额。
+
+### 计划模式：只规划不实施（`server/plan-mode.ts`）
+
+目标条**展开行**里有个 **计划** 按钮（`host:goal-plan` 槽位，DSH 引擎不渲染 —— 它没有 customTools 注册面，闸门无处可挂）。它经历了两次调整：① 从输入框工具条的开关（`host:composer-plan`）搬进目标条 —— 语义是「拿你在这个框里写的输入去做规划」，与目标同属一条线，所以只挂编辑行、**不进折叠药丸**；② 从「开关」改成**一次性动作** —— 点一下 = `set_plan_mode{true}`（开闸门）紧跟一条 `prompt`（把目标输入当消息直接发出去），两条同 WS 按序到达 → 本轮就在闸门里跑；输入为空则只开闸门不发消息。按钮不再有 `active` / `aria-pressed` 常亮态，和同列的「提炼」「发送」一个口径：「点一下直接发」。目标模式被关掉（`goalModeEnabled=false`，整条目标区不渲染）时它也跟着一起隐藏。闸门本身仍是会话级、热生效：开启后**本对话只调研 + 出实施计划，不做任何改动**，产物是 `plan_update` 步骤看板（PlanBoard）+ 计划正文。**关闸门的唯一出口是计划看板里的「开始实施」**（PlanBoard.tsx：`set_plan_mode{false}` + 发一条实施请求）—— 删掉开关语义后必须补这个出口，否则进得去出不来。**与目标模式正交**：目标模式是「让执行者把目标做完」，计划模式是「先别动，把方案给我」。
+
+两层防护，缺一不可：
+
+1. **硬闸门（`withPlanModeGate`，唯一的强制点）**：装饰在工具定义外层、`execute` 之前判定一次，比权限沙箱与插件守卫更靠外。命中即返回 `isError` 的工具结果（`details.planModeDenied`），把「写进计划、等确认」的替代路径回给模型。挂载点三处：① 整列 `customTools`（含 bash 覆盖、`edit_soft`、`patch`、`eval`、子代理派发与排程工具）；② `installToolOverrides` 注入的 `write` / `edit`（`toolOverrideSpecs` 的 `composeWrite`/`composeEdit`）；③ 常驻终端工具的 `checkSafety`。关闭时只多一层布尔判断。
+2. **软约束（`PLAN_MODE_SYSTEM_PROMPT`）**：`appendSystemPromptOverride` 按当前会话状态追加一段纯英文硬规则，切换开关时 `session.reload()` 重建，下一轮即生效。这段提示词真正的载荷是两条：
+   - **禁代码倾倒**（`## Output shape` 段）：`NEVER write the implementation` —— 不贴整文件、不贴完整函数、不给「成品版代码」，只描述改哪些文件、结构、关键决策、风险、验证方式与第一步；代码只允许「棘手处的短片段（~20 行、至多两处）」。**这条是硬闸门的补丁**：闸门让模型写不出文件，模型就会把整份实现当正文吐出来（烧 token 又没落地，实报过一次「让它写单页贪吃蛇，上来就贴几百行源码」）。注意回归：提示词段内禁中文（`tests/unit/plan-mode.test.ts` 有 CJK 断言，写「开始实施」这类 UI 字样要改写英文）。
+   - **小需求走短计划**（`## Plan board` 段）：只有「3+ 步或有真未知」才先 `plan_update` 列 pending 步骤；「写个单页贪吃蛇」这类小而明确的需求**跳过看板**，直接给短计划（要动哪些文件 / 结构 / 验收 / 第一步），省一轮工具往返。
+
+   提示词正文可在**设置面板 → 提示词 → 计划模式提示词**改：`planModePromptMode`（append/replace）+ `planModePrompt`（自定义正文），语义同视觉桥 / AI 提交信息（空自定义 = 内置默认，replace 下输入框预填内置默认供直接改），`buildPlanModePrompt` 纯函数拼装（单测覆盖三种组合）。**只改提示词，硬闸门不受影响** —— 服务端只读约束永远生效。该项不进设置预设（同 scmCommitMsgPrompt）。
+
+判定纯函数（单测 `tests/unit/plan-mode.test.ts`）：`planModeDenial(toolName, params)` 分三类 —— **写类工具**（`write`/`edit`/`patch`/`rm`/`git` 等名单）直拒；**bash 只读白名单**（`splitShellSegments` 按 `;`/`&&`/`||`/`|` 切段，每段都要过：禁重定向 / 命令替换 / 后台 / heredoc，命令在白名单内，`git` 只放 `status|diff|log|show|blame|…` 等只读子命令，解释器只放行 `--version`/`--help`）—— 刻意保守，宁可拒一次让模型换命令；**旁路工具**（`spawn` / `delegate_task` / `set_goal` / 排程等）也拒：闸门是**会话级**的，子代理对话的 `planMode` 是 false，放行等于留后门。
+
+状态随会话转录落盘（`plan/mode` 自定义条目，回放见 `readPlanModeFromSession`，与 `permission/preset` 同口径），切会话/重载恢复；快照字段 `UiState.planMode` 恒给布尔（用 `undefined` 会在 `snapshot_delta` 里丢键，前端 spread 合并会残留上一对话的 `true`）。已知边界：插件 / MCP 自带工具不经这三处挂载点，只受软约束约束。回归：`tests/plan-mode-test.mjs`（零 token：开关快照 / 写类被拒 / bash 读写分流 / 关闭后恢复 / 转录落盘）。
 
 ### 模型操作浏览器页面（`browser_page` 工具）
 

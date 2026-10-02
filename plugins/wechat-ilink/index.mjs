@@ -6,9 +6,11 @@
  *   getupdates 收消息 → host.chat 投给 agent → run_end 经 sendmessage 回包。
  * 全程出站 HTTPS，无需公网 IP / 开端口。
  *
- * v1 范围：单账号、文本双工；媒体只占位；默认只回私聊；与该 cwd 最近会话共享。
+ * v1 范围：单账号、文本双工；媒体只占位；默认只回私聊；每个已配对微信用户独立伪客户端/独立会话。
  * bot_token 存 host.secrets（AES-256-GCM，拷机解不开）；游标/配对存 storage。
  */
+
+import { createHash } from "node:crypto";
 
 const API_DEFAULT = "https://ilinkai.weixin.qq.com";
 const APP_ID = "bot";
@@ -27,6 +29,8 @@ const BACKOFF_MAX_MS = 60000;
 const INBOX_CAP = 100;
 const PENDING_PEER_CAP = 50;
 const PENDING_RUN_CAP = 50;
+/** peerLastAt（peer 最近来消息时刻）上限：陌生 peer 会无界增长，FIFO 淘汰最旧的。 */
+const PEER_LASTAT_CAP = 500;
 /** 回包文本上限。 */
 const REPLY_CAP = 4000;
 /** 陌生人配对提示节流：每 peer 每小时最多一条。 */
@@ -75,13 +79,31 @@ async function fetchJson(url, { method = "POST", headers = {}, body, timeoutMs =
 	}
 }
 
-/** UiMessage → 纯文本（assistant 回包累积用）。 */
-function assistantTextOf(msg) {
+/** 剥离 pi-web-ui 内部控制标记（例如 [[plan:...]]、[[todo:...]]、[[conv:...]]、[[notify:...]] 等）。 */
+export function stripInternalMarkers(text) {
+	return String(text ?? "")
+		.replace(/\[\[[A-Za-z][A-Za-z0-9_-]*:[^\]]*\]\]/g, "")
+		.replace(/\r\n/g, "\n")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+}
+
+/** 按微信 peer 生成稳定、无敏感明文且合规的 accountId（隔离每个微信用户的伪客户端与会话）。 */
+export function peerAccountId(peer) {
+	const raw = String(peer ?? "").trim();
+	if (!raw) return "wx_default";
+	const hash = createHash("sha256").update(raw).digest("hex").slice(0, 16);
+	return `wx_${hash}`;
+}
+
+/** UiMessage → 纯文本（assistant 回包累积用，自动清理内部 marker）。 */
+export function assistantTextOf(msg) {
 	if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) return "";
-	return msg.content
+	const raw = msg.content
 		.filter((b) => b?.type === "text" && typeof b.text === "string" && b.text.trim())
 		.map((b) => b.text)
 		.join("\n");
+	return stripInternalMarkers(raw);
 }
 
 /** 入站 item_list → 文本（文本直取，媒体占位，未知键嗅探）。 */
@@ -370,11 +392,45 @@ export default {
 		}
 
 		// ---- 驱动 agent ------------------------------------------------------
+		const EARLY_RUN_CAP = 30;
+		const EARLY_RUN_TTL_MS = 60_000;
+		/** conversationId → { text: string, ended: boolean, at: number }（承接 host.chat 返回前提前到达的事件）。 */
+		const earlyRuns = new Map();
+
+		function trimEarlyRuns() {
+			const now = Date.now();
+			for (const [id, rec] of earlyRuns) {
+				if (now - rec.at > EARLY_RUN_TTL_MS) earlyRuns.delete(id);
+			}
+			while (earlyRuns.size >= EARLY_RUN_CAP) {
+				const oldest = earlyRuns.keys().next().value;
+				earlyRuns.delete(oldest);
+			}
+		}
+
 		function trackRun(conversationId, to, contextToken) {
 			while (st.pendingRuns.size >= PENDING_RUN_CAP) {
 				const oldest = st.pendingRuns.keys().next().value;
 				dropRun(oldest);
 			}
+
+			// issue #345：检查在 host.chat() 结果返回前是否已提前收到运行事件
+			const early = earlyRuns.get(conversationId);
+			if (early) {
+				earlyRuns.delete(conversationId);
+				if (early.text) {
+					st.runText.set(conversationId, early.text);
+				}
+				if (early.ended) {
+					const clean = stripInternalMarkers(st.runText.get(conversationId) ?? "");
+					const body = clean || "任务完成（无文本输出）。";
+					st.runText.delete(conversationId);
+					const out = body.length > REPLY_CAP ? `${body.slice(0, REPLY_CAP)}\n…（超长截断）` : body;
+					sendText(to, out, contextToken).catch((err) => host.log("reply failed:", err?.message ?? err));
+					return;
+				}
+			}
+
 			const timeoutMs = Math.min(900, Math.max(30, Number(settings().replyTimeoutSec ?? 180))) * 1000;
 			const timer = setTimeout(() => {
 				const p = st.pendingRuns.get(conversationId);
@@ -391,12 +447,14 @@ export default {
 			if (p) clearTimeout(p.timer);
 			st.pendingRuns.delete(conversationId);
 			st.runText.delete(conversationId);
+			earlyRuns.delete(conversationId);
 		}
 
 		async function drivePeer(peer, text, contextToken) {
 			const label = `微信:${peer}`;
 			// issue #226：透传宿主 host.chat 四件套（工作空间/模型/思考强度/绑定网页会话）。
-			const req = { text: `[${label}] ${text}`, accountId: "wx" };
+			// issue #345：按微信用户 ID 隔离 accountId，避免全员共享同一伪客户端与无头会话。
+			const req = { text: `[${label}] ${text}`, accountId: peerAccountId(peer) };
 			const workspace = String(settings().workspace ?? "").trim();
 			if (workspace) req.cwd = workspace;
 			const model = String(settings().model ?? "").trim();
@@ -423,28 +481,71 @@ export default {
 		const offRun = host.onRunEvent((ev) => {
 			try {
 				const convId = ev.conversationId;
-				if (!convId || !st.pendingRuns.has(convId)) return;
+				if (!convId) return;
+
+				if (st.pendingRuns.has(convId)) {
+					if (ev.type === "message" && ev.message) {
+						const t = assistantTextOf(ev.message);
+						if (t) {
+							const prev = st.runText.get(convId) ?? "";
+							st.runText.set(convId, cut(`${prev}\n${t}`.trim(), REPLY_CAP + 200));
+						}
+						return;
+					}
+					if (ev.type !== "run_end") return;
+					const p = st.pendingRuns.get(convId);
+					if (!p) return;
+					const raw = (st.runText.get(convId) ?? "").trim();
+					const clean = stripInternalMarkers(raw);
+					const body = clean || "任务完成（无文本输出）。";
+					dropRun(convId); // 先取值再清（dropRun 会删 runText）。
+					const out = body.length > REPLY_CAP ? `${body.slice(0, REPLY_CAP)}\n…（超长截断）` : body;
+					sendText(p.to, out, p.ctx).catch((err) => host.log("reply failed:", err?.message ?? err));
+					return;
+				}
+
+				// issue #345：若 convId 暂未在 pendingRuns 登记（host.chat 的 Promise 还在微任务中）
+				// 暂存消息与完成态，避免极快结束或异常收尾时遗漏 run_end
 				if (ev.type === "message" && ev.message) {
 					const t = assistantTextOf(ev.message);
 					if (t) {
-						const prev = st.runText.get(convId) ?? "";
-						st.runText.set(convId, cut(`${prev}\n${t}`.trim(), REPLY_CAP + 200));
+						trimEarlyRuns();
+						let rec = earlyRuns.get(convId);
+						if (!rec) {
+							rec = { text: "", ended: false, at: Date.now() };
+							earlyRuns.set(convId, rec);
+						}
+						rec.text = cut(`${rec.text}\n${t}`.trim(), REPLY_CAP + 200);
+						rec.at = Date.now();
 					}
 					return;
 				}
-				if (ev.type !== "run_end") return;
-				const p = st.pendingRuns.get(convId);
-				if (!p) return;
-				const body = (st.runText.get(convId) ?? "").trim() || "任务完成（无文本输出）。";
-				dropRun(convId); // 先取值再清（dropRun 会删 runText）。
-				const out = body.length > REPLY_CAP ? `${body.slice(0, REPLY_CAP)}\n…（超长截断）` : body;
-				sendText(p.to, out, p.ctx).catch((err) => host.log("reply failed:", err?.message ?? err));
+				if (ev.type === "run_end") {
+					trimEarlyRuns();
+					let rec = earlyRuns.get(convId);
+					if (!rec) {
+						rec = { text: "", ended: true, at: Date.now() };
+						earlyRuns.set(convId, rec);
+					} else {
+						rec.ended = true;
+						rec.at = Date.now();
+					}
+				}
 			} catch (err) {
 				host.log("run event failed:", err?.message ?? err);
 			}
 		});
 
 		// ---- 入站 ----------------------------------------------------------
+		/** 记 peer 最近来消息时刻：Map 增长有界（上限 PEER_LASTAT_CAP，FIFO 淘汰最旧的），
+		 *  与 pendingPeers/peerCtx 的既有上限风格一致，防陌生 peer 无限堆积。 */
+		function touchPeerLastAt(peer, at) {
+			st.peerLastAt[peer] = at;
+			const keys = Object.keys(st.peerLastAt);
+			if (keys.length <= PEER_LASTAT_CAP) return;
+			for (const k of keys.slice(0, keys.length - PEER_LASTAT_CAP)) delete st.peerLastAt[k];
+		}
+
 		async function handleInbound(m) {
 			try {
 				if (!m || typeof m !== "object") return;
@@ -458,7 +559,7 @@ export default {
 					save();
 				}
 				const text = inboundTextOf(m.item_list);
-				st.peerLastAt[peer] = Date.now();
+				touchPeerLastAt(peer, Date.now());
 				pushInbox({ dir: "in", peer, text: cut(text || "(空消息)", 500), at: Date.now() });
 				if (!text) return;
 				if (!isAllowed(peer)) {
@@ -654,12 +755,12 @@ export default {
 				st.toolOff = host.registerAgentTool({
 					name: "wechat_send",
 					label: "发微信消息",
-					description: "经微信通道发一条文本消息（只能发给已配对的用户）。",
+					description: "Send a text message over the WeChat channel (only to users who have been paired).",
 					parameters: {
 						type: "object",
 						properties: {
-							to: { type: "string", description: "微信用户 ID（视图收件箱里可见）" },
-							text: { type: "string", description: "文本内容" },
+							to: { type: "string", description: "WeChat user ID (visible in the view's inbox)" },
+							text: { type: "string", description: "Message text" },
 						},
 						required: ["to", "text"],
 					},
@@ -668,7 +769,7 @@ export default {
 						const text = String(params?.text ?? "").trim();
 						if (!to || !text) throw new Error("wechat_send 需要 to + text");
 						if (!isAllowed(to)) throw new Error(`未配对用户：${to}（先在 💬 视图允许）`);
-						await sendText(to, cut(text, REPLY_CAP), st.peerCtx[to]);
+						await sendText(to, cut(stripInternalMarkers(text), REPLY_CAP), st.peerCtx[to]);
 						return `已发送给 ${to}`;
 					},
 				});
@@ -782,6 +883,7 @@ export default {
 				}
 			}
 			for (const id of [...st.pendingRuns.keys()]) dropRun(id);
+			earlyRuns.clear();
 			st.bgTask?.unregister();
 		};
 	},

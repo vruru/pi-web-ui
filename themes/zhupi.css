@@ -1,0 +1,746 @@
+/* theme-name: 朱批 */
+/* theme-name-en: Vermilion Manuscript */
+/* theme-group: builtin */
+:root {
+	color-scheme: light;
+	--bg: #f5f1e8;
+	--bg-elev: #f0ebdf;
+	--bg-elev2: #fbf8f1;
+	--bg-elev3: rgba(38, 34, 24, 0.05);
+	--border: #dad2c0;
+	--border-soft: #e6dfcf;
+	--text: #262218;
+	--text-dim: #6e6656;
+	--text-faint: #9a9078;
+	--accent: #bf3b1f;
+	--accent-soft: rgba(191, 59, 31, 0.1);
+	--green: #3d7a55;
+	--green-soft: rgba(61, 122, 85, 0.12);
+	--red: #c2402a;
+	--red-soft: rgba(194, 64, 42, 0.1);
+	--amber: #a8722a;
+	--blue: #3a5fa0;
+	--blue-soft: rgba(58, 95, 160, 0.12);
+	--term-bg: #2a2620;
+	--term-fg: #e8e2d4;
+	--term-cursor: #d95a35;
+	--term-cursor-accent: #2a2620;
+	--term-selection: rgba(217, 90, 53, 0.35);
+	--term-black: #2a2620;
+	--term-red: #d95a35;
+	--term-green: #7ba05b;
+	--term-yellow: #d9a441;
+	--term-blue: #7a97c2;
+	--term-magenta: #b07da8;
+	--term-cyan: #6aa8a0;
+	--term-white: #e8e2d4;
+	--term-bright-black: #8a8272;
+	--term-bright-red: #e87350;
+	--term-bright-green: #97bd77;
+	--term-bright-yellow: #e8bb5f;
+	--term-bright-blue: #96b1d8;
+	--term-bright-magenta: #c99cc2;
+	--term-bright-cyan: #86c2ba;
+	--term-bright-white: #fffdf7;
+	--mono: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+	--serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", STSong, SimSun, Georgia, "Times New Roman", serif;
+	--mermaid-font-size: 12px;
+	--sans:
+		-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Roboto,
+		Helvetica, Arial, sans-serif;
+	--tooltip-bg: #fffdf7;
+	--code-bg: #efe9db;
+	--code-text: #33301f;
+	--code-border: transparent;
+	--code-pad: 0;
+	--card-body-pad: 4px 14px 12px;
+	--err-text: #a03618;
+	--red-text: #a03618;
+	--amber-text: #8a5c1e;
+	--info-blue: #3a5fa0;
+	--link: #a03618;
+	--link-hover: #bf3b1f;
+	--link-soft: #e8c9b8;
+	--md-strong: #1a160e;
+	--skill-blue: #3a5fa0;
+	--plugin-purple: #7a5296;
+	--auth-green: #3d7a55;
+	--scroll-thumb: rgba(38, 34, 24, 0.18);
+	--scroll-thumb-hover: rgba(191, 59, 31, 0.4);
+	--notice-err-bg: #f5e0d8;
+	--notice-warn-bg: #f2e8d4;
+	--notice-info-bg: #e2e8ef;
+	--notice-err-border: #c2402a;
+	--notice-warn-border: #a8722a;
+	--notice-info-border: #3a5fa0;
+	--send-blue: #bf3b1f;
+	--send-blue-hover: #a53118;
+	--stop-red: #c2402a;
+	--stop-red-hover: #a03618;
+	--brand-grad-a: #bf3b1f;
+	--brand-grad-b: #a8722a;
+	--on-amber: #fffdf7;
+	--search-active-fg: #fffdf7;
+	--switch-knob: #fffdf7;
+	--sunken-bg: rgba(38, 34, 24, 0.06);
+	--glow-015: rgba(38, 34, 24, 0.015);
+	--glow-025: rgba(38, 34, 24, 0.025);
+	--glow-03: rgba(38, 34, 24, 0.03);
+	--glow-04: rgba(38, 34, 24, 0.04);
+	--glow-05: rgba(38, 34, 24, 0.05);
+	--glow-12: rgba(38, 34, 24, 0.12);
+	--glow-18: rgba(38, 34, 24, 0.18);
+	--glow-22: rgba(38, 34, 24, 0.22);
+	--glow-38: rgba(38, 34, 24, 0.38);
+	--control-fg: #6e6656;
+	--control-bg: #fbf8f1;
+	--control-border: #dad2c0;
+	--bg-image: none;
+	--bg-image-dim: 0.85;
+	--bg-image-blur: 0px;
+	--wallpaper-panel-alpha: 100%;
+	--topbar-bg: #f5f1e8;
+	--statusbar-bg: #f5f1e8;
+	--panel-bg: #f0ebdf;
+	--card-bg: #fbf8f1;
+	--chip-bg: #f0ebdf;
+	--msgs-bg: #f5f1e8;
+	--inputbox-bg: #fbf8f1;
+	--menu-bg: #fffdf7;
+}
+
+/* =========================================================================
+   朱批 · Vermilion Manuscript
+   整个界面从「聊天气泡」重构成「一张被 AI 做批注的稿纸」：
+   · 无气泡、无头像 —— 人机内容同处一条全宽文档流
+   · 工具调用 = 台账行（等宽小字 + 点线引导符）
+   · 思考流 = 脚注体（※ 起手）
+   · 左缘 1px 墨线活动脊贯穿消息区
+   · 输入框 = 命令栏，左缘一抹朱笔
+   · 色彩只有语义：墨、淡墨、朱（唯一强调）、印绿
+   ========================================================================= */
+
+/* ---- 0. 稿纸底色：旧纸的暗角与天头微光，纯渐变无图 ---- */
+body,
+.app-root {
+	background-color: var(--bg);
+	background-image:
+		radial-gradient(ellipse 90% 55% at 50% -8%, rgba(255, 253, 247, 0.85) 0%, rgba(255, 253, 247, 0) 70%),
+		radial-gradient(ellipse 100% 70% at 108% 112%, rgba(166, 140, 100, 0.1) 0%, rgba(166, 140, 100, 0) 70%);
+	background-attachment: fixed;
+}
+
+::selection {
+	background: rgba(191, 59, 31, 0.18);
+}
+
+/* ---- 1. 顶栏隐形化：无底色层次，只一条 hairline，印章品牌 ---- */
+.topbar {
+	background: var(--topbar-bg) !important;
+	border-bottom: 1px solid var(--border-soft) !important;
+	box-shadow: none !important;
+}
+
+.brand-logo {
+	background: var(--accent) !important;
+	color: #f6f2e9 !important;
+	border-radius: 2px !important;
+	box-shadow: none !important;
+}
+
+.brand-name {
+	font-family: var(--serif);
+	font-weight: 700;
+	letter-spacing: 0.06em;
+}
+
+/* 顶栏控件全部素色化：无底无框，hover 才现 hairline。兜底所有 button /
+ * [role=button]——不管类名是谁（基线 chip / 插件注入 / capsule 等），顶栏里
+ * 一律裸图标，dropdown 触发器不许再带盒子。 */
+.topbar button,
+.topbar [role="button"],
+.topbar a.chip,
+.topbar .chip {
+	background: transparent !important;
+	border: 1px solid transparent !important;
+	border-radius: 3px !important;
+	box-shadow: none !important;
+	transition:
+		border-color 0.15s ease,
+		color 0.15s ease !important;
+}
+
+.topbar button:hover,
+.topbar [role="button"]:hover,
+.topbar a.chip:hover,
+.topbar .chip:hover {
+	border-color: var(--border) !important;
+	background: transparent !important;
+}
+
+.topbar .dropdown {
+	background: transparent !important;
+	border: none !important;
+	box-shadow: none !important;
+}
+
+/* ---- 2. 消息区：左缘墨线活动脊 + 文档化排版 ----
+ * 列缘这条线让给脊线与输入框边框：脊线（虚线针脚）与输入框左边框同一条
+ * 像素线，历史虚下来、接到输入框变实，像「线活了起来」；消息正文整体
+ * 右移 23px 挂在轨上，不贴线。仅桌面（≥641px，与 qn-rail 断点一致）启用；
+ * 手机上无脊线、保持原生内缩。注意 background-position 的百分比按
+ * 「容器宽-图宽」解析，与 padding 不同，偏移公式不要互相套用。 */
+@media (min-width: 641px) {
+	.messages {
+		padding-inline: max(0px, calc(var(--chat-inset) + 23px - var(--msgs-gutter, 0px))) !important;
+		background-image: linear-gradient(to bottom, rgba(38, 34, 24, 0.22) 40%, transparent 0);
+		background-repeat: repeat-y;
+		background-size: 1px 7px;
+		background-position: calc(var(--chat-inset) - 0.5px) top;
+	}
+}
+
+.msg {
+	position: relative;
+	padding: 2px 0 10px;
+}
+
+/* 操作按钮：卡头只有自己的复制键（.chead-copy），消息级按钮（复制三件套 /
+   分叉 / 回滚 / 朗读）统一在底部 .msg-actions 行，流内排在消息气泡/正文下边，
+   桌面端与手机端保持一致。 */
+
+/* 角色行：书目式小标 */
+.msg-meta {
+	margin-bottom: 4px;
+}
+
+/* head 行左右内边距归零：折叠三角贴齐列左缘（文字同一条线），右侧复制
+ * 按钮贴右缘——head 无边框后，钮与缘之间不能悬空。三角形 28px 盒内 16px
+ * 图标居中内缩 6px，用负外边距做光学对齐。 */
+.chead {
+	padding-left: 0;
+	padding-right: 0;
+}
+
+.chead-toggle {
+	margin-left: -6px;
+}
+
+/* 正文块上的单一复制键去重：卡头现在只有自己的复制键，消息级复制
+   （纯文本 / Markdown / 长图三件套）统一在底部 .msg-actions 行里。 */
+.msg-text-copy {
+	display: none !important;
+}
+
+/* head 悬浮不再出现底色块：纸面保持完全平整（键盘 focus 的 outline 保留，
+ * 只服务键盘导航） */
+div.chead[role="button"]:hover,
+.chead-toggle:hover {
+	background: transparent !important;
+}
+
+.msg-role {
+	font-size: 10.5px;
+	font-weight: 600;
+	letter-spacing: 0.18em;
+	color: var(--text-faint);
+}
+
+.msg-time {
+	font-family: var(--mono);
+	font-size: 10.5px;
+}
+
+/* ---- 3. 用户输入：去气泡，「起手式，稿纸批注体 ---- */
+.msg-user .msg-body {
+	position: relative;
+	background: transparent !important;
+	border: none !important;
+	border-radius: 0 !important;
+	padding: 0 0 0 1.5em !important;
+	font-family: var(--serif);
+	font-size: 15.5px;
+	font-weight: 600;
+	line-height: 1.8;
+	color: var(--text);
+}
+
+.msg-user .msg-body::before {
+	content: "「";
+	position: absolute;
+	left: 0;
+	top: -0.12em;
+	font-family: var(--serif);
+	font-size: 1.3em;
+	font-weight: 700;
+	color: var(--accent);
+	line-height: 1;
+}
+
+/* ---- 4. 助手正文：衬线文档体，直接是书页 ---- */
+.msg-assistant .msg-text {
+	font-family: var(--serif);
+	font-size: 15px;
+	line-height: 1.85;
+	color: var(--text);
+}
+
+.msg-assistant .msg-text p:first-child {
+	margin-top: 0;
+}
+
+.msg-assistant .msg-text h1,
+.msg-assistant .msg-text h2,
+.msg-assistant .msg-text h3,
+.msg-assistant .msg-text h4 {
+	font-family: var(--serif);
+	font-weight: 700;
+	color: var(--md-strong);
+	letter-spacing: 0.02em;
+}
+
+.msg-assistant .msg-text blockquote {
+	border-left: 2px solid var(--accent-soft);
+	font-style: normal;
+	color: var(--text-dim);
+}
+
+.msg-assistant .msg-text a {
+	color: var(--link);
+	text-decoration: underline dotted;
+	text-decoration-color: rgba(191, 59, 31, 0.45);
+	text-underline-offset: 3px;
+}
+
+.msg-assistant .msg-text hr {
+	border: none;
+	border-top: 1px dotted var(--border);
+}
+
+.msg-assistant .msg-text code {
+	background: #ece4d0;
+	color: #6b3a1f;
+	border-radius: 2px;
+	padding: 1px 5px;
+}
+
+/* ---- 5. 工具调用 = 台账行：无框无底，点线引导符填空 ---- */
+.toolcall {
+	margin: 1px 0 !important;
+	border: none !important;
+	border-radius: 0 !important;
+	background: transparent !important;
+	box-shadow: none !important;
+	overflow: visible !important;
+}
+
+.toolcall-head {
+	display: flex;
+	align-items: center;
+	min-height: 24px;
+	padding: 2px 0;
+	font-family: var(--mono);
+	font-size: 12px;
+}
+
+.toolcall-name {
+	font-family: var(--mono) !important;
+	font-weight: 500 !important;
+	font-size: 12px !important;
+	letter-spacing: 0.02em;
+	color: var(--text-dim) !important;
+}
+
+/* 点线引导符：账本目录式填空，落在名字与状态之间 */
+.toolcall .toolcall-spacer {
+	border-bottom: 1px dotted #c9bfa8;
+	height: 0.7em;
+	margin: 0 10px;
+}
+
+.toolcall-status {
+	color: var(--text-faint) !important;
+}
+
+.toolcall.run .toolcall-name {
+	color: var(--accent) !important;
+}
+
+.toolcall.run .toolcall-status {
+	color: var(--accent) !important;
+}
+
+.toolcall.run .toolcall-head {
+	background: transparent;
+	border-left: none;
+}
+
+.toolcall.ok .toolcall-status {
+	color: var(--green) !important;
+}
+
+.toolcall.err .toolcall-status {
+	color: var(--red) !important;
+}
+
+.toolcall.err .toolcall-name {
+	color: var(--red) !important;
+}
+
+/* 展开的参数/输出：并入台账，无框零内边距平面文本（--code-border/--code-pad
+   已按全透明主题机制置 transparent/0，连带 .termline 一并生效） */
+.toolcall-args pre,
+.toolcall-output pre {
+	background: transparent !important;
+	border: none !important;
+	border-radius: 0 !important;
+	padding: 0 !important;
+}
+
+/* 工具卡体：去掉分隔线与内边距，参数/输出与卡头同距平铺 */
+.toolcall-body {
+	border-top: none !important;
+	padding: 0 0 6px !important;
+}
+
+/* 卡内重复的终端图标只剩噪音（卡头已有工具图标），参照全透明主题隐藏 */
+.termline-icon {
+	display: none;
+}
+
+.toolcall-output-label {
+	margin-top: 6px;
+}
+
+.toolcall-kill {
+	border-radius: 3px;
+}
+
+/* ---- 6. 思考流 = 脚注：※ 起手，淡墨小字 ---- */
+.thinking {
+	margin: 4px 0 !important;
+	border: none !important;
+	border-radius: 0 !important;
+	background: transparent !important;
+	box-shadow: none !important;
+}
+
+.thinking-head {
+	font-size: 12px;
+	color: var(--text-faint);
+}
+
+.thinking-icon {
+	color: var(--text-faint) !important;
+}
+
+.thinking-body {
+	border-top: none !important;
+	font-style: normal !important;
+	font-size: 12.5px !important;
+	color: var(--text-dim) !important;
+	background: transparent;
+	position: relative;
+	padding: 2px 14px 2px 1.6em !important;
+}
+
+.thinking-body::before {
+	content: "※";
+	position: absolute;
+	left: 0;
+	top: 2px;
+	color: var(--text-faint);
+}
+
+.thinking-live .thinking-toggle,
+.thinking-live-label {
+	color: var(--accent) !important;
+}
+
+/* ---- 7. 折叠摘要行 / 排队提示：并入台账体系 ---- */
+.msg-collapsed {
+	background: transparent !important;
+	border: none !important;
+	border-bottom: 1px dotted var(--border-soft) !important;
+	border-radius: 0 !important;
+	box-shadow: none !important;
+	padding-left: 0 !important;
+	padding-right: 0 !important;
+}
+
+.msg-collapsed-action::before {
+	margin-left: 0 !important;
+}
+
+.msg-error {
+	background: var(--red-soft) !important;
+	border: none !important;
+	border-left: 3px solid var(--red) !important;
+	border-radius: 0 !important;
+	font-family: var(--serif);
+}
+
+/* ---- 8. 输入区 = 命令栏：与其他主题同构——只动颜色不动几何，
+        朱笔以 inset 阴影画在边框内侧，外缘与消息列/chips 恒对齐 ---- */
+.inputbar {
+	background: transparent !important;
+}
+
+.inputbox {
+	background: var(--inputbox-bg) !important;
+	border: none !important;
+	border-radius: 3px !important;
+	box-shadow: inset 3px 0 0 0 rgba(191, 59, 31, 0.35) !important;
+	transition:
+		border-color 0.2s ease,
+		box-shadow 0.2s ease !important;
+}
+
+.inputbox:focus-within {
+	border: none !important;
+	box-shadow: inset 3px 0 0 0 var(--accent) !important;
+}
+
+.btn.send {
+	background: var(--send-blue) !important;
+	color: #f6f2e9 !important;
+	border-radius: 50% !important;
+	box-shadow: none !important;
+	font-weight: 600;
+}
+
+.btn.send:hover {
+	background: var(--send-blue-hover) !important;
+}
+
+.btn.stop {
+	background: var(--stop-red) !important;
+	color: #f6f2e9 !important;
+	border-radius: 50% !important;
+}
+
+/* 输入框底部模型选择、思考强度、预设等按钮：去边框、透明底，hover 现 hairline */
+.composer-tools {
+	border-top: none !important;
+}
+
+.composer-tools .chip,
+.composer-tools .capsule-segment {
+	font-size: 13px !important;
+	padding: 4px 10px !important;
+	gap: 6px !important;
+	background: transparent !important;
+	border: 1px solid transparent !important;
+	box-shadow: none !important;
+	border-radius: 3px !important;
+	transition:
+		border-color 0.15s ease,
+		background 0.15s ease !important;
+}
+
+.composer-tools .model-thinking-capsule {
+	background: transparent !important;
+	border: none !important;
+	box-shadow: none !important;
+	padding: 0 !important;
+}
+
+.composer-tools .model-thinking-capsule .capsule-divider {
+	display: none !important;
+}
+
+.composer-tools .chip:hover,
+.composer-tools .capsule-segment:hover {
+	border-color: var(--border) !important;
+	background: transparent !important;
+}
+
+.composer-tools-left {
+	gap: 6px !important;
+}
+
+.composer-tools .chip-model,
+.composer-tools .chip-sub,
+.composer-tools .capsule-model-name,
+.composer-tools .capsule-thinking-text {
+	font-size: 12.5px !important;
+}
+
+/* ---- 9. 底栏 / 状态栏：hairline 收边 ---- */
+.statusbar {
+	background: var(--statusbar-bg) !important;
+	border-top: 1px solid var(--border-soft) !important;
+	box-shadow: none !important;
+}
+
+.goalbar {
+	background: transparent !important;
+	border-top: 1px solid var(--border-soft) !important;
+	box-shadow: none !important;
+}
+
+/* ---- 10. 左右面板：素纸文件栏 ----
+ * 激活态不做红洗（accent-soft 洗在纸上是一块脏粉），改为中性墨面 5% +
+ * 左缘 2px 朱标；圆角统一 8px。 */
+.panel {
+	background: var(--panel-bg) !important;
+	border-color: var(--border-soft) !important;
+}
+
+.session-item,
+.project-item,
+.file-item,
+.scm-file {
+	border-radius: 8px;
+}
+
+.session-item.active,
+.project-item.active {
+	background: rgba(38, 34, 24, 0.05);
+	border: none;
+	box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.session-item.active {
+	padding: 8px 10px;
+}
+
+.project-item.active {
+	padding: 7px 10px;
+}
+
+/* ---- 11. 代码块与终端：纸凹版 + 暖墨终端 ---- */
+.codeblock {
+	background: var(--code-bg) !important;
+	border: 1px solid var(--border-soft) !important;
+	border-radius: 3px !important;
+	box-shadow: none !important;
+}
+
+.codeblock pre,
+.msg-text pre {
+	background: var(--code-bg) !important;
+	color: var(--code-text) !important;
+}
+
+/* ---- 11b. 语法高亮适配纸面（全局捆绑的是 github-dark，必须整套覆盖）---- */
+.hljs {
+	color: #33301f;
+	background: transparent !important;
+}
+
+.hljs-comment,
+.hljs-quote {
+	color: #948b78;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-doctag,
+.hljs-formula {
+	color: #a03618;
+}
+
+.hljs-string,
+.hljs-regexp {
+	color: #3f6c4f;
+}
+
+.hljs-number,
+.hljs-literal {
+	color: #8a5c1e;
+}
+
+.hljs-title,
+.hljs-title.function_,
+.hljs-section {
+	color: #6b3fa0;
+}
+
+.hljs-attr,
+.hljs-attribute,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-type,
+.hljs-name {
+	color: #8a4a2e;
+}
+
+.hljs-built_in {
+	color: #2f5f8a;
+}
+
+.hljs-deletion {
+	color: #7a2718;
+	background: rgba(194, 64, 42, 0.12);
+}
+
+.hljs-addition {
+	color: #2f6b4f;
+	background: rgba(61, 122, 85, 0.14);
+}
+
+/* ---- 12. 弹层与菜单：纸面实底 + hairline，方角家族 ---- */
+.modal,
+.tool-info-modal,
+.settings-modal,
+.model-modal,
+.tpl-modal,
+.dd-menu,
+.dialog-inline {
+	border-radius: 4px !important;
+	border: 1px solid var(--border) !important;
+	box-shadow:
+		0 1px 2px rgba(38, 34, 24, 0.06),
+		0 16px 40px -12px rgba(38, 34, 24, 0.25) !important;
+}
+
+.dd-menu {
+	background: var(--menu-bg) !important;
+	border: 1px solid var(--border) !important;
+	border-radius: 4px !important;
+	box-shadow: 0 12px 32px -8px rgba(38, 34, 24, 0.28) !important;
+}
+
+.dd-item:hover,
+.dd-all-item:hover {
+	background: var(--accent-soft) !important;
+}
+
+/* ---- 13. chips / 徽标：账目标签体 ---- */
+.chip {
+	background: var(--chip-bg) !important;
+	border: 1px solid var(--border-soft) !important;
+	border-radius: 2px !important;
+	box-shadow: none !important;
+	font-family: var(--mono);
+	font-size: 11px;
+}
+
+/* ---- 14. 滚动条：细墨线 ---- */
+::-webkit-scrollbar {
+	width: 6px;
+	height: 6px;
+}
+
+::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+	background: var(--scroll-thumb);
+	border-radius: 0;
+}
+
+::-webkit-scrollbar-thumb:hover {
+	background: var(--scroll-thumb-hover);
+}
+
+/* ---- 15. 通知条：hairline 左线式 ---- */
+.notice-err,
+.notice-warn,
+.notice-info {
+	border-radius: 0 !important;
+	border-width: 1px !important;
+	border-left-width: 3px !important;
+}

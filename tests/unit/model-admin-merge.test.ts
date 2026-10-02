@@ -58,9 +58,26 @@ describe("mergeProviderConfigEntry", () => {
 		const merged = mergeProviderConfigEntry(prev, formConfig([formModel("m1")]), [formModel("m1")]);
 		expect(merged.headers).toEqual({ Authorization: "Bearer secret" });
 		expect(merged.extraField).toEqual({ nested: true });
-		// apiKey 是表单字段（listModelsConfig 会下发、表单回填）：表单没带即按清空处理，
-		// 与旧实现一致；显式清除密钥走 clear_provider_api_key。
-		expect("apiKey" in merged).toBe(false);
+		// apiKey 明文不再下发浏览器（只见 hasApiKey）：表单/内部路径缺字段 =
+		// 保留旧值（refresh_provider_models 不带 apiKey 保存也不得抹掉密钥）。
+		expect(merged.apiKey).toBe("stored");
+	});
+
+	it("apiKey：缺字段 = 保留旧值，显式空串 = 清除，非空 = 覆盖", () => {
+		const prev = { apiKey: "stored", models: [{ id: "m1" }] };
+
+		// 缺字段（表单留空 / 内部保存路径）→ 保留
+		expect(mergeProviderConfigEntry(prev, formConfig([formModel("m1")]), [formModel("m1")]).apiKey).toBe("stored");
+
+		// 显式空串 → 清除（协议级"空=清除"语义保留）
+		const cleared = mergeProviderConfigEntry(prev, formConfig([formModel("m1")], { apiKey: "  " }), [formModel("m1")]);
+		expect("apiKey" in cleared).toBe(false);
+
+		// 非空 → 覆盖
+		const replaced = mergeProviderConfigEntry(prev, formConfig([formModel("m1")], { apiKey: " new-key " }), [
+			formModel("m1"),
+		]);
+		expect(replaced.apiKey).toBe("new-key");
 	});
 
 	it("模型级未知字段原样保留（覆盖内置 provider 的场景）", () => {

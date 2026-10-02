@@ -2,7 +2,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DEFAULT_TEMPLATES, SubagentTemplatesStore, type SubagentTemplate } from "../../server/subagent-templates.js";
+import {
+	DEFAULT_TEMPLATES,
+	SubagentTemplatesStore,
+	TEMPLATE_LIMITS,
+	type SubagentTemplate,
+} from "../../server/subagent-templates.js";
 
 /** 每个用例一个临时目录，用后即焚。 */
 const dirs: string[] = [];
@@ -111,6 +116,50 @@ describe("SubagentTemplatesStore", () => {
 		expect(store.upsert({ ...base, promptMode: "replace", systemPrompt: "", systemPromptEn: "Be strict." })).toBeNull();
 		// append 允许空提示词（只用白名单限定身份）
 		expect(store.upsert({ ...base, name: "append-only", promptMode: "append", systemPrompt: "" })).toBeNull();
+	});
+
+	it("体积超限拒绝保存（明确报错，不静默截断）", () => {
+		const store = tmpStore();
+		// systemPrompt / systemPromptEn 各自计上限
+		expect(store.upsert({ ...base, systemPrompt: "x".repeat(TEMPLATE_LIMITS.systemPrompt + 1) })).toMatch(/超长/);
+		expect(
+			store.upsert({ ...base, name: "long-en", systemPromptEn: "x".repeat(TEMPLATE_LIMITS.systemPrompt + 1) }),
+		).toMatch(/英文系统提示词超长/);
+		// description / descriptionEn
+		expect(
+			store.upsert({ ...base, name: "long-desc", description: "x".repeat(TEMPLATE_LIMITS.description + 1) }),
+		).toMatch(/简介超长/);
+		expect(
+			store.upsert({ ...base, name: "long-desc-en", descriptionEn: "x".repeat(TEMPLATE_LIMITS.description + 1) }),
+		).toMatch(/英文简介超长/);
+		// 白名单条数与单条长度
+		expect(
+			store.upsert({
+				...base,
+				name: "too-many-skills",
+				enabledSkills: Array.from({ length: TEMPLATE_LIMITS.whitelistEntries + 1 }, (_, i) => `s${i}`),
+			}),
+		).toMatch(/条目过多/);
+		expect(
+			store.upsert({
+				...base,
+				name: "long-extension",
+				enabledExtensions: ["npm:" + "x".repeat(TEMPLATE_LIMITS.whitelistEntryLength)],
+			}),
+		).toMatch(/超长条目/);
+		// 拒绝后不落盘
+		for (const name of ["reviewer", "long-en", "long-desc", "long-desc-en", "too-many-skills", "long-extension"]) {
+			expect(store.get(name)).toBeUndefined();
+		}
+		// 恰好卡线的值放行（不误伤）
+		expect(store.upsert({ ...base, systemPrompt: "x".repeat(TEMPLATE_LIMITS.systemPrompt) })).toBeNull();
+		expect(
+			store.upsert({
+				...base,
+				name: "edge-ok",
+				enabledSkills: Array.from({ length: TEMPLATE_LIMITS.whitelistEntries }, (_, i) => `s${i}`),
+			}),
+		).toBeNull();
 	});
 
 	it("持久化到磁盘并可重载（全局共享语义）", () => {

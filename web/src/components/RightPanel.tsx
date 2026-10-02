@@ -11,7 +11,6 @@ import {
 	FiFolder,
 	FiLink,
 	FiMaximize2,
-	FiPlus,
 	FiX,
 } from "react-icons/fi";
 import type { ClientMessage, FileListing, UiPluginInfo } from "../types";
@@ -46,7 +45,8 @@ function splitTopPx(panel: HTMLElement, split: HTMLElement | null): number {
 	return Math.max(0, toUiZoomPixels(split.getBoundingClientRect().top - panel.getBoundingClientRect().top));
 }
 
-type AttachMode = "inline" | "reference";
+/** 引用模式：文件/目录都只做路径引用（文件内容永不注入 prompt）。 */
+type AttachMode = "reference";
 
 /** 打开 `contextmenu.file` 菜单时记下的「右键上下文」（见下面的 fileMenuRef）。
  *  菜单本体在 App 里渲染，点击回到本组件时，只有这份记录知道该操作谁。 */
@@ -558,13 +558,10 @@ export const RightPanel = memo(function RightPanel({
 					if (tg?.kind === "file") downloadEntry(tg.id, tg.label);
 					break;
 				case "host:file-reveal":
-					if (tg && tg.kind !== "list") panelSend({ type: "file_reveal", path: tg.id });
+					if (tg) panelSend({ type: "file_reveal", path: tg.id });
 					break;
 				case "host:file-open-default":
 					if (tg?.kind === "file") panelSend({ type: "file_open_default", path: tg.id });
-					break;
-				case "host:file-attach-inline":
-					if (tg?.kind === "file") onAttach(tg.id, tg.label, "inline");
 					break;
 				case "host:file-attach-ref":
 					if (tg?.kind === "file") onAttach(tg.id, tg.label, "reference");
@@ -685,11 +682,10 @@ export const RightPanel = memo(function RightPanel({
 					case "host:file-open":
 					case "host:file-download":
 					case "host:file-open-default":
-					case "host:file-attach-inline":
 					case "host:file-attach-ref":
 						return isFile ? entry : { ...entry, hidden: true };
 					case "host:file-reveal":
-						return !isList ? entry : { ...entry, hidden: true };
+						return !onMachineRoot && target.id !== MACHINE_ROOT ? entry : { ...entry, hidden: true };
 					case "host:file-enter":
 					case "host:file-attach-folder":
 						return isDir ? entry : { ...entry, hidden: true };
@@ -1209,14 +1205,6 @@ export const RightPanel = memo(function RightPanel({
 																			onClick={() => downloadEntry(e.path, e.name)}
 																		>
 																			<FiDownload />
-																		</button>
-																		<button
-																			type="button"
-																			className="file-attach inline"
-																			data-tip={t("attachInlineTip")}
-																			onClick={() => onAttach(e.path, e.name, "inline")}
-																		>
-																			<FiPlus />
 																		</button>
 																		<button
 																			type="button"

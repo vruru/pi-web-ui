@@ -1,6 +1,6 @@
 {
 	"name": "pi-web-ui",
-	"version": "0.94.1",
+	"version": "0.97.0",
 	"description": "Just open your browser to get all your work done — browser cockpit for AI coding agents (chat, code, files, terminal, Git in one tab)",
 	"license": "MIT",
 	"author": {
@@ -67,12 +67,13 @@
 		"test": "vitest run",
 		"test:unit": "vitest run",
 		"test:smoke": "node tests/run-smoke.mjs",
+		"test:smoke:core": "node tests/run-smoke.mjs --core",
 		"check:protocol": "node scripts/check-protocol-sync.mjs",
 		"i18n:diff": "node scripts/i18n-diff.mjs",
 		"release:notes": "node scripts/release-notes.mjs",
 		"changelog:i18n": "node scripts/release-notes.mjs --unreleased",
 		"test:freeze": "node tests/freeze-test.mjs",
-		"start": "node dist/server/index.js",
+		"start": "node --import ./dist/server/resolve-global-sdk.js dist/server/index.js",
 		"build:desktop": "tsc -p desktop/tsconfig.json",
 		"desktop:dev": "npm run build:desktop && electron dist/desktop/main.js",
 		"desktop:dist": "npm run build && npm run build:desktop && electron-builder -c desktop/electron-builder.yml",
@@ -82,9 +83,9 @@
 		"lint:fix": "oxlint --fix server/ web/src/ extensions/ scripts/ desktop/"
 	},
 	"dependencies": {
-		"@deepseek-ai/dsh-sdk-jsonrpc-server": "^0.1.1-rc.2",
-		"@deepseek-ai/dsh-sdk-protocol": "^0.1.1-rc.2",
-		"@earendil-works/pi-coding-agent": ">=0.85.1 <0.87.0",
+		"@deepseek-ai/dsh-sdk-jsonrpc-server": "^0.1.5-rc.3",
+		"@deepseek-ai/dsh-sdk-protocol": "^0.1.5-rc.3",
+		"@earendil-works/pi-coding-agent": "0.87.1",
 		"@xterm/addon-fit": "^0.11.0",
 		"@xterm/xterm": "^6.0.0",
 		"compression": "^1.8.2",
@@ -101,6 +102,7 @@
 		"rehype-highlight": "^7.0.2",
 		"rehype-katex": "^7.0.1",
 		"rehype-raw": "^7.0.0",
+		"rehype-sanitize": "^6.0.0",
 		"remark-breaks": "^4.0.0",
 		"remark-gfm": "^4.0.1",
 		"remark-math": "^6.0.0",

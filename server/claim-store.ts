@@ -239,7 +239,8 @@ export class ClaimStore {
 	private save(): void {
 		try {
 			mkdirSync(dirname(this.file), { recursive: true });
-			const tmp = `${this.file}.tmp`;
+			// tmp 带进程唯一后缀：同机多实例（多 worktree/多开）写同一文件不互踩
+			const tmp = `${this.file}.${process.pid}.tmp`;
 			writeFileSync(tmp, JSON.stringify({ version: CLAIMS_FILE_VERSION, tables: Object.fromEntries(this.tables) }));
 			renameSync(tmp, this.file);
 		} catch {
@@ -306,7 +307,8 @@ export async function mergeTouchSidecar(sessionFile: string | undefined, fresh: 
 	if (!Array.isArray(fresh) || fresh.length === 0) return;
 	try {
 		const merged = unionTouchLists(readTouchSidecar(sessionFile) ?? [], fresh).slice(0, SIDECAR_MAX_ENTRIES);
-		const tmp = `${sidecarPath(sessionFile)}.tmp`;
+		// tmp 带进程唯一后缀（同 client-state.ts 惯例）：避免并发进程互踩
+		const tmp = `${sidecarPath(sessionFile)}.${process.pid}.tmp`;
 		writeFileSync(tmp, JSON.stringify({ version: 1, updatedAt: Date.now(), files: merged }));
 		renameSync(tmp, sidecarPath(sessionFile));
 	} catch {

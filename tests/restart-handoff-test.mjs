@@ -17,7 +17,7 @@ const isolated = isolatedTestEnv("restart-handoff-test");
 process.once("exit", isolated.cleanup);
 const REPO_ROOT = fileURLToPath(new globalThis.URL("../", import.meta.url));
 
-const PORT = 18998;
+const PORT = Number(process.argv[2] || 18998);
 const PROJ = REPO_ROOT;
 
 let failures = 0;

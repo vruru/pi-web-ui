@@ -18,8 +18,12 @@ const GIT = "git";
 function git(...args) {
 	return execFileSync(GIT, args, { encoding: "utf8" });
 }
+// The CLI picks zh/en from LC_ALL/LC_MESSAGES/LANG; the assertions below match the Chinese output.
+const { LC_ALL: _lcAll, LC_MESSAGES: _lcMessages, ...baseEnv } = process.env;
+const ZH_ENV = { ...baseEnv, LANG: "zh_CN.UTF-8" };
+
 function cli(args) {
-	const r = spawnSync(process.execPath, [BIN, ...args], { encoding: "utf8" });
+	const r = spawnSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: ZH_ENV });
 	if (r.status !== 0) throw new Error(`CLI 失败(${args[0]}): ${r.stderr || r.stdout}`);
 	return r.stdout;
 }
@@ -40,7 +44,7 @@ function main() {
 		git("init", "-q", upstream);
 		git("-C", upstream, "config", "user.email", "t@t");
 		git("-C", upstream, "config", "user.name", "t");
-		writeFileSync(join(upstream, "manifest.json"), JSON.stringify({ id: "upd", name: "更新演示", version: "v1" }));
+		writeFileSync(join(upstream, "manifest.json"), JSON.stringify({ id: "upd", name: "更新演示", version: "1.0.0" }));
 		writeFileSync(join(upstream, "index.mjs"), "// v1\n");
 		git("-C", upstream, "add", "-A");
 		git("-C", upstream, "commit", "-qm", "v1");
@@ -52,8 +56,13 @@ function main() {
 		if (!/^[0-9a-f]{12}$/.test(sha1)) throw new Error(`.pi-git-sha 缺失: ${sha1}`);
 		console.log(`✓ install 记录 sha=${sha1}`);
 
-		// —— 3. 远端加 v2 → check-updates 报可更新 ——
-		writeFileSync(join(upstream, "manifest.json"), JSON.stringify({ id: "upd", name: "更新演示", version: "v2" }));
+		// —— 对照：远端没有新提交时不报更新（只有确认过的新内容才提示）——
+		const chk0 = cli(["plugins", "--check-updates", "--data-dir", dataDir]);
+		if (!/已是最新/.test(chk0) || /可更新/.test(chk0)) throw new Error("无新提交却报可更新:\n" + chk0);
+		console.log("✓ 无新提交 → 已是最新");
+
+		// —— 3. 远端加 v2（版本号 1.0.0 → 1.1.0 + 新提交）→ check-updates 报可更新 ——
+		writeFileSync(join(upstream, "manifest.json"), JSON.stringify({ id: "upd", name: "更新演示", version: "1.1.0" }));
 		writeFileSync(join(upstream, "index.mjs"), "// v2\n");
 		git("-C", upstream, "add", "-A");
 		git("-C", upstream, "commit", "-qm", "v2");
@@ -63,7 +72,7 @@ function main() {
 
 		// —— 4. install --force 更新 → 备份生成 + sha 刷新 → 报最新 ——
 		const upd = cli(["install", upstream, "--name", "upd", "--force", "--data-dir", dataDir]);
-		if (!/v2/.test(upd)) throw new Error("更新失败: " + upd);
+		if (!/1\.1\.0/.test(upd)) throw new Error("更新失败: " + upd);
 		const backups = readdirSync(join(dataDir, "plugin-backups"));
 		if (backups.length !== 1 || !backups[0].startsWith("upd-")) throw new Error("备份缺失: " + backups.join(","));
 		if (readFileSync(join(dataDir, "plugins", "upd", "index.mjs"), "utf8") !== "// v2\n")

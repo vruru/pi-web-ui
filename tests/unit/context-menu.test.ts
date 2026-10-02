@@ -306,6 +306,11 @@ describe("buildWhenContext（按槽位 + target 现场构造）", () => {
 describe("contextMenuGlyph", () => {
 	it("宿主词表名 → 字形；插件 emoji 原样；认不出的英文名不画", () => {
 		expect(contextMenuGlyph("folder")).toBe("📁");
+		expect(contextMenuGlyph("markdown")).toBe("📄");
+		expect(contextMenuGlyph("image")).toBe("🖼");
+		expect(contextMenuGlyph("branch")).toBe("⚚");
+		expect(contextMenuGlyph("undo")).toBe("↺");
+		expect(contextMenuGlyph("volume")).toBe("🔊");
 		expect(contextMenuGlyph("X")).toBe("✕");
 		expect(contextMenuGlyph("🗑")).toBe("🗑");
 		expect(contextMenuGlyph("folder-open")).toBe("");

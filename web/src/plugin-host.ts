@@ -405,10 +405,12 @@ export interface PluginHostDeps {
 	bridgeWaitMs?: number;
 	/** 用户「最近项目」列表：已在其中的目录视为用户已知，开会话时不再弹授权确认。 */
 	listProjects?: () => string[];
-	/** 本浏览器已授权给插件的目录（localStorage 持久化）。 */
-	grantedPaths?: () => string[];
-	/** 记录一次目录授权。 */
-	grantPath?: (path: string) => void;
+	/** 本浏览器已授权给插件的目录（localStorage 持久化，按 pluginId 分键存储）。
+	 *  pluginId = 调用方归因（triggerPluginUiAction 派发期内挂上的）；拿不到时
+	 *  宿主回退到旧的全局键。 */
+	grantedPaths?: (pluginId?: string) => string[];
+	/** 记录一次目录授权（写入哪个键同样跟随 pluginId，缺省写旧全局键）。 */
+	grantPath?: (path: string, pluginId?: string) => void;
 	/** 请用户确认「插件想在这个目录开会话」（宿主渲染弹窗）。缺省 = 拒绝。 */
 	confirm?: (opts: PluginHostConfirmOptions) => Promise<boolean>;
 	/** 插件确认框的宿主实现（dialogs.confirm 用；缺省走 window.confirm 回退）。
@@ -446,6 +448,21 @@ async function waitForPageBridge(timeoutMs = 3000): Promise<PageBridgeLike | nul
 		await sleep(100);
 	}
 }
+
+/**
+ * startChat 的模块级串行闸门（对照 plugin-loader.ts issue #268 的做法）：startChat
+ * 是 fire-and-forget，「set_cwd/new_chat → waitFor → prompt」整段在后台跑；若 A 的
+ * waitFor 等待期间 B 也 startChat，B 的 new_chat 会先改掉对话 id，A 醒来后把 prompt
+ * 发进 B 刚开的新对话（串话）。前一个序列落定（prompt 已发出）之前，下一个只排队。
+ * 闸门空闲时保持同步启动：set_cwd/new_chat 在受理的同一 tick 发出 —— 调用方提示的
+ * 及时性与 plugin-host.test.ts 的同步断言都依赖这个时序，不能用纯 promise 链把
+ * 首拍也推迟到微任务之后。
+ */
+let startChatGate: Promise<void> = Promise.resolve();
+// 已受理但尚未落定的序列数。busy 布尔不够用：排队分支若不置 busy，第三个并发会
+// 在排队者运行期间误判空闲插队；若置了，上一个任务的落定回调又会把标志清掉。
+// 计数器由每个序列自己的落定回调递减，谁受理谁持有，中间落定不会放跑排队者。
+let startChatPending = 0;
 
 export function createPluginHostApi(deps: PluginHostDeps): PluginHostApi {
 	const pollMs = Math.max(1, Number(deps.pollMs ?? 100));
@@ -520,7 +537,26 @@ export function createPluginHostApi(deps: PluginHostDeps): PluginHostApi {
 			const model = String(opts?.model ?? "").trim();
 			// 非法模型直接拒绝：不发任何消息，不建对话、不动旧对话的模型。
 			if (model && !isKnownModel(model)) return false;
-			void run(prompt, opts ?? { prompt }).catch(() => {
+			const exec = (): Promise<void> => run(prompt, opts ?? { prompt });
+			let task: Promise<void>;
+			if (startChatPending > 0) {
+				// 已有序列在跑或排队：链到队尾（含 prompt 发出）再启动，防 new_chat 插队串话。
+				task = startChatGate.then(exec);
+			} else {
+				// 闸门空闲：同步启动，保住「受理即发 set_cwd/new_chat」的既有时序。
+				task = exec();
+			}
+			startChatPending++;
+			// 闸门自身不因一次失败卡死（失败也不抛到调用方，fire-and-forget）。
+			startChatGate = task.then(
+				() => {
+					startChatPending--;
+				},
+				() => {
+					startChatPending--;
+				},
+			);
+			void task.catch(() => {
 				/* 发送失败已有各自的上层提示，这里不抛到调用方 */
 			});
 			return true;
@@ -556,6 +592,9 @@ export function createPluginHostApi(deps: PluginHostDeps): PluginHostApi {
 			return true;
 		},
 		async openSession(opts) {
+			// 调用方归因快照：入口先抓（之后的 confirm 是异步的，模块级作用域可能已被
+			// 并发派发覆盖），grantedPaths/grantPath 全程用这份快照归因到插件名下的键。
+			const caller = pluginApiCaller;
 			const folders = Array.isArray(opts?.folders)
 				? opts.folders.filter((f): f is string => typeof f === "string" && f.trim().length > 0).map((f) => f.trim())
 				: [];
@@ -574,12 +613,12 @@ export function createPluginHostApi(deps: PluginHostDeps): PluginHostApi {
 			// 已授权过的（localStorage）= 以前确认过；其余都要用户当场点头。
 			// **额外根也要过这一关** —— 成了工作区根就意味着插件阅读它们不必再授权，
 			// 不能让插件拿 roots 当侧门。
-			const known = new Set([...(deps.listProjects?.() ?? []), ...(deps.grantedPaths?.() ?? [])]);
+			const known = new Set([...(deps.listProjects?.() ?? []), ...(deps.grantedPaths?.(caller) ?? [])]);
 			for (const p of [target, ...roots]) {
 				if (known.has(p)) continue;
 				const approved = deps.confirm ? await deps.confirm({ path: p }).catch(() => false) : false;
 				if (!approved) return { ok: false, error: `用户拒绝了该目录的访问：${p}` };
-				deps.grantPath?.(p);
+				deps.grantPath?.(p, caller);
 			}
 			if (deps.getCwd() !== target) {
 				deps.send({ type: "set_cwd", path: target });
@@ -610,6 +649,8 @@ export function createPluginHostApi(deps: PluginHostDeps): PluginHostApi {
 		sessions: {
 			list: () => deps.listSessions(),
 			async open(id) {
+				// 调用方归因快照（同 openSession）：跨项目的目录授权记到插件名下的键。
+				const caller = pluginApiCaller;
 				const targetId = String(id ?? "").trim();
 				if (!targetId) return { ok: false, error: "sessions.open 需要一个会话 id（先调 list）" };
 				if (!deps.isReady()) return { ok: false, error: "尚未连接到服务器（还没有快照）" };
@@ -618,11 +659,11 @@ export function createPluginHostApi(deps: PluginHostDeps): PluginHostApi {
 				// 跨项目的历史会话：先切工作目录（服务端的 session 列表是按 cwd 扫的），
 				// 否则 switch_session 找不到目标文件。跑着的对话自带 cwd，切它就会连带切项目。
 				if (info.cwd && info.cwd !== deps.getCwd()) {
-					const known = new Set([...(deps.listProjects?.() ?? []), ...(deps.grantedPaths?.() ?? [])]);
+					const known = new Set([...(deps.listProjects?.() ?? []), ...(deps.grantedPaths?.(caller) ?? [])]);
 					if (!known.has(info.cwd)) {
 						const approved = deps.confirm ? await deps.confirm({ path: info.cwd }).catch(() => false) : false;
 						if (!approved) return { ok: false, error: `用户拒绝了该目录的访问：${info.cwd}` };
-						deps.grantPath?.(info.cwd);
+						deps.grantPath?.(info.cwd, caller);
 					}
 					deps.send({ type: "set_cwd", path: info.cwd });
 					const arrived = await waitFor(() => deps.getCwd() === info.cwd);
@@ -873,6 +914,24 @@ export async function withPluginScopeAsync<T>(pluginId: string | null, fn: () =>
 	}
 }
 
+/** 当前正在被派发 UI 动作的插件 id：openSession/sessions.open 的目录授权按它把
+ *  「用户确认过」记到该插件名下（localStorage 按插件分键），而不是所有插件共用。
+ *  派发是同步的（fire 循环），方法入口先取快照，之后的 await 期间继续用快照 ——
+ *  宿主桥是全局单例，除此之外架构上归因不了调用方（定时器/自挂监听里调 host 的
+ *  插件拿不到归因，宿主回退旧全局键，见 App.tsx 的授权键注释）。 */
+let pluginApiCaller: string | undefined = undefined;
+
+/** 在指定插件的调用方作用域里同步执行 fn（异常原样抛出）。 */
+function withPluginApiCaller<T>(pluginId: string, fn: () => T): T {
+	const prev = pluginApiCaller;
+	pluginApiCaller = pluginId;
+	try {
+		return fn();
+	} finally {
+		pluginApiCaller = prev;
+	}
+}
+
 /** 注册一个顶栏动作处理器（pluginId 为 null = 全局注册）。返回取消注册函数。 */
 function registerPluginTopbarAction(
 	pluginId: string | null,
@@ -917,7 +976,9 @@ export async function triggerPluginUiAction(
 		// eslint-disable-next-line unicorn/no-useless-spread -- snapshot：handler 可能在回调里注销自己
 		for (const h of [...set]) {
 			try {
-				h(itemId, opts?.value, opts?.target);
+				// 派发期间挂上调用方作用域：handler 里同步发起的 openSession/sessions.open
+				// 能归因到这个插件，目录授权记到它名下的键（见 pluginApiCaller 注释）。
+				withPluginApiCaller(pluginId, () => h(itemId, opts?.value, opts?.target));
 			} catch (err) {
 				console.error(`[plugin:${pluginId}] 顶栏动作 ${action} 抛错:`, err);
 			}

@@ -19,7 +19,7 @@
  * resolvePathForDirCheck）；回传的 `path` 是线形绝对路径（"C:/…" / "/…"），
  * 前端拿它直接打 /api/file、file_reveal、file_open_default，不受会话 cwd 影响。
  *
- * 双语约定（issue #91）：definition 走 bilingual(en, zh) 内联双语；per-call
+ * 文案约定：工具 definition（description/promptSnippet/promptGuidelines）为纯英文；per-call
  * 结果文本走 pick(lang, zh, en, key, vars)，缺表回落英文内联。
  *
  * DSH 引擎无 customTool 注册面（工具来自 shipped preset），本工具只服务 pi 引擎。
@@ -29,7 +29,7 @@ import { open, stat } from "node:fs/promises";
 import { basename, extname, sep } from "node:path";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { bilingual, pick, type ServerLang } from "./i18n.js";
+import { pick, type ServerLang } from "./i18n.js";
 import { resolvePathForDirCheck } from "./read-tool.js";
 import { decodeText, isAudioFile, looksLikeText, previewKind } from "./text-sniff.js";
 import { PRESENT_FILES_TOOL_NAME } from "./tool-manager.js";
@@ -312,29 +312,15 @@ export function makePresentFilesTool(fallbackCwd: string, options: PresentFilesT
 	return defineTool({
 		name: PRESENT_FILES_TOOL_NAME,
 		label: "Show files to the user",
-		description: bilingual(
-			"Show files to the user as preview cards in the chat. Each item renders as a card: images/videos/audio are displayed inline, text/markdown/HTML can be opened in the preview dialog, and every card carries buttons to open the file locally, reveal it in the file manager, download it or copy its path. " +
-				"Use it whenever the user should LOOK at an artifact you produced or changed: a screenshot, chart, diagram, generated video/audio, report, log, build output. " +
-				"Give workspace-relative paths (or absolute ones); up to 12 items per call; `title` and `note` are shown above the cards, `caption` under the file name, and `focus: true` makes the client open that item in the preview dialog right away. " +
-				"Do not use it for files you merely read while reasoning, and do not repeat the file contents in your reply afterwards.",
-			"把文件作为预览卡片展示给用户。每个条目渲染成一张卡片：图片/视频/音频直接在对话里显示，文本/markdown/HTML 可一键打开预览弹窗，每张卡片都带「本地打开 / 在文件管理器中显示 / 下载 / 复制路径」按钮。" +
-				"适合用户**应该看一眼**的产物：截图、图表、示意图、生成的视频音频、报告、日志、构建产物。" +
-				"路径写工作区相对路径（或绝对路径）；单次最多 12 条；`title`/`note` 显示在卡片上方，`caption` 显示在文件名旁，`focus: true` 让客户端立刻用预览弹窗打开该条目。" +
-				"只是自己读文件来推理时不要调用它，调用后也不要在回复里把文件内容再贴一遍。",
-		),
-		promptSnippet: bilingual(
-			"show images/videos/text files to the user as preview cards",
-			"把图片/视频/文本文件作为预览卡片展示给用户",
-		),
+		description:
+			"Show files to the user as preview cards in the chat: images/videos/audio inline, text/markdown/HTML in a preview dialog; each card can open locally, reveal in file manager, download, or copy path. " +
+			"Use whenever the user should LOOK at an artifact you produced or changed (screenshot, chart, diagram, video/audio, report, log, build output). " +
+			"Give workspace-relative paths (max 12 items); `title`/`note` show above the cards, `caption` next to the file name, `focus: true` opens that item in the preview dialog immediately. " +
+			"Do not use for files you merely read while reasoning, and do not repeat file contents in your reply.",
+		promptSnippet: "show images/videos/text files to the user as preview cards",
 		promptGuidelines: [
-			bilingual(
-				"After producing something visual or user-facing (screenshot, chart, video, report, log, build output), call present_files so the user can actually see it instead of only printing the path",
-				"产出可视化或面向用户的文件后（截图、图表、视频、报告、日志、构建产物），调 present_files 让用户真的看到，而不是只打印一行路径",
-			),
-			bilingual(
-				"Do not call present_files for ordinary source edits the user did not ask to see, and never call it twice for the same file in one turn",
-				"用户没要求看的普通源码改动不要用 present_files；同一轮里不要为同一个文件调两次",
-			),
+			"After producing something visual or user-facing (screenshot, chart, video, report, log, build output), call present_files so the user can actually see it instead of only printing the path",
+			"Do not call present_files for ordinary source edits the user did not ask to see, and never call it twice for the same file in one turn",
 		],
 		parameters: Type.Object({
 			title: Type.Optional(
